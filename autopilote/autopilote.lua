@@ -905,7 +905,11 @@ end
 local AXES_SORTIE = { "avance", "vertical", "lacet", "lateral" }
 
 local function creerSorties(config, journal, commandesInjectees)
-  local s = { derniere = { avance = 0, vertical = 0, lacet = 0, lateral = 0 } }
+  local s = {
+    derniere = { avance = 0, vertical = 0, lacet = 0, lateral = 0 },
+    niveaux  = {},   -- dernier niveau redstone ecrit, par cote : outil de cablage
+  }
+  journal = journal or journalMuet()
 
   if type(commandesInjectees) == "table" and type(commandesInjectees.appliquer) == "function" then
     -- Pilote fourni par le programme appelant : on lui delegue tout.
@@ -929,8 +933,10 @@ local function creerSorties(config, journal, commandesInjectees)
   s.type = reglages.type or "redstone"
 
   local function sortieRedstone(cote, niveau)
-    if not (redstone and cote) then return end
+    if not cote then return end
     local valeur = math.floor(borner(niveau, 0, 15) + 0.5)
+    s.niveaux[cote] = valeur
+    if not redstone then return end
     if redstone.setAnalogOutput then
       redstone.setAnalogOutput(cote, valeur)
     else
@@ -942,6 +948,9 @@ local function creerSorties(config, journal, commandesInjectees)
     local reglageAxe = (reglages.axes or {})[nomAxe] or { mode = "aucun" }
     local mode = reglageAxe.mode or "aucun"
     valeur = borner(valeur or 0, -1, 1)
+    -- Cablage inverse : un axe branche a l'envers se corrige ici, sans rien
+    -- redemonter sur le vehicule.
+    if reglageAxe.inverse then valeur = -valeur end
 
     if mode == "aucun" then
       return
@@ -2642,6 +2651,13 @@ function autopilote.verifierConfiguration(config)
   local ok, err = pcall(validerConfiguration, config)
   if ok then return true end
   return false, tostring(err)
+end
+
+--- Couche de sorties moteur seule, sans autopilote ni GPS.
+-- Utilisee par l'outil de cablage : il pilote le vehicule a la main en
+-- passant par le meme code que le vol, donc ce qu'il verifie est vrai.
+function autopilote.creerSorties(config, journal, commandes)
+  return creerSorties(config, journal, commandes)
 end
 
 autopilote.CHEMIN_CONFIG_DEFAUT  = CHEMIN_CONFIG_DEFAUT

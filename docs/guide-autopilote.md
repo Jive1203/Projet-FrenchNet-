@@ -61,6 +61,7 @@ wget <dépôt>/autopilote/autopilote.lua       autopilote/autopilote.lua
 wget <dépôt>/autopilote/config_vehicule.lua  autopilote/config_vehicule.lua
 wget <dépôt>/autopilote/ravitaillement.lua   autopilote/ravitaillement.lua
 wget <dépôt>/autopilote/interface.lua        autopilote/interface.lua
+wget <dépôt>/autopilote/cablage.lua          autopilote/cablage.lua
 wget <dépôt>/autopilote/startup.lua          startup.lua
 interface                                    -- régler le véhicule à l'écran
 reboot
@@ -72,6 +73,7 @@ reboot
 | `autopilote/config_vehicule.lua` | **Un par véhicule.** Toutes les valeurs de vol. |
 | `autopilote/ravitaillement.lua` | Constante de réseau **verrouillée**, identique partout. |
 | `autopilote/interface.lua` | Interface visuelle : configuration + réglage en vol. |
+| `autopilote/cablage.lua` | Vérification du câblage et pilotage manuel. |
 | `autopilote/startup.lua` | Lanceur automatique (à la racine : `/startup.lua`). |
 | `autopilote/mission.lua` | *Optionnel* : le programme de mission du véhicule. |
 | `autopilote/exemple_mission.lua` | Trois missions types, à copier en `mission.lua`. |
@@ -330,7 +332,7 @@ Ordre de grandeur : la commande vaut 1 à pleine poussée. Si 0,2 de commande do
 - **Sans capteur de cap**, un véhicule immobile ne connaît pas son orientation. Le module le gère (lacet neutralisé, reptation d'acquisition), mais le maintien de position reste plus grossier qu'avec un capteur : comptez le double de tolérance. Pour du vol de précision — dépôt serré, appontage — installez un lecteur de cap et renseignez `cap.source = "peripherique"`.
 - **La propulsion latérale exige un capteur de cap** (voir §4).
 - Le module ne connaît **pas les obstacles**. L'altitude de croisière est une sécurité, pas un évitement : choisissez-la au-dessus du relief de la zone d'opération.
-- Les commandes sont normalisées dans `[−1, +1]` ; c'est le câblage décrit dans `sorties` qui les traduit en redstone ou en appels de périphérique. Un programme peut aussi injecter son propre pilote de sorties (`options.commandes`).
+- Les commandes sont normalisées dans `[−1, +1]` ; c'est le câblage décrit dans `sorties` qui les traduit en redstone ou en appels de périphérique. Un axe monté à l'envers se corrige par `inverse = true`, sans rien redémonter. Un programme peut aussi injecter son propre pilote de sorties (`options.commandes`). Voir le **[guide de câblage](guide-cablage.md)**.
 
 ---
 
@@ -342,4 +344,4 @@ Le dépôt contient un banc d'essai en **boucle fermée** (`tests/banc_vol.lua`)
 lua5.4 tests/test_autopilote.lua
 ```
 
-151 vérifications : PID (dérivée sur la mesure, anti-emballement, limitation de pente), angles et décalages, filtres, zone morte, détecteur d'instabilité, configuration refusée, vol nominal et décélération en cascade, itinéraire et altitude de croisière, dépôt, durée d'arrivée continue, maintien et rattrapage de dérive, perte GPS, repli automatique et forçage, sorties redstone, sauvegarde de configuration, reprise après plantage, survie à une erreur de cycle, pas de temps variable, vol avec capteur de cap, interface de configuration et menu de réglage en vol.
+161 vérifications : PID (dérivée sur la mesure, anti-emballement, limitation de pente), angles et décalages, filtres, zone morte, détecteur d'instabilité, configuration refusée, vol nominal et décélération en cascade, itinéraire et altitude de croisière, dépôt, durée d'arrivée continue, maintien et rattrapage de dérive, perte GPS, repli automatique et forçage, sorties redstone, sauvegarde de configuration, reprise après plantage, survie à une erreur de cycle, pas de temps variable, vol avec capteur de cap, interface de configuration, menu de réglage en vol, outil de câblage et inversion d'axe.

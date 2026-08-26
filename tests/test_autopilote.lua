@@ -584,7 +584,7 @@ do
 
   -- Neutralisation a l'arret : l'avance analogique revient a son neutre.
   ap.arreter("essai")
-  verifier("arret : avance ramenee au neutre configure", etat.redstone.front == 7,
+  verifier("arret : avance ramenee au neutre configure", etat.redstone.front == 0,
     tostring(etat.redstone.front))
   verifier("arret : sorties bipolaires eteintes",
     (etat.redstone.top or 0) == 0 and (etat.redstone.bottom or 0) == 0)
@@ -892,6 +892,93 @@ do
   -- La configuration exposee reste utilisable apres tout cela.
   verifier("l'autopilote reste operationnel apres les refus",
     ap.etat().mode == "TRANSIT", ap.etat().mode)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 21 : outil de cablage et pilotage manuel ==")
+do
+  local banc, env, etat, autopilote = monter({ budget = 300, sansInstance = true })
+
+  -- Marche avant : sortie analogique 'front', neutre 7, amplitude 7.
+  banc.taper("up")                       -- avance a 50 % par defaut
+  banc.taper("q")
+  banc.charger(SRC .. "/cablage.lua")
+  local ecran = banc.ecranTexte()
+  verifier("l'outil affiche le cablage de chaque axe",
+    ecran:find("AVANCE", 1, true) ~= nil and ecran:find("LACET", 1, true) ~= nil
+    and ecran:find("VERTICAL", 1, true) ~= nil and ecran:find("LATERAL", 1, true) ~= nil)
+  verifier("l'outil affiche les niveaux redstone reellement emis",
+    ecran:find("front=", 1, true) ~= nil)
+  verifier("commandes neutralisees a la sortie",
+    etat.redstone.front == 0 and (etat.redstone.top or 0) == 0,
+    string.format("front=%s top=%s", tostring(etat.redstone.front), tostring(etat.redstone.top)))
+
+  -- Verification des niveaux pendant l'appui, avant relachement.
+  local banc2, env2, etat2, autopilote2 = monter({ budget = 300, sansInstance = true })
+  banc2.taper("up")
+  banc2.taper("tab")                     -- provoque un redessin, appui maintenu
+  banc2.taper("q")
+  banc2.charger(SRC .. "/cablage.lua")
+  local ecran2 = banc2.ecranTexte()
+  verifier("marche avant : le niveau analogique suit la puissance demandee",
+    ecran2:find("front=8", 1, true) ~= nil or ecran2:find("front=7", 1, true) ~= nil,
+    "niveau attendu 0 + 15*0.5")
+
+  -- Montee, puis inversion de l'axe vertical, puis enregistrement.
+  local banc3, env3, etat3, autopilote3 = monter({ budget = 300, sansInstance = true })
+  banc3.taper("pageUp")
+  banc3.taper("tab")
+  banc3.taper("q")
+  banc3.charger(SRC .. "/cablage.lua")
+  verifier("montee : cote positif alimente, cote negatif eteint",
+    banc3.ecranTexte():find("top=8", 1, true) ~= nil
+    and banc3.ecranTexte():find("bottom=0", 1, true) ~= nil,
+    "0.5 * 15 = 8")
+
+  local banc4, env4, etat4, autopilote4 = monter({ budget = 300, sansInstance = true })
+  banc4.taper("tab")                     -- AVANCE -> LACET
+  banc4.taper("tab")                     -- LACET  -> VERTICAL
+  banc4.taper("i")                       -- inverser l'axe vertical
+  banc4.taper("pageUp")                  -- monter... a l'envers
+  banc4.taper("s")                       -- enregistrer
+  banc4.taper("q")
+  banc4.charger(SRC .. "/cablage.lua")
+  verifier("axe inverse : la montee sort par le cote negatif",
+    banc4.ecranTexte():find("bottom=8", 1, true) ~= nil,
+    "l'inversion doit permuter les deux cotes")
+  local relue = autopilote4.chargerConfiguration("/autopilote/config_vehicule.lua")
+  verifier("inversion enregistree dans la configuration du vehicule",
+    relue.sorties.axes.vertical.inverse == true)
+
+  -- L'inversion enregistree doit s'appliquer aussi en vol, pas seulement a la main.
+  local banc5, env5, etat5, autopilote5 = monter({
+    budget = 200, sansPilote = true,
+    config = { ["vertical = { mode = \"bipolaire\", cotePositif = \"top\", coteNegatif = \"bottom\","] =
+      "vertical = { mode = \"bipolaire\", inverse = true, cotePositif = \"top\", coteNegatif = \"bottom\"," },
+  })
+  local ap5 = autopilote5.nouveau({ config = "/autopilote/config_vehicule.lua" })
+  ap5.initialiser()
+  ap5.pas(); env5.sleep(0.4); ap5.pas()
+  ap5.allerA({ x = 300, y = 175, z = 100 })
+  for _ = 1, 6 do ap5.pas() env5.sleep(0.4) end
+  verifier("l'inversion s'applique aussi au vol automatique",
+    (etat5.redstone.bottom or 0) > 0 and (etat5.redstone.top or 0) == 0,
+    string.format("top=%s bottom=%s", tostring(etat5.redstone.top),
+      tostring(etat5.redstone.bottom)))
+
+  -- Test guide : la reponse "oui, c'etait a l'envers" inscrit l'inversion.
+  local banc6, env6, etat6, autopilote6 = monter({ budget = 300, sansInstance = true })
+  banc6.taper("t")                       -- test guide de l'axe AVANCE
+  banc6.taper("o")                       -- "le vehicule a fait l'inverse"
+  banc6.taper("s")
+  banc6.taper("q")
+  banc6.charger(SRC .. "/cablage.lua")
+  local relue6 = autopilote6.chargerConfiguration("/autopilote/config_vehicule.lua")
+  verifier("test guide : inversion detectee et enregistree",
+    relue6.sorties.axes.avance.inverse == true)
+  verifier("test guide : les deux sens sont annonces a l'operateur",
+    banc6.ecranTexte():find("avance (nez en avant)", 1, true) ~= nil
+    and banc6.ecranTexte():find("recule", 1, true) ~= nil)
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))

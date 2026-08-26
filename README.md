@@ -6,6 +6,7 @@ Systèmes embarqués du serveur **AERONAUTICS WARFARE** (Create Aeronautics, Neo
 |---|---|---|
 | **Balises GPS** | Constellation de balises fixes, hôtes GPS pour tout le serveur | [guide](docs/guide-complet.md) |
 | **Autopilote** | Bibliothèque de pilotage autonome pour véhicules aériens | [guide](docs/guide-autopilote.md) |
+| **Câblage** | Brancher un ordinateur sur un véhicule et le faire bouger | [guide](docs/guide-cablage.md) |
 
 ---
 
@@ -58,10 +59,14 @@ wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopil
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/config_vehicule.lua autopilote/config_vehicule.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/ravitaillement.lua autopilote/ravitaillement.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/interface.lua autopilote/interface.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/cablage.lua autopilote/cablage.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/startup.lua startup.lua
 interface                                   -- réglage du véhicule à l'écran
+cablage                                     -- vérification du câblage, pilotage manuel
 reboot
 ```
+
+**Premier montage ?** Commencez par le [guide de câblage](docs/guide-cablage.md) : il explique face par face comment brancher l'ordinateur pour avancer, pivoter, monter et descendre, et comment vérifier chaque sens avec l'outil `cablage`.
 
 ### Utilisation
 
@@ -97,6 +102,7 @@ end)
 
 ```
 interface            -- configuration du véhicule (au sol)
+cablage              -- vérification du câblage et pilotage manuel au clavier
 interface vol        -- réglage des gains PID en vol, avec courbes temps réel
 interface journal    -- consultation du journal
 ```
@@ -113,7 +119,7 @@ Bancs d'essai hors du jeu, sur un interpréteur Lua 5.4 :
 
 ```
 lua5.4 tests/test_balise.lua        -- 49 vérifications
-lua5.4 tests/test_autopilote.lua    -- 151 vérifications, dont un vol simulé en boucle fermée
+lua5.4 tests/test_autopilote.lua    -- 161 vérifications, dont un vol simulé en boucle fermée
 ```
 
 ## Fichiers
@@ -128,6 +134,7 @@ lua5.4 tests/test_autopilote.lua    -- 151 vérifications, dont un vol simulé e
 | `autopilote/config_vehicule.lua` | Config (à éditer par véhicule) |
 | `autopilote/ravitaillement.lua` | Station de ravitaillement (verrouillée) |
 | `autopilote/interface.lua` | Interface de réglage et menu de vol |
+| `autopilote/cablage.lua` | Vérification du câblage et pilotage manuel |
 | `autopilote/startup.lua` | Démarrage automatique du véhicule |
 | `autopilote/exemple_mission.lua` | Trois missions types |
 | `tests/banc_vol.lua` | Mini-CraftOS + simulateur de vol |

@@ -221,10 +221,18 @@ return {
   --   "peripherique": appel d'une methode d'un peripherique de commande.
   -- Un programme appelant peut aussi injecter son propre pilote de sorties.
 
+  -- Ajouter inverse = true sur un axe branche a l'envers : la correction se
+  -- fait ici, sans rien redemonter sur le vehicule. L'outil 'cablage' le
+  -- detecte et l'ecrit tout seul.
   sorties = {
     type = "redstone",
     axes = {
-      avance   = { mode = "analogique", cote = "front", neutre = 7, amplitude = 7 },
+      -- Vehicule SANS marche arriere : la commande d'avance va de 0 a 1, donc
+      -- neutre = 0 et amplitude = 15 pour exploiter toute la plage redstone
+      -- (0 = moteur arrete, 15 = pleine poussee).
+      -- Avec marche arriere, prendre neutre = 7 et amplitude = 7 : le repos
+      -- tombe alors au milieu de la plage.
+      avance   = { mode = "analogique", cote = "front", neutre = 0, amplitude = 15 },
       vertical = { mode = "bipolaire", cotePositif = "top", coteNegatif = "bottom",
                    amplitude = 15, seuil = 0.08 },
       lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",

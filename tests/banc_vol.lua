@@ -313,7 +313,9 @@ function M.creer(options)
   local keysMock = {}
   do
     local noms = { "up", "down", "left", "right", "enter", "numPadEnter", "tab",
-      "backspace", "delete", "home", "pageUp", "pageDown", "f2", "f3", "f4", "f5" }
+      "backspace", "delete", "home", "pageUp", "pageDown", "f2", "f3", "f4", "f5",
+      "space", "one", "two", "three", "four", "five", "six", "seven", "eight",
+      "nine", "zero" }
     local code = 200
     for _, nomTouche in ipairs(noms) do keysMock[nomTouche] = code code = code + 1 end
     keysMock["end"] = code code = code + 1
@@ -400,6 +402,11 @@ end
 --- Empile un evenement clavier a destination de l'interface.
 function M.taper(touche)
   M.env.os.queueEvent("key", M.env.keys[touche] or touche)
+end
+
+--- Empile un relachement de touche (pilotage manuel).
+function M.relacher(touche)
+  M.env.os.queueEvent("key_up", M.env.keys[touche] or touche)
 end
 
 --- Empile une suite de caracteres (saisie de texte).
