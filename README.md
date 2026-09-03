@@ -7,6 +7,24 @@ Systèmes embarqués du serveur **AERONAUTICS WARFARE** (Create Aeronautics, Neo
 | **Balises GPS** | Constellation de balises fixes, hôtes GPS pour tout le serveur | [guide](docs/guide-complet.md) |
 | **Autopilote** | Bibliothèque de pilotage autonome pour véhicules aériens | [guide](docs/guide-autopilote.md) |
 | **Câblage** | Brancher un ordinateur sur un véhicule et le faire bouger | [guide](docs/guide-cablage.md) |
+| **Installation** | Poser les fichiers sur les ordinateurs, et dépannage | [guide](docs/guide-installation.md) |
+
+---
+
+> ⚠️ **`wget` renvoie 404 ?** Le dépôt est **privé**, et CC: Tweaked ne peut pas s'authentifier sur GitHub : aucune adresse `raw.githubusercontent.com` ne répondra. Rendez le dépôt public, ou passez les fichiers par la sauvegarde du monde. Marche à suivre complète dans le **[guide d'installation](docs/guide-installation.md)**.
+
+## Installation en une commande
+
+Dépôt public requis. Sur chaque ordinateur :
+
+```
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/installe.lua installe
+installe balise       -- balise GPS fixe
+installe vehicule     -- autopilote d'un véhicule
+installe satellite    -- ordinateur de sortie déporté
+```
+
+L'installateur crée les dossiers, vérifie chaque fichier téléchargé (une page d'erreur HTML enregistrée comme du Lua est détectée et refusée) et préserve les configurations déjà réglées.
 
 ---
 
@@ -119,7 +137,7 @@ Bancs d'essai hors du jeu, sur un interpréteur Lua 5.4 :
 
 ```
 lua5.4 tests/test_balise.lua        -- 49 vérifications
-lua5.4 tests/test_autopilote.lua    -- 161 vérifications, dont un vol simulé en boucle fermée
+lua5.4 tests/test_autopilote.lua    -- 180 vérifications, dont un vol simulé en boucle fermée
 ```
 
 ## Fichiers
@@ -138,3 +156,4 @@ lua5.4 tests/test_autopilote.lua    -- 161 vérifications, dont un vol simulé e
 | `autopilote/startup.lua` | Démarrage automatique du véhicule |
 | `autopilote/exemple_mission.lua` | Trois missions types |
 | `tests/banc_vol.lua` | Mini-CraftOS + simulateur de vol |
+| `installe.lua` | Installateur en une commande |

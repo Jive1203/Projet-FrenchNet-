@@ -981,5 +981,114 @@ do
     and banc6.ecranTexte():find("recule", 1, true) ~= nil)
 end
 
+--------------------------------------------------------------------------------
+print("\n== TEST 22 : installateur ==")
+do
+  local RACINE_INSTALL = "/tmp/banc_installateur_frenchnet"
+  local BASE = "https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/"
+    .. "claude/autopilote-lua-module-kfnu2k/"
+
+  --- Prepare un banc neuf, avec ou sans HTTP, dans un dossier vierge.
+  local function bancInstall(sousDossier, options)
+    options = options or {}
+    local racine = RACINE_INSTALL .. (sousDossier and ("/" .. sousDossier) or "")
+    os.execute("rm -rf " .. racine .. " && mkdir -p " .. racine)
+    local banc = dofile(SCR .. "/banc_vol.lua")
+    local env, etat = banc.creer({ racine = racine, budget = 100, http = options.http })
+    return banc, etat, racine
+  end
+
+  local function lire(racine, chemin)
+    local f = io.open(racine .. "/" .. chemin, "r")
+    if not f then return nil end
+    local contenu = f:read("a")
+    f:close()
+    return contenu
+  end
+
+  local function servirBalise(etat)
+    local function servir(fichier, corps)
+      etat.http[BASE .. fichier] = { code = 200, corps = corps }
+    end
+    servir("balise/balise.lua", "-- balise\nreturn true\n")
+    servir("balise/config_balise.lua", "return { identifiant = 'BAL-01' }\n")
+    servir("balise/startup.lua", "-- lanceur\n")
+    servir("balise/recepteur.lua", "-- recepteur\n")
+  end
+
+  ------------------------------------------------------------------ nominal
+  local banc, etat, racine = bancInstall("nominal")
+  servirBalise(etat)
+  banc.charger(RACINE .. "/installe.lua", "balise")
+
+  verifier("installation : programme telecharge et ecrit",
+    lire(racine, "balise/balise.lua") ~= nil)
+  verifier("installation : lanceur pose a la racine",
+    lire(racine, "startup.lua") ~= nil)
+  verifier("installation : configuration ecrite au premier passage",
+    (lire(racine, "balise/config_balise.lua") or ""):find("BAL%-01") ~= nil)
+  verifier("installation : compte rendu a l'ecran",
+    (banc.contient("Installation complete")))
+  verifier("installation : etapes suivantes indiquees",
+    (banc.contient("config_balise")))
+  verifier("installation : taille de chaque fichier affichee",
+    (banc.contient("octets")))
+
+  ------------------------------------------------- configuration preservee
+  local f = io.open(racine .. "/balise/config_balise.lua", "w")
+  f:write("return { identifiant = 'BAL-42-REGLEE' }\n")
+  f:close()
+  banc.charger(RACINE .. "/installe.lua", "balise")
+  verifier("reinstallation : configuration reglee preservee",
+    (lire(racine, "balise/config_balise.lua") or ""):find("BAL%-42%-REGLEE") ~= nil)
+  verifier("reinstallation : preservation signalee",
+    (banc.contient("configuration conservee")))
+
+  banc.charger(RACINE .. "/installe.lua", "balise", "-f")
+  verifier("option -f : configuration ecrasee sur demande explicite",
+    (lire(racine, "balise/config_balise.lua") or ""):find("BAL%-01") ~= nil)
+
+  --------------------------------------------------------- depot prive (HTML)
+  -- GitHub renvoie une page, parfois avec un code 200 : le pire des cas, car
+  -- un installateur naif l'enregistrerait comme du Lua.
+  local bancPrive, etatPrive, racinePrive = bancInstall("prive")
+  etatPrive.httpDefaut = { code = 200, corps = "<html><body>404: Not Found</body></html>" }
+  bancPrive.charger(RACINE .. "/installe.lua", "balise")
+  verifier("page HTML refusee : aucun fichier corrompu enregistre",
+    lire(racinePrive, "balise/balise.lua") == nil)
+  verifier("page HTML refusee : cause nommee",
+    (bancPrive.contient("page HTML")))
+  verifier("diagnostic depot prive affiche", (bancPrive.contient("PRIVE")))
+
+  ---------------------------------------------------------------------- 404
+  local banc404, etat404, racine404 = bancInstall("absent")
+  banc404.charger(RACINE .. "/installe.lua", "balise")
+  verifier("404 signale sans planter", (banc404.contient("404")))
+  verifier("404 : aucun fichier ecrit", lire(racine404, "balise/balise.lua") == nil)
+
+  ------------------------------------------------------------- HTTP coupe
+  local bancSansHttp = bancInstall("sanshttp", { http = false })
+  bancSansHttp.charger(RACINE .. "/installe.lua", "balise")
+  verifier("HTTP desactive : la marche a suivre est affichee",
+    (bancSansHttp.contient("enabled = true")))
+
+  ------------------------------------------------------------- Lua invalide
+  local bancCasse, etatCasse, racineCasse = bancInstall("casse")
+  etatCasse.httpDefaut = { code = 200, corps = "ceci n'est pas du lua ((((\n" }
+  bancCasse.charger(RACINE .. "/installe.lua", "balise")
+  verifier("fichier tronque refuse avant enregistrement",
+    lire(racineCasse, "balise/balise.lua") == nil)
+  verifier("fichier tronque : cause nommee", (bancCasse.contient("Lua invalide")))
+
+  ------------------------------------------------------------------- usage
+  local bancUsage = bancInstall("usage")
+  bancUsage.charger(RACINE .. "/installe.lua")
+  verifier("sans argument : usage affiche", (bancUsage.contient("Usage")))
+  local bancInconnu, etatInconnu = bancInstall("inconnu")
+  servirBalise(etatInconnu)
+  bancInconnu.charger(RACINE .. "/installe.lua", "n_importe_quoi")
+  verifier("jeu de fichiers inconnu refuse", (bancInconnu.contient("inconnu")))
+end
+
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))
 os.exit(echecs == 0 and 0 or 1)

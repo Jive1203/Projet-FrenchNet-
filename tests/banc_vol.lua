@@ -46,6 +46,14 @@ local function makeFs(racine)
     local n = f:seek("end") f:close() return n
   end
   function fs.delete(p) os.remove(reel(p)) end
+  function fs.makeDir(p) os.execute("mkdir -p '" .. reel(p) .. "'") end
+  function fs.isDir(p)
+    local f = io.open(reel(p), "r")
+    if not f then return false end
+    local _, _, code = f:read(1)
+    f:close()
+    return code == 21
+  end
   function fs.move(a, b) os.rename(reel(a), reel(b)) end
   function fs.open(p, mode)
     local f = io.open(reel(p), mode)
@@ -324,7 +332,35 @@ function M.creer(options)
     end
   end
 
+  ---------------------------------------------------------------------- http
+  -- Reponses HTTP simulees : etat.http[url] = { code = , corps = } ou une
+  -- fonction. Sans entree, la reponse par defaut s'applique.
+  etat.http = {}
+  etat.httpDefaut = nil
+  etat.httpRequetes = {}
+  local httpMock = nil
+  if options.http ~= false then
+    httpMock = {
+      checkURL = function() return true end,
+      get = function(url)
+        etat.httpRequetes[#etat.httpRequetes + 1] = url
+        local reponse = etat.http[url] or etat.httpDefaut
+        if type(reponse) == "function" then reponse = reponse(url) end
+        if not reponse then return nil, "404: Not Found" end
+        if reponse.erreur then return nil, reponse.erreur end
+        local corps = reponse.corps or ""
+        local ferme = false
+        return {
+          readAll = function() return corps end,
+          getResponseCode = function() return reponse.code or 200 end,
+          close = function() ferme = true end,
+        }
+      end,
+    }
+  end
+
   local env = shallow(_G)
+  env.http      = httpMock
   env.term      = termMock
   env.keys      = keysMock
   env.fs        = makeFs(options.racine)
@@ -384,10 +420,10 @@ function M.creer(options)
 end
 
 --- Charge un fichier Lua dans l'environnement simule.
-function M.charger(chemin)
+function M.charger(chemin, ...)
   local source = io.open(chemin, "r"):read("a")
   local morceau = assert(load(source, "@" .. chemin, "t", M.env))
-  return morceau()
+  return morceau(...)
 end
 
 function M.sorties() return M.etat.sorties end
