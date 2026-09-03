@@ -45,6 +45,11 @@ return {
   -- passage est de type "depot" ou "atterrissage".
   decalageDepot = { x = 0, y = -3, z = 0 },
 
+  -- Position de la PRISE D'AMARRAGE (docker) par rapport au CENTRE. C'est ce
+  -- point-la qui tombera sur la zone de ravitaillement lors d'un amarrage.
+  -- Absent : le decalage de depot est utilise a la place.
+  decalageAmarrage = { x = 0, y = -2, z = 0 },
+
   -- true : les decalages ci-dessus sont dans le repere du vehicule (recommande).
   decalageDansRepereVehicule = true,
 
@@ -179,6 +184,45 @@ return {
     arretDansMarges = true,
   },
 
+  ------------------------------------------------------- HAUTEUR SOL (RADAR) --
+  -- Le GPS ne donne que l'altitude ABSOLUE. Pour savoir a quelle hauteur on
+  -- vole reellement au-dessus du relief, il faut une mesure. Quatre sources :
+  --   "aucun"            : pas de mesure, l'enveloppe liee au sol est inactive
+  --   "altitudeDeclaree" : le sol est suppose plat, a l'altitude indiquee
+  --   "peripherique"     : un capteur de distance expose a CC: Tweaked
+  --   "redstone"         : un signal 0-15 proportionnel a la hauteur
+
+  sol = {
+    source           = "aucun",
+    altitudeDeclaree = 64,      -- Y du terrain (source "altitudeDeclaree")
+
+    -- Capteur de distance : la methode doit renvoyer une distance en blocs.
+    peripherique = { nom = nil, methode = "getDistance", facteur = 1, decalage = 0 },
+
+    -- Signal redstone : niveau x blocsParNiveau = hauteur. 'ordinateur'
+    -- permet de lire la mesure sur un satellite de sortie.
+    redstone = { cote = "bottom", ordinateur = nil, blocsParNiveau = 2,
+                 inverse = false, horsPortee = 0 },
+
+    hauteurMax = 64,            -- au-dela, capteur considere hors portee
+    filtre     = { constanteTemps = 0.5 },
+  },
+
+  --------------------------------------------------- ENVELOPPE DE VITESSE ----
+  -- La vitesse autorisee ne depend pas que de la distance restante : au ras du
+  -- relief, on ralentit. Sous 'hauteurMin', la descente est interdite et le
+  -- vehicule remonte. La protection est levee d'elle-meme pour un point de
+  -- pose volontaire (atterrissage, depot, amarrage).
+
+  enveloppeSol = {
+    actif                = true,
+    hauteurSecurite      = 25,   -- au-dessus : plus aucun bridage
+    hauteurMin           = 4,    -- en dessous : descente interdite
+    vitesseAuSol         = 1.5,  -- vitesse horizontale max au ras du sol
+    vitesseDescenteAuSol = 0.8,  -- vitesse de descente max au ras du sol
+    remonteeAutomatique  = true,
+  },
+
   ------------------------------------------------------------- GPS ET FILTRAGE --
 
   gps = {
@@ -226,6 +270,22 @@ return {
   -- detecte et l'ecrit tout seul.
   sorties = {
     type = "redstone",
+
+    -- SORTIES DEPORTEES : un ordinateur n'a que six faces. Sur un gros
+    -- vehicule, d'autres ordinateurs ("satellites") tiennent leurs propres
+    -- faces et sont joints par modem SANS FIL COURTE PORTEE. Il suffit alors
+    -- d'ajouter 'ordinateur = <numero>' a un axe pour que sa sortie parte
+    -- la-bas. Le numero s'affiche au demarrage du satellite.
+    distant = {
+      actif          = false,
+      protocole      = "frenchnet_sortie",
+      coteModem      = nil,   -- nil = detection auto (courte portee prioritaire)
+      delaiSatellite = 1.5,   -- s sans trame -> le satellite se neutralise
+      surveillance   = true,  -- ecouter les acquittements
+      delaiPerte     = 4.0,   -- s sans acquittement -> satellite muet
+      secoursSiMuet  = true,  -- un satellite muet fait basculer en secours
+    },
+
     axes = {
       -- Vehicule SANS marche arriere : la commande d'avance va de 0 a 1, donc
       -- neutre = 0 et amplitude = 15 pour exploiter toute la plage redstone
@@ -238,6 +298,46 @@ return {
       lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",
                    amplitude = 15, seuil = 0.08 },
       lateral  = { mode = "aucun" },
+    },
+  },
+
+  ------------------------------------------------------------------ CARBURANT --
+  -- Surveillance du reservoir et ravitaillement automatique. La position de la
+  -- station n'est PAS ici : c'est la constante verrouillee de ravitaillement.lua.
+
+  carburant = {
+    actif  = false,             -- passer a true une fois la jauge branchee
+    source = "peripherique",    -- "peripherique" | "redstone" | "aucun"
+
+    -- Lecture par peripherique. "tanks" est l'API fluides generique de
+    -- CC: Tweaked : elle marche sur tout bloc a capacite fluide accole ou
+    -- relie par modem. Renseigner 'max' si la capacite n'est pas remontee.
+    peripherique = { nom = nil, methode = "tanks", fluide = nil, max = nil },
+
+    -- Lecture par redstone : un comparateur sur la cuve, ou un Smart Observer.
+    -- mode "analogique" = jauge 0-15 ; mode "signal" = allume signifie bas.
+    redstone = { cote = "back", ordinateur = nil, mode = "analogique",
+                 inverse = false, max = 15 },
+
+    seuilBas   = 0.25,   -- fraction du plein : declenche le retour
+    seuilPlein = 0.92,   -- fraction du plein : autorise le depart
+    periode    = 5,      -- secondes entre deux lectures
+
+    coteRetour = nil,    -- entree : un courant force le retour immediat
+    coteDepart = nil,    -- entree : un courant libere le vehicule
+    coteAmarre = nil,    -- sortie : allumee tant que le vehicule est amarre
+    ordinateurOrdres = nil,  -- satellite portant ces faces
+
+    amarrage = {
+      altitudeApproche     = 12,   -- hauteur tenue a la verticale avant descente
+      toleranceHorizontale = 0.6,  -- marges resserrees : c'est un amarrage
+      toleranceAltitude    = 0.4,
+      toleranceCap         = 3,
+      dureeArrivee         = 3,
+      vitesseApproche      = 1.2,
+      delaiMax             = 600,
+      attenteMax           = 1800,
+      maintenirPendantAttente = true,  -- false = moteurs coupes une fois amarre
     },
   },
 

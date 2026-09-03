@@ -58,6 +58,9 @@ local ETAPES = {
   FILTRAGE          = "filtrage de la position",
   ESTIMATION_VITESSE= "estimation de la vitesse",
   ESTIMATION_CAP    = "estimation du cap",
+  HAUTEUR_SOL       = "mesure de la hauteur sol",
+  ENVELOPPE_SOL     = "enveloppe de vitesse et protection sol",
+  SORTIES_DISTANTES = "sorties moteur deportees",
   DECALAGE          = "application des decalages geometriques",
   BOUCLE_POSITION   = "boucle externe de position",
   BOUCLE_VITESSE    = "boucle interne de vitesse",
@@ -365,6 +368,31 @@ local DEFAUTS = {
     filtreVitesse = { type = "passe_bas", constanteTemps = 0.60, fenetre = 4 },
   },
 
+  -- Hauteur au-dessus du SOL. Le GPS ne donne que l'altitude absolue : sans
+  -- capteur, on ne peut que declarer l'altitude du terrain, ce qui est faux
+  -- des qu'il y a du relief. La source est donc enfichable.
+  sol = {
+    source           = "aucun",  -- "aucun" | "altitudeDeclaree" | "peripherique" | "redstone"
+    altitudeDeclaree = 64,       -- Y du sol dans la zone d'operation
+    peripherique = { nom = nil, methode = "getDistance", facteur = 1, decalage = 0 },
+    redstone     = { cote = "bottom", ordinateur = nil, blocsParNiveau = 2,
+                     inverse = false, horsPortee = 0 },
+    hauteurMax   = 64,           -- au-dela, le capteur est considere hors portee
+    filtre       = { constanteTemps = 0.5 },
+  },
+
+  -- Enveloppe de vitesse : la vitesse autorisee ne depend pas que de la
+  -- distance restante, mais aussi de la hauteur sol. On ne fonce pas a huit
+  -- blocs par seconde a trois blocs du relief.
+  enveloppeSol = {
+    actif                = true,
+    hauteurSecurite      = 25,   -- AGL au-dessus duquel plus aucun bridage
+    hauteurMin           = 4,    -- AGL sous lequel la descente est interdite
+    vitesseAuSol         = 1.5,  -- vitesse horizontale max au ras du sol
+    vitesseDescenteAuSol = 0.8,  -- vitesse de descente max au ras du sol
+    remonteeAutomatique  = true, -- sous hauteurMin, le vehicule remonte seul
+  },
+
   cap = {
     source        = "route",  -- "route" (deduit du deplacement) | "peripherique"
     peripherique  = nil,      -- nom du peripherique fournissant le cap
@@ -420,6 +448,17 @@ local DEFAUTS = {
 
   sorties = {
     type = "redstone",
+    -- Sorties deportees : les niveaux redstone sont emis par d'autres
+    -- ordinateurs, repartis sur le vehicule, joints par modem courte portee.
+    distant = {
+      actif           = false,
+      protocole       = "frenchnet_sortie",
+      coteModem       = nil,   -- nil = detection auto, modem courte portee prioritaire
+      delaiSatellite  = 1.5,   -- s sans trame -> le satellite neutralise tout seul
+      surveillance    = true,  -- ecouter les acquittements des satellites
+      delaiPerte      = 4.0,   -- s sans acquittement -> satellite declare muet
+      secoursSiMuet   = true,  -- un satellite muet fait basculer le vol en secours
+    },
     axes = {
       avance   = { mode = "aucun" },
       vertical = { mode = "aucun" },
@@ -932,9 +971,82 @@ local function creerSorties(config, journal, commandesInjectees)
   local reglages = config.sorties or {}
   s.type = reglages.type or "redstone"
 
-  local function sortieRedstone(cote, niveau)
+  ------------------------------------------------------------------ deportees
+  -- Un ordinateur n'a que six faces, et sur un gros vehicule la propulsion est
+  -- dispersee. Les sorties peuvent donc etre emises par des ordinateurs
+  -- satellites, joints par modem courte portee : chacun tient ses propres
+  -- faces redstone et remonte ses entrees.
+  local distant = reglages.distant or {}
+  s.distantActif = distant.actif and true or false
+  s.satellites = {}     -- [idOrdinateur] = { vuA, sequence, entrees, neutralise }
+  s.sequence = 0
+
+  local function detecterModemSortie()
+    if type(distant.coteModem) == "string" and distant.coteModem ~= "" then
+      return distant.coteModem
+    end
+    if not peripheral then return nil end
+    local repli = nil
+    for _, nom in ipairs(peripheral.getNames()) do
+      local ok, typePeriph = pcall(peripheral.getType, nom)
+      if ok and typePeriph == "modem" then
+        local modem = peripheral.wrap(nom)
+        local okFil, sansFil = pcall(function() return modem.isWireless and modem.isWireless() end)
+        if okFil and sansFil then
+          -- On prefere un modem COURTE PORTEE : deux vehicules voisins ne
+          -- doivent pas s'echanger leurs commandes moteur.
+          local ender = false
+          if peripheral.hasType then
+            local okType, resultat = pcall(peripheral.hasType, nom, "ender_modem")
+            ender = okType and resultat or false
+          end
+          if not ender then return nom end
+          repli = repli or nom
+        end
+      end
+    end
+    return repli
+  end
+
+  if s.distantActif then
+    local cote = detecterModemSortie()
+    if not cote then
+      journal.erreur(ETAPES.SORTIES_DISTANTES,
+        "sorties deportees demandees mais aucun modem sans fil detecte : "
+        .. "les axes deportes resteront muets")
+      s.distantActif = false
+    else
+      local ok = pcall(function()
+        if not rednet.isOpen(cote) then rednet.open(cote) end
+      end)
+      if ok and rednet.isOpen(cote) then
+        s.coteModem = cote
+        journal.info(ETAPES.SORTIES_DISTANTES, string.format(
+          "sorties deportees actives sur '%s', protocole '%s'", cote,
+          tostring(distant.protocole)))
+      else
+        journal.erreur(ETAPES.SORTIES_DISTANTES,
+          "rednet n'a pas pu s'ouvrir sur '" .. cote .. "'")
+        s.distantActif = false
+      end
+    end
+  end
+
+  -- Trames en cours de construction pour le cycle courant.
+  local trames = {}
+
+  local function sortieRedstone(cote, niveau, ordinateur)
     if not cote then return end
     local valeur = math.floor(borner(niveau, 0, 15) + 0.5)
+
+    if ordinateur then
+      -- Sortie deportee : on accumule, l'envoi se fait en une seule trame.
+      trames[ordinateur] = trames[ordinateur] or {}
+      trames[ordinateur][cote] = valeur
+      s.niveaux[tostring(ordinateur) .. ":" .. cote] = valeur
+      return
+    end
+
     s.niveaux[cote] = valeur
     if not redstone then return end
     if redstone.setAnalogOutput then
@@ -942,6 +1054,29 @@ local function creerSorties(config, journal, commandesInjectees)
     else
       redstone.setOutput(cote, valeur > 0)
     end
+  end
+
+  --- Envoie une trame par satellite concerne. Une seule trame par ordinateur
+  -- et par cycle : atomique, et le satellite sait quand il n'a plus de nouvelles.
+  local function emettreTrames()
+    if not s.distantActif then trames = {} return end
+    s.sequence = s.sequence + 1
+    for ordinateur, sorties in pairs(trames) do
+      local ok = pcall(rednet.send, ordinateur, {
+        protocole = "FRENCHNET_SORTIE",
+        version   = 1,
+        vehicule  = config.identifiant,
+        sequence  = s.sequence,
+        sorties   = sorties,
+        repos     = reposDistants[ordinateur],
+        delai     = distant.delaiSatellite,
+      }, distant.protocole)
+      if not ok then
+        journal.avert(ETAPES.SORTIES_DISTANTES,
+          "envoi impossible vers l'ordinateur #" .. tostring(ordinateur))
+      end
+    end
+    trames = {}
   end
 
   local function appliquerAxe(nomAxe, valeur)
@@ -952,27 +1087,30 @@ local function creerSorties(config, journal, commandesInjectees)
     -- redemonter sur le vehicule.
     if reglageAxe.inverse then valeur = -valeur end
 
+    -- 'ordinateur' renseigne = la face appartient a un satellite, pas a nous.
+    local ordinateur = reglageAxe.ordinateur
+
     if mode == "aucun" then
       return
 
     elseif mode == "analogique" then
       local neutre    = reglageAxe.neutre or 7
       local amplitude = reglageAxe.amplitude or 7
-      sortieRedstone(reglageAxe.cote, neutre + amplitude * valeur)
+      sortieRedstone(reglageAxe.cote, neutre + amplitude * valeur, ordinateur)
 
     elseif mode == "bipolaire" then
       local seuil     = reglageAxe.seuil or 0.05
       local amplitude = reglageAxe.amplitude or 15
       local niveau    = math.abs(valeur) * amplitude
       if math.abs(valeur) < seuil then
-        sortieRedstone(reglageAxe.cotePositif, 0)
-        sortieRedstone(reglageAxe.coteNegatif, 0)
+        sortieRedstone(reglageAxe.cotePositif, 0, ordinateur)
+        sortieRedstone(reglageAxe.coteNegatif, 0, ordinateur)
       elseif valeur > 0 then
-        sortieRedstone(reglageAxe.coteNegatif, 0)
-        sortieRedstone(reglageAxe.cotePositif, niveau)
+        sortieRedstone(reglageAxe.coteNegatif, 0, ordinateur)
+        sortieRedstone(reglageAxe.cotePositif, niveau, ordinateur)
       else
-        sortieRedstone(reglageAxe.cotePositif, 0)
-        sortieRedstone(reglageAxe.coteNegatif, niveau)
+        sortieRedstone(reglageAxe.cotePositif, 0, ordinateur)
+        sortieRedstone(reglageAxe.coteNegatif, niveau, ordinateur)
       end
 
     elseif mode == "peripherique" then
@@ -998,15 +1136,110 @@ local function creerSorties(config, journal, commandesInjectees)
     end
   end
 
+  -- Niveaux de REPOS de chaque satellite : ce que produit une commande nulle.
+  -- Ils voyagent dans chaque trame, pour que le satellite sache exactement
+  -- quoi appliquer si la liaison se coupe. Un axe analogique dont le neutre
+  -- vaut 7 ne doit pas retomber a 0 : ce serait plein gaz arriere.
+  local reposDistants = {}
+  do
+    for _, nomAxe in ipairs(AXES_SORTIE) do appliquerAxe(nomAxe, 0) end
+    for ordinateur, niveaux in pairs(trames) do reposDistants[ordinateur] = niveaux end
+    trames = {}
+  end
+
   function s.appliquer(commandes)
     s.derniere = commandes
     for _, nomAxe in ipairs(AXES_SORTIE) do
       appliquerAxe(nomAxe, commandes[nomAxe])
     end
+    emettreTrames()
   end
 
   function s.neutraliser()
     s.appliquer({ avance = 0, vertical = 0, lacet = 0, lateral = 0 })
+  end
+
+  --- Traite un acquittement de satellite. Fonction pure : c'est elle qui
+  -- porte la logique, l'ecoute rednet n'est que de la plomberie.
+  function s.traiterAck(expediteur, message)
+    if type(message) ~= "table" then return false end
+    if message.protocole ~= "FRENCHNET_SORTIE_ACK" then return false end
+    if message.vehicule and config.identifiant
+       and message.vehicule ~= config.identifiant then
+      return false   -- acquittement destine a un autre vehicule
+    end
+    local satellite = s.satellites[expediteur] or {}
+    satellite.identifiant = message.identifiant
+    satellite.sequence    = message.sequence
+    satellite.entrees     = message.entrees or satellite.entrees
+    satellite.neutralise  = message.neutralise and true or false
+    satellite.vuA         = os.clock()
+    if satellite.muet then
+      journal.info(ETAPES.SORTIES_DISTANTES, string.format(
+        "satellite #%d (%s) de nouveau en ligne", expediteur,
+        tostring(satellite.identifiant)))
+    end
+    satellite.muet = false
+    s.satellites[expediteur] = satellite
+    return true
+  end
+
+  --- Liste des satellites attendus par la configuration.
+  function s.satellitesAttendus()
+    local attendus = {}
+    for _, reglageAxe in pairs(reglages.axes or {}) do
+      if type(reglageAxe) == "table" and reglageAxe.ordinateur
+         and (reglageAxe.mode or "aucun") ~= "aucun" then
+        attendus[reglageAxe.ordinateur] = true
+      end
+    end
+    return attendus
+  end
+
+  --- Satellites attendus dont on n'a plus de nouvelles.
+  -- @return liste d'identifiants, et true si l'etat vient de changer
+  function s.satellitesMuets()
+    if not (s.distantActif and distant.surveillance) then return {}, false end
+    local muets, changement = {}, false
+    local maintenant = os.clock()
+    for ordinateur in pairs(s.satellitesAttendus()) do
+      local satellite = s.satellites[ordinateur]
+      local age = satellite and (maintenant - (satellite.vuA or 0)) or math.huge
+      if age > (distant.delaiPerte or 4) then
+        muets[#muets + 1] = ordinateur
+        if not (satellite and satellite.muet) then
+          changement = true
+          s.satellites[ordinateur] = satellite or {}
+          s.satellites[ordinateur].muet = true
+          journal.erreur(ETAPES.SORTIES_DISTANTES, string.format(
+            "satellite #%d muet depuis %.1fs : ses moteurs vont se neutraliser seuls",
+            ordinateur, age == math.huge and -1 or age))
+        end
+      end
+    end
+    return muets, changement
+  end
+
+  --- Entree redstone lue par un satellite (jauge de carburant deportee...).
+  function s.entreeDistante(ordinateur, cote)
+    local satellite = s.satellites[ordinateur]
+    if not (satellite and satellite.entrees) then return nil end
+    return satellite.entrees[cote]
+  end
+
+  --- Boucle d'ecoute des acquittements, a lancer en parallele du vol.
+  -- ATTENTION : rednet.receive consomme les messages qui ne correspondent pas
+  -- au protocole. Sur un vehicule a sorties deportees, rednet est donc reserve
+  -- a l'autopilote (voir le guide). 'surveillance = false' desactive l'ecoute.
+  function s.ecouter()
+    if not (s.distantActif and distant.surveillance) then
+      while true do sleep(5) end
+    end
+    while true do
+      local ok, expediteur, message = pcall(rednet.receive, distant.protocole, 5)
+      if ok and expediteur then s.traiterAck(expediteur, message) end
+      if not ok then sleep(1) end
+    end
   end
 
   return s
@@ -1080,6 +1313,82 @@ local function creerCapteurCap(config, journal)
       c.valeur = normaliserAngle(valeur)
       c.source = "force"
     end
+  end
+
+  return c
+end
+
+--- Capteur de hauteur au-dessus du SOL.
+-- Le GPS ne donne que l'altitude absolue. Quatre sources possibles, de la
+-- plus fiable a la plus rustique ; toutes renvoient une hauteur en blocs, ou
+-- nil quand la mesure n'est pas disponible.
+local function creerCapteurSol(config, journal, sorties)
+  local reglages = config.sol or {}
+  local c = { valeur = nil, source = "aucun", filtre = Filtre.nouveau(reglages.filtre) }
+
+  local function lirePeripherique()
+    local p = reglages.peripherique or {}
+    if not (peripheral and p.nom) then return nil end
+    local materiel = peripheral.wrap(p.nom)
+    if not materiel then return nil end
+    local methode = materiel[p.methode or ""]
+    if type(methode) ~= "function" then return nil end
+    local ok, valeur = pcall(methode)
+    if not ok or not nombreValide(valeur) then return nil end
+    return valeur * (p.facteur or 1) + (p.decalage or 0)
+  end
+
+  local function lireRedstone()
+    local r = reglages.redstone or {}
+    local niveau
+    if r.ordinateur and sorties and sorties.entreeDistante then
+      niveau = sorties.entreeDistante(r.ordinateur, r.cote)
+    elseif redstone and r.cote then
+      local ok, valeur = pcall(redstone.getAnalogInput, r.cote)
+      niveau = ok and valeur or nil
+    end
+    if not nombreValide(niveau) then return nil end
+    if r.inverse then niveau = 15 - niveau end
+    if niveau == (r.horsPortee or 0) then return nil end
+    return niveau * (r.blocsParNiveau or 1)
+  end
+
+  --- @return hauteur sol en blocs (ou nil), source de la mesure
+  function c.mesurer(position, dt)
+    local brute = nil
+    local source = reglages.source or "aucun"
+
+    if source == "altitudeDeclaree" then
+      if position then brute = position.y - (reglages.altitudeDeclaree or 0) end
+    elseif source == "peripherique" then
+      brute = lirePeripherique()
+    elseif source == "redstone" then
+      brute = lireRedstone()
+    end
+
+    if brute == nil then
+      if c.source ~= "perdu" and source ~= "aucun" then
+        journal.avert(ETAPES.HAUTEUR_SOL,
+          "hauteur sol indisponible (source '" .. tostring(source)
+          .. "') : l'enveloppe de vitesse liee au sol est suspendue")
+      end
+      c.source = (source == "aucun") and "aucun" or "perdu"
+      c.valeur = nil
+      c.filtre.reinitialiser(nil)
+      return nil, c.source
+    end
+
+    -- Au-dela de la portee du capteur, on ne bride plus : le vehicule est
+    -- de toute facon loin du relief.
+    if brute > (reglages.hauteurMax or 64) then
+      c.valeur, c.source = nil, "hors_portee"
+      c.filtre.reinitialiser(nil)
+      return nil, c.source
+    end
+
+    c.valeur = c.filtre.appliquer(math.max(0, brute), dt)
+    c.source = source
+    return c.valeur, c.source
   end
 
   return c
@@ -1182,6 +1491,20 @@ function autopilote.nouveau(options)
     end
   end
 
+  local capteurSol = creerCapteurSol(config, journal, sorties)
+  if type(options.hauteurSol) == "function" then
+    -- Capteur fourni par le programme appelant : priorite absolue.
+    local mesurerOrigine = capteurSol.mesurer
+    capteurSol.mesurer = function(position, dt)
+      local ok, valeur = pcall(options.hauteurSol)
+      if ok and nombreValide(valeur) then
+        capteurSol.valeur, capteurSol.source = math.max(0, valeur), "injecte"
+        return capteurSol.valeur, capteurSol.source
+      end
+      return mesurerOrigine(position, dt)
+    end
+  end
+
   local filtrePosition = filtreVecteur(config.gps.filtre)
   local filtreVitesse  = filtreVecteur(config.gps.filtreVitesse)
   local filtreTaux     = Filtre.nouveau(config.gps.filtreVitesse)
@@ -1204,6 +1527,8 @@ function autopilote.nouveau(options)
     index       = 0,
     optionsMission = {},
     dansMarges  = 0,     -- duree continue passee dans les tolerances
+    hauteurSol = nil, sourceSol = "aucun",
+    tolerances = nil,   -- tolerances effectives (config, ou surcharge de mission)
     tTick = nil, tReel = nil, dt = 0,
     perteGps = 0, lecturesValides = 0, rejetsConsecutifs = 0,
     cycles = 0, discontinuites = 0, anomalies = 0,
@@ -1452,6 +1777,10 @@ function autopilote.nouveau(options)
       etat.axes.cap.pid.reinitialiser(etat.axes.cap.pid.sortiePrec)
     end
 
+    -- Hauteur sol : elle conditionne l'enveloppe de vitesse et la protection
+    -- de proximite. Une mesure absente suspend simplement le bridage.
+    etat.hauteurSol, etat.sourceSol = capteurSol.mesurer(etat.position, dt)
+
     if etat.perteGps > 0 then
       journal.info(ETAPES.LECTURE_GPS, string.format(
         "signal GPS retabli apres %.1fs", etat.perteGps))
@@ -1631,7 +1960,12 @@ function autopilote.nouveau(options)
     local vitesseCroisee = borner(-g.derive.position.kp * ecartLateral,
       -limites.vitesseLaterale, limites.vitesseLaterale)
     local vitesseVerticaleCible = borner(g.altitude.position.kp * dy,
-      -limites.vitesseVerticale, limites.vitesseVerticale)
+      -(limites.vitesseDescente or limites.vitesseVerticale), limites.vitesseVerticale)
+    if limites.descenteInterdite then
+      -- Protection de proximite sol : on ne descend plus, et on remonte si la
+      -- configuration le demande.
+      vitesseVerticaleCible = math.max(vitesseVerticaleCible, limites.remontee or 0)
+    end
     local tauxLacetCible = borner(g.cap.position.kp * erreurCap,
       -limites.tauxVirage, limites.tauxVirage)
 
@@ -1674,7 +2008,9 @@ function autopilote.nouveau(options)
       local normeDesiree = normeHorizontale(desireX, desireZ)
       local reptation = math.min(config.vitesses.acquisitionCap,
         limites.vitesseMax, normeDesiree)
-      if distanceH <= config.tolerances.horizontale then reptation = 0 end
+      if distanceH <= (etat.tolerances or config.tolerances).horizontale then
+        reptation = 0
+      end
       vitesseAvanceCible = reptation
       vitesseLateraleCible = 0
     end
@@ -1726,7 +2062,8 @@ function autopilote.nouveau(options)
     -- l'integrateur, meme faible, finirait sinon par pousser le vehicule hors
     -- de sa propre cible, qui repartirait pour un tour. Le vehicule se laisse
     -- arreter par sa trainee, exactement comme en zone morte.
-    if limites.arretDansMarges and distanceH <= config.tolerances.horizontale then
+    if limites.arretDansMarges
+       and distanceH <= (etat.tolerances or config.tolerances).horizontale then
       commandes.avance  = 0
       commandes.lateral = 0
       etat.axes.avance.pid.reinitialiser(0)
@@ -1800,7 +2137,7 @@ function autopilote.nouveau(options)
     end
     return {
       x = point.x, y = point.y, z = point.z,
-      type = point.type or "survol",     -- "survol" | "depot" | "atterrissage"
+      type = point.type or "survol",  -- "survol"|"depot"|"atterrissage"|"amarrage"
       cap  = nombreValide(point.cap) and normaliserAngle(point.cap) or nil,
       arret = point.arret and true or false,
       nom  = point.nom,
@@ -1810,12 +2147,20 @@ function autopilote.nouveau(options)
   --- Position que doit viser le CENTRE du vehicule pour qu'un depot ou un
   -- atterrissage tombe exactement sur le point demande.
   local function cibleCentreDe(point)
-    if point.type == "depot" or point.type == "atterrissage" then
-      local decalage = decalageVersMonde(config.decalageDepot, etat.cap,
-        config.decalageDansRepereVehicule)
-      return { x = point.x - decalage.x, y = point.y - decalage.y, z = point.z - decalage.z }
+    local decalageBrut = nil
+    if point.type == "amarrage" then
+      -- Point d'accroche du docker : souvent different du point de depot
+      -- (une prise sur le dessus, des patins en dessous...).
+      decalageBrut = config.decalageAmarrage or config.decalageDepot
+    elseif point.type == "depot" or point.type == "atterrissage" then
+      decalageBrut = config.decalageDepot
     end
-    return { x = point.x, y = point.y, z = point.z }
+    if not decalageBrut then
+      return { x = point.x, y = point.y, z = point.z }
+    end
+    local decalage = decalageVersMonde(decalageBrut, etat.cap,
+      config.decalageDansRepereVehicule)
+    return { x = point.x - decalage.x, y = point.y - decalage.y, z = point.z - decalage.z }
   end
 
   --- Copie serialisable : les rappels du programme appelant ne survivent pas a
@@ -1860,13 +2205,14 @@ function autopilote.nouveau(options)
     end)
   end
 
-  local function entrerMaintien(point, motif)
+  local function entrerMaintien(point, motif, auSol)
     -- On repart avec des regulateurs propres : l'integrale accumulee pendant
     -- le transit n'a plus rien a voir avec le maintien de position.
     for _, axe in ipairs(AXES) do etat.axes[axe].pid.reinitialiser(0) end
     etat.mode        = MODES.MAINTIEN
     etat.phase       = nil
     etat.cibleMaintien = point
+    etat.maintienAuSol = auSol and true or false
     etat.depart      = nil
     etat.dansMarges  = 0
     etat.capArrivee  = etat.cap
@@ -1932,7 +2278,8 @@ function autopilote.nouveau(options)
       if type(etat.optionsMission.surArrivee) == "function" then
         pcall(etat.optionsMission.surArrivee, copierProfond(point))
       end
-      entrerMaintien(cibleCentreDe(point), "arrivee sur la cible")
+      entrerMaintien(cibleCentreDe(point), "arrivee sur la cible",
+        point.type == "atterrissage" or point.type == "depot" or point.type == "amarrage")
       etat.itineraire = nil
       etat.index = 0
       effacerMission()
@@ -1965,17 +2312,75 @@ function autopilote.nouveau(options)
     return PHASES.CROISIERE
   end
 
+  --- Enveloppe de vitesse liee au sol.
+  -- La vitesse autorisee ne depend pas que de la distance restante : au ras du
+  -- relief, on ralentit, et sous une hauteur plancher on s'interdit de
+  -- descendre. La protection est levee pour un point de pose volontaire
+  -- (atterrissage, depot, amarrage) : sinon le vehicule ne pourrait jamais
+  -- toucher le sol.
+  local function appliquerEnveloppeSol(limites, autoriserSol)
+    local e = config.enveloppeSol or {}
+    limites.vitesseDescente = limites.vitesseVerticale
+    local agl = etat.hauteurSol
+    if not (e.actif and agl) then
+      etat.brideSol = nil
+      return limites
+    end
+
+    local plancher = e.hauteurMin or 0
+    local plage = math.max(0.1, (e.hauteurSecurite or 25) - plancher)
+    local facteur = borner((agl - plancher) / plage, 0, 1)
+
+    local vitesseSol = e.vitesseAuSol or 1.5
+    if limites.vitesseMax > vitesseSol then
+      limites.vitesseMax = vitesseSol + facteur * (limites.vitesseMax - vitesseSol)
+    end
+    local descenteSol = e.vitesseDescenteAuSol or 0.8
+    if limites.vitesseVerticale > descenteSol then
+      limites.vitesseDescente = descenteSol + facteur * (limites.vitesseVerticale - descenteSol)
+    end
+
+    if not autoriserSol and agl <= plancher then
+      limites.descenteInterdite = true
+      limites.remontee = (e.remonteeAutomatique ~= false) and descenteSol or 0
+      if not etat.brideSol then
+        journal.avert(ETAPES.ENVELOPPE_SOL, string.format(
+          "PROXIMITE SOL : %.1f bloc(s) sous le plancher de %.1f - descente "
+          .. "interdite%s", agl, plancher,
+          limites.remontee > 0 and " et remontee automatique" or ""))
+      end
+      etat.brideSol = "plancher"
+    else
+      if etat.brideSol == "plancher" then
+        journal.info(ETAPES.ENVELOPPE_SOL, string.format(
+          "sortie de la protection sol (%.1f bloc(s))", agl))
+      end
+      etat.brideSol = (facteur < 1) and "bride" or nil
+    end
+
+    debugCycle(ETAPES.ENVELOPPE_SOL, string.format(
+      "hauteur sol %.1f (%s) -> vitesse max %.2f, descente max %.2f",
+      agl, tostring(etat.sourceSol), limites.vitesseMax, limites.vitesseDescente))
+    return limites
+  end
+
   --- Le vehicule est-il dans les marges du point courant ?
+  --- Tolerances en vigueur : celles du vehicule, ou celles de la mission.
+  local function tolerances()
+    return etat.tolerances or config.tolerances
+  end
+
   local function dansLesMarges(diagnostic, point, estDernier)
     if not (estDernier or point.arret) then
       -- Point de passage intermediaire : on le valide au passage, sans
       -- exiger l'immobilite, sinon le vehicule s'arrete a chaque etape.
       return diagnostic.distanceH <= config.vitesses.rayonValidationEtape
     end
-    local ok = diagnostic.distanceH <= config.tolerances.horizontale
-      and math.abs(diagnostic.distanceY) <= config.tolerances.altitude
+    local marges = tolerances()
+    local ok = diagnostic.distanceH <= marges.horizontale
+      and math.abs(diagnostic.distanceY) <= marges.altitude
     if ok and point.cap then
-      ok = math.abs(normaliserAngle(point.cap - etat.cap)) <= config.tolerances.cap
+      ok = math.abs(normaliserAngle(point.cap - etat.cap)) <= marges.cap
     end
     return ok
   end
@@ -2087,6 +2492,11 @@ function autopilote.nouveau(options)
         marcheArriere    = config.vitesses.marcheArriere,
         capImpose        = capImpose,
       }
+      -- Un point de pose volontaire leve la protection sol : sans cela, le
+      -- vehicule ne pourrait jamais se poser ni s'amarrer.
+      local poseVolontaire = (point.type == "atterrissage" or point.type == "depot"
+        or point.type == "amarrage")
+      appliquerEnveloppeSol(limites, poseVolontaire and phase == PHASES.FINALE)
       appliquerJeuGains("croisiere")
 
     else -- MODES.MAINTIEN
@@ -2106,7 +2516,7 @@ function autopilote.nouveau(options)
         local dxCible = cible.x - etat.position.x
         local dzCible = cible.z - etat.position.z
         local ecart = normeHorizontale(dxCible, dzCible)
-        if ecart <= config.tolerances.horizontale then
+        if ecart <= (etat.tolerances or config.tolerances).horizontale then
           capImpose = etat.capArrivee
         elseif lateralDisponible then
           -- Avec propulsion laterale, le cap est conserve tant que la cible
@@ -2130,6 +2540,7 @@ function autopilote.nouveau(options)
         capImpose        = capImpose,
         arretDansMarges  = config.maintien.arretDansMarges,
       }
+      appliquerEnveloppeSol(limites, etat.maintienAuSol)
       appliquerJeuGains("maintien")
     end
 
@@ -2138,6 +2549,17 @@ function autopilote.nouveau(options)
     etat.commandes = commandes
     etat.cibleCentre = cible
     sorties.appliquer(commandes)
+
+    -- Un satellite muet, c'est un groupe de moteurs qui va se neutraliser
+    -- seul : le vehicule est devenu partiellement incontrolable.
+    if sorties.satellitesMuets then
+      local muets = sorties.satellitesMuets()
+      if #muets > 0 and (config.sorties.distant or {}).secoursSiMuet then
+        entrerSecours(string.format("%d satellite(s) de sortie muet(s)", #muets))
+        sorties.neutraliser()
+        return etat
+      end
+    end
 
     ------------------------------------------------------- arrivee / franchissement
     if etat.mode == MODES.TRANSIT then
@@ -2156,7 +2578,7 @@ function autopilote.nouveau(options)
         end
         etat.dansMarges = 0
       end
-      local dureeExigee = (estDernier or point.arret) and config.tolerances.dureeArrivee or 0
+      local dureeExigee = (estDernier or point.arret) and tolerances().dureeArrivee or 0
       if etat.dansMarges > 0 and etat.dansMarges >= dureeExigee then
         pointFranchi(estDernier)
       end
@@ -2228,6 +2650,14 @@ function autopilote.nouveau(options)
     etat.itineraire     = itineraire
     etat.index          = math.max(1, math.min(indexDepart or 1, #itineraire))
     etat.optionsMission = optionsMission or {}
+    -- Une mission peut resserrer les marges : un amarrage exige beaucoup plus
+    -- de precision qu'un simple survol.
+    etat.tolerances = fusionner(config.tolerances, etat.optionsMission.tolerances or {})
+    if etat.optionsMission.tolerances then
+      journal.info(ETAPES.MISSION, string.format(
+        "tolerances resserrees pour cette mission : %.2fm / %.2fm / %.1f deg",
+        etat.tolerances.horizontale, etat.tolerances.altitude, etat.tolerances.cap))
+    end
     etat.dansMarges     = 0
     etat.capMaintienImpose = nil
     etat.maintienApresAcquisition = nil
@@ -2267,6 +2697,7 @@ function autopilote.nouveau(options)
   --- Tenir la position : le point courant si aucun n'est precise.
   function ap.maintenirPosition(point, capImpose)
     local cible = point and normaliserPoint(point) or nil
+    etat.tolerances = config.tolerances
     etat.itineraire = nil
     etat.index = 0
     etat.capMaintienImpose = nombreValide(capImpose) and normaliserAngle(capImpose) or nil
@@ -2316,6 +2747,18 @@ function autopilote.nouveau(options)
       "boucle de vol demarree (periode %.2fs, mode de pilotage '%s')",
       config.gps.intervalle, config.pilotage.mode))
 
+    -- L'ecoute des acquittements satellites tourne a cote du vol : sans elle,
+    -- on ne saurait jamais qu'un groupe de moteurs ne repond plus.
+    if sorties.ecouter and sorties.distantActif
+       and (config.sorties.distant or {}).surveillance then
+      local volerSeul = ap.boucleDeVol
+      return parallel.waitForAny(volerSeul, sorties.ecouter)
+    end
+    return ap.boucleDeVol()
+  end
+
+  --- Boucle de vol proprement dite (sans les taches annexes).
+  function ap.boucleDeVol()
     local echecs = 0
     while ap.actif do
       local ok, err = xpcall(ap.pas, gestionnaireErreur)
@@ -2361,6 +2804,9 @@ function autopilote.nouveau(options)
       vitesseSol  = normeHorizontale(etat.vitesse.x, etat.vitesse.z),
       cap         = etat.cap,
       sourceCap   = etat.sourceCap,
+      hauteurSol  = etat.hauteurSol,
+      sourceSol   = etat.sourceSol,
+      brideSol    = etat.brideSol,
       tauxLacet   = etat.tauxLacet,
       cible       = etat.cibleCentre and copierProfond(etat.cibleCentre) or nil,
       point       = etat.itineraire and copierProfond(etat.itineraire[etat.index]) or nil,
@@ -2483,6 +2929,33 @@ function autopilote.nouveau(options)
       x = station.position.x, y = station.position.y, z = station.position.z,
       type = "atterrissage", cap = station.capFinal, nom = station.nom,
     }, optionsMission)
+  end
+
+  --- Hauteur au-dessus du sol, en blocs, ou nil si aucune mesure.
+  function ap.hauteurSol()
+    return etat.hauteurSol, etat.sourceSol
+  end
+
+  --- Etat des ordinateurs de sortie deportes.
+  function ap.satellites()
+    if not sorties.satellites then return {} end
+    local resume = {}
+    for ordinateur, satellite in pairs(sorties.satellites) do
+      resume[ordinateur] = {
+        identifiant = satellite.identifiant,
+        muet        = satellite.muet and true or false,
+        neutralise  = satellite.neutralise and true or false,
+        sequence    = satellite.sequence,
+        age         = satellite.vuA and (os.clock() - satellite.vuA) or nil,
+      }
+    end
+    return resume
+  end
+
+  --- Entree redstone lue par un satellite (jauge deportee, capteur eloigne).
+  function ap.entreeDistante(ordinateur, cote)
+    if not sorties.entreeDistante then return nil end
+    return sorties.entreeDistante(ordinateur, cote)
   end
 
   --- Impose le cap courant (utile si le vehicule dispose d'un capteur maison).
