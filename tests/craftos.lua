@@ -86,6 +86,7 @@ function M.creer(options)
     horloge = 0,
     sorties = {},
     diffusions = {},
+    envois = {},
     transmissions = {},
     modemPresent = true,
     rednetOuvert = false,
@@ -163,6 +164,11 @@ function M.creer(options)
     if etat.echecBroadcast then error("Network is unreachable", 0) end
     if not etat.rednetOuvert then error("No open side", 0) end
     etat.diffusions[#etat.diffusions + 1] = { message = msg, protocole = proto, t = etat.horloge }
+  end
+  rednet.send = function(destinataire, msg, proto)
+    if not etat.rednetOuvert then error("No open side", 0) end
+    etat.envois[#etat.envois + 1] =
+      { destinataire = destinataire, message = msg, protocole = proto, t = etat.horloge }
   end
   rednet.receive = function(proto, timeout)
     local minuteur = timeout and osMock.startTimer(timeout) or nil
