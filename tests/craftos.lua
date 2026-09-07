@@ -141,12 +141,49 @@ function M.creer(options)
     end,
   }
 
+  -- Radar simule (Create Radars). options.radar est une fonction qui recoit
+  -- l'horloge virtuelle et rend { entities = {...}, contraptions = {...} }.
+  -- Elle permet de scenariser une trajectoire complete : approche, tir, crash
+  -- ou fuite, sans jamais lancer Minecraft.
+  local radar
+  if options.radar then
+    radar = {
+      getEntities = function()
+        local r = options.radar(etat.horloge) or {}
+        return r.entities or {}
+      end,
+      getContraptions = function()
+        local r = options.radar(etat.horloge) or {}
+        return r.contraptions or {}
+      end,
+    }
+  end
+
+  local function presents()
+    local noms = {}
+    if etat.modemPresent then noms[#noms + 1] = "back" end
+    if radar then noms[#noms + 1] = "top" end
+    return noms
+  end
+
   local peripheralMock = {
-    getNames = function() return etat.modemPresent and { "back" } or {} end,
-    getType = function(n) return (etat.modemPresent and n == "back") and "modem" or nil end,
-    isPresent = function(n) return etat.modemPresent and n == "back" end,
-    wrap = function(n) return (etat.modemPresent and n == "back") and modem or nil end,
+    getNames = presents,
+    getType = function(n)
+      if n == "back" then return etat.modemPresent and "modem" or nil end
+      if n == "top" and radar then return "createradars:radar" end
+      return nil
+    end,
+    isPresent = function(n)
+      if n == "back" then return etat.modemPresent end
+      return n == "top" and radar ~= nil
+    end,
+    wrap = function(n)
+      if n == "back" then return etat.modemPresent and modem or nil end
+      if n == "top" then return radar end
+      return nil
+    end,
     hasType = function(n, t)
+      if n == "top" and radar then return t == "peripheral" or t:find("radar", 1, true) ~= nil end
       if not etat.modemPresent then return nil end
       return t == "modem" or t == "ender_modem"
     end,
@@ -215,12 +252,20 @@ function M.creer(options)
   ------------------------------------------------------------------------ term
   local term = {
     clear = function() end,
+    clearLine = function() end,
     setCursorPos = function() end,
+    getCursorPos = function() return 1, 1 end,
     isColour = function() return false end,
     isColor = function() return false end,
     setTextColour = function() end,
     setTextColor = function() end,
+    setBackgroundColour = function() end,
+    setBackgroundColor = function() end,
+    write = function() end,
     getSize = function() return 51, 19 end,
+    current = function() return {} end,
+    native = function() return {} end,
+    redirect = function() return {} end,
   }
 
   ------------------------------------------------------------------ environnement
@@ -235,11 +280,78 @@ function M.creer(options)
   env.sleep = sleep
   env.colors = setmetatable({}, { __index = function() return 1 end })
   env.colours = env.colors
+  -- textutils.serialise / unserialise : implementation reelle. Les zones et
+  -- l'etat operationnel transitent par ces deux fonctions, un bouchon
+  -- masquerait toute erreur de persistance.
+  local function serialise(valeur, indentation)
+    indentation = indentation or ""
+    local t = type(valeur)
+    if t == "number" or t == "boolean" then return tostring(valeur) end
+    if t == "string" then return string.format("%q", valeur) end
+    if t ~= "table" then return "nil" end
+    local suivante = indentation .. "  "
+    local morceaux = {}
+    local n = 0
+    for i, v in ipairs(valeur) do
+      morceaux[#morceaux + 1] = suivante .. serialise(v, suivante)
+      n = i
+    end
+    for k, v in pairs(valeur) do
+      local numerique = type(k) == "number" and k >= 1 and k <= n and k == math.floor(k)
+      if not numerique then
+        local cle = (type(k) == "string" and k:match("^[%a_][%w_]*$"))
+          and k or ("[" .. serialise(k, suivante) .. "]")
+        morceaux[#morceaux + 1] = suivante .. cle .. " = " .. serialise(v, suivante)
+      end
+    end
+    if #morceaux == 0 then return "{}" end
+    return "{\n" .. table.concat(morceaux, ",\n") .. ",\n" .. indentation .. "}"
+  end
+
   env.textutils = {
     formatTime = function() return "06:00" end,
-    serialise = function(t) return tostring(t) end,
+    serialise = serialise,
+    serialize = serialise,
+    unserialise = function(texte)
+      local f = load("return " .. tostring(texte), "unserialise", "t", {})
+      if not f then return nil end
+      local ok, resultat = pcall(f)
+      if ok then return resultat end
+      return nil
+    end,
   }
-  env.shell = { getRunningProgram = function() return "balise/balise.lua" end }
+  env.textutils.unserialize = env.textutils.unserialise
+
+  -- loadfile passe par le systeme de fichiers simule : sans cela, un programme
+  -- qui charge un module voisin lirait le vrai depot au lieu du banc d'essai.
+  env.loadfile = function(chemin)
+    local f = io.open((options.racine or ".") .. "/" .. tostring(chemin):gsub("^/", ""), "r")
+    if not f then return nil, chemin .. ": No such file" end
+    local source = f:read("a")
+    f:close()
+    return load(source, "@" .. chemin, "t", env)
+  end
+
+  -- Table 'keys' minimale et saisie clavier simulee : l'interface de controle
+  -- les utilise, le reste du systeme non.
+  env.keys = setmetatable({}, { __index = function(_, nom) return "touche_" .. nom end })
+  env.read = function()
+    local file = options.saisies or {}
+    local suivante = table.remove(file, 1)
+    return suivante or ""
+  end
+
+  env.redstone = {
+    setOutput = function(cote, valeur)
+      etat.redstone = etat.redstone or {}
+      etat.redstone[cote] = valeur
+    end,
+    getOutput = function(cote) return (etat.redstone or {})[cote] == true end,
+  }
+  env.shell = {
+    getRunningProgram = function() return options.programme or "balise/balise.lua" end,
+    run = function() return true end,
+  }
   env.write = function(s) io.write(tostring(s)) end
   env.printError = function(s) print("ERR " .. tostring(s)) end
   env.print = function(...)
@@ -278,6 +390,12 @@ end
 
 function M.injecterRednet(id, message, protocole)
   queueEvent("rednet_message", id, message, protocole)
+end
+
+-- Evenement brut : clic souris, touche, redimensionnement... Utilise pour
+-- piloter l'interface de controle comme le ferait un operateur.
+function M.injecterEvenement(...)
+  queueEvent(...)
 end
 
 function M.injecterModem(cote, canal, reponse, message)
