@@ -60,6 +60,17 @@ local ETAPES = {
   REEMISSION_ORDRE     = "reemission d'un ordre de tir",
   ALERTE_CONTROLEUR    = "alerte controleur humain",
   RECEPTION_TRANSPONDEUR = "reception d'un code transpondeur",
+  RECEPTION_RADAR      = "reception d'une trame de station radar",
+  FUSION_PISTES        = "fusion des pistes multi-radars",
+  RECEPTION_LANCEUR    = "reception d'une balise de lanceur",
+  TERRAIN              = "modele de terrain",
+  CHARGEMENT_TERRAIN   = "chargement du modele de terrain",
+  ENREGISTREMENT_TERRAIN = "enregistrement du modele de terrain",
+  ORDRE_MANUEL         = "ordre manuel du controleur",
+  DEMANDE_SCRAMBLE_AG  = "demande de scramble AG en attente de controleur",
+  PROJECTILE           = "detection de projectile",
+  ALLIE_MANUEL         = "declaration d'allie par un controleur",
+  CARTE                = "carte tactique",
   RECEPTION_INVENTAIRE = "reception de l'inventaire Fire Control",
   RECEPTION_ROSTER     = "reception du roster de factions",
   BASCULE_MODE         = "bascule guerre / paix",
@@ -91,9 +102,13 @@ local REPERTOIRE      = repertoireProgramme()
 local CHEMIN_CONFIG   = fs.combine(REPERTOIRE, "config_command.lua")
 local CHEMIN_NOYAU    = fs.combine(REPERTOIRE, "noyau.lua")
 local CHEMIN_INTERFACE= fs.combine(REPERTOIRE, "interface.lua")
+local CHEMIN_TERRAIN_M= fs.combine(REPERTOIRE, "terrain.lua")
+local CHEMIN_CARTE_M  = fs.combine(REPERTOIRE, "carte.lua")
+local CHEMIN_SCANNER  = fs.combine(REPERTOIRE, "scanner.lua")
 local CHEMIN_JOURNAL  = fs.combine(REPERTOIRE, "command.log")
 local CHEMIN_ZONES    = fs.combine(REPERTOIRE, "zones.dat")
 local CHEMIN_ETAT     = fs.combine(REPERTOIRE, "etat.dat")
+local CHEMIN_TERRAIN  = fs.combine(REPERTOIRE, "terrain.dat")
 local MARQUEUR_ARRET  = fs.combine(REPERTOIRE, ".arret_manuel")
 
 local function horodatage()
@@ -196,21 +211,45 @@ end
 -- 4. CHARGEMENT DU NOYAU DE DECISION
 --------------------------------------------------------------------------------
 
-local noyau
-do
-  local charge, err = loadfile(CHEMIN_NOYAU)
+local function chargerModule(chemin, nom, indispensable)
+  local charge, err = loadfile(chemin)
   if not charge then
-    printError("[etape: " .. ETAPES.CHARGEMENT_NOYAU .. "] noyau.lua introuvable ou invalide : " .. tostring(err))
-    printError("Le poste ne peut pas demarrer sans son noyau de decision.")
-    return
+    local message = "[etape: " .. ETAPES.CHARGEMENT_NOYAU .. "] " .. nom
+      .. " introuvable ou invalide : " .. tostring(err)
+    if indispensable then printError(message) end
+    return nil, message
   end
   local ok, resultat = pcall(charge)
   if not ok or type(resultat) ~= "table" then
-    printError("[etape: " .. ETAPES.CHARGEMENT_NOYAU .. "] noyau.lua n'a pas pu etre initialise : " .. tostring(resultat))
-    return
+    local message = "[etape: " .. ETAPES.CHARGEMENT_NOYAU .. "] " .. nom
+      .. " n'a pas pu etre initialise : " .. tostring(resultat)
+    if indispensable then printError(message) end
+    return nil, message
   end
-  noyau = resultat
+  return resultat
 end
+
+local noyau = chargerModule(CHEMIN_NOYAU, "noyau.lua", true)
+if not noyau then
+  printError("Le poste ne peut pas demarrer sans son noyau de decision.")
+  return
+end
+
+local terrain = chargerModule(CHEMIN_TERRAIN_M, "terrain.lua", true)
+if not terrain then
+  printError("Le poste ne peut pas demarrer sans son modele de terrain.")
+  return
+end
+
+local scanner = chargerModule(CHEMIN_SCANNER, "scanner.lua", true)
+if not scanner then
+  printError("Le poste ne peut pas demarrer sans son adaptateur radar.")
+  return
+end
+
+-- La carte n'est pas indispensable au fonctionnement : sans elle le poste
+-- decide toujours, il n'affiche simplement plus de situation tactique.
+local carte = chargerModule(CHEMIN_CARTE_M, "carte.lua", false)
 
 --------------------------------------------------------------------------------
 -- 5. CONFIGURATION
@@ -220,9 +259,29 @@ local DEFAUTS = {
   identifiant              = "CMD-01",
   designation              = "",
   peripheriqueRadar        = nil,
+  radarLocal               = true,
   positionRadar            = { x = 0, y = 64, z = 0 },
+  positionPoste            = nil,
   positionsRelatives       = nil,
   porteeRadar              = 512,
+  validiteStation          = 15,
+  toleranceFusion          = 8,
+  protocoleRadar           = "frenchnet_radar",
+  protocoleLanceur         = "frenchnet_lanceur",
+  terrainResolution        = 16,
+  terrainRayonRecherche    = 3,
+  terrainCellulesMax       = 4000,
+  terrainEnregistrement    = 120,
+  sondesVehicules          = false,
+  sondeEchantillons        = 3,
+  sondeToleranceVerticale  = 0.5,
+  sondeVitesseSolMax       = 12,
+  ecartMaxSonde            = 30,
+  poidsMunitions           = 1.5,
+  scrambleAGAutomatique    = false,
+  vitesseProjectile        = 30,
+  echelleCarte             = 32,
+  suiviCarte               = "MENACE",
   intervalleBalayage       = 1,
   historiquePiste          = 20,
   oubliPisteSecondes       = 30,
@@ -369,6 +428,16 @@ local etat = {
   alerteMaxDepuis   = 0,
 
   zones             = {},   -- liste de zones (persistee dans zones.dat)
+  versionZones      = 0,    -- incremente a chaque edition : invalide le cache carte
+  stations          = {},   -- [nom] = station radar deportee
+  nombreStations    = 0,
+  stationsActives   = 0,
+  lanceurs          = {},   -- [nom] = balise de lanceur (position, munitions, tirs)
+  terrain           = nil,  -- modele de terrain observe
+  terrainSale       = false,
+  alliesManuels     = {},   -- [nom de contact] = { t, motif } declares par un controleur
+  demandesAG        = {},   -- [id de piste] = scramble AG en attente d'un controleur
+  nombreDemandesAG  = 0,
   pistes            = {},   -- [id] = piste
   transpondeurs     = {},   -- [cle] = { code, x, y, z, recuA, nom }
   roster            = {},   -- [nomJoueur] = { faction, hostilite }
@@ -377,15 +446,12 @@ local etat = {
 
   alertes           = {},   -- alertes controleur non acquittees
   cote              = nil,
-  radar             = nil,
-  radarNom          = nil,
-  radarMethode      = nil,
-  positionsRelatives= nil,
 
   compteurs = {
     balayages = 0, detections = 0, decisions = 0,
     ordresFeu = 0, ordresScramble = 0,
     killsConfirmes = 0, pistesPerdues = 0, reemissions = 0, alertes = 0,
+    ordresManuels = 0, alliesManuels = 0, demandesAG = 0, projectiles = 0,
   },
   echecsConsecutifs = 0,
   derniereDecision  = nil,
@@ -465,7 +531,51 @@ local function enregistrerEtat()
     codeGeneral          = cfg.codeGeneral,
     codeGeneralPrecedent = cfg.codeGeneralPrecedent,
     rotationA            = cfg.rotationA,
+    alliesManuels        = etat.alliesManuels,
   }, ETAPES.ENREGISTREMENT_ETAT)
+end
+
+--[[
+  Le modele de terrain est le seul etat que le poste APPREND. Le perdre a
+  chaque redemarrage reviendrait a redecouvrir le relief a chaque
+  rechargement de chunk, donc a mal classer les contacts pendant toute la
+  phase d'apprentissage. Il est ecrit periodiquement, pas a chaque releve :
+  ecrire un fichier a chaque pas de joueur saturerait le disque.
+]]
+local function enregistrerTerrain()
+  if not etat.terrain then return false end
+  local ok = ecrireTable(CHEMIN_TERRAIN, terrain.exporter(etat.terrain),
+    ETAPES.ENREGISTREMENT_TERRAIN)
+  if ok then
+    etat.terrainSale = false
+    local stats = terrain.statistiques(etat.terrain)
+    debug_(ETAPES.ENREGISTREMENT_TERRAIN, string.format(
+      "%d case(s), %d echantillon(s), %d blocs carres couverts",
+      stats.cases, stats.echantillons, stats.surface))
+  end
+  return ok
+end
+
+local function chargerTerrain()
+  etat.terrain = terrain.nouveau({
+    resolution     = cfg.terrainResolution,
+    rayonRecherche = cfg.terrainRayonRecherche,
+    cellulesMax    = cfg.terrainCellulesMax,
+    altitudeDefaut = cfg.altitudeSolReference,
+  })
+  local donnees = lireTable(CHEMIN_TERRAIN, ETAPES.CHARGEMENT_TERRAIN)
+  if not donnees then
+    info(ETAPES.CHARGEMENT_TERRAIN,
+      "aucun modele de terrain enregistre : le poste part d'une carte vierge et " ..
+      "apprend le relief au fil des observations (stations, lanceurs, joueurs au sol)")
+    return
+  end
+  local ok, motif = terrain.importer(etat.terrain, donnees)
+  if ok then
+    info(ETAPES.CHARGEMENT_TERRAIN, motif)
+  else
+    avert(ETAPES.CHARGEMENT_TERRAIN, motif .. " : le modele repart de zero")
+  end
 end
 
 local function chargerEtat()
@@ -480,6 +590,16 @@ local function chargerEtat()
     cfg.codeGeneral = donnees.codeGeneral
     cfg.codeGeneralPrecedent = donnees.codeGeneralPrecedent
     cfg.rotationA = donnees.rotationA
+  end
+  if type(donnees.alliesManuels) == "table" then
+    etat.alliesManuels = donnees.alliesManuels
+    local n = 0
+    for _ in pairs(etat.alliesManuels) do n = n + 1 end
+    if n > 0 then
+      avert(ETAPES.ALLIE_MANUEL, string.format(
+        "%d contact(s) restent declares ALLIES a la main par un controleur : " ..
+        "ils traverseront toutes les zones sans etre engages", n))
+    end
   end
   info(ETAPES.CHARGEMENT_ETAT, string.format(
     "etat restaure : mode %s, alerte maximale %s", etat.mode, tostring(etat.alerteMax)))
@@ -544,259 +664,309 @@ local function ouvrirReseau()
 end
 
 --------------------------------------------------------------------------------
--- 10. ADAPTATEUR RADAR (Create Radars)
+-- 10. RESEAU DE STATIONS RADAR
 --
---     Les addons radar n'exposent pas tous la meme API. Plutot que de figer un
---     nom de methode, on essaie les noms connus dans l'ordre et on journalise
---     celui qui repond. Si votre version expose une methode differente,
---     ajoutez-la a METHODES_RADAR : c'est le seul endroit a modifier.
+--     Le poste central ne balaie plus lui-meme : il ECOUTE. Chaque station
+--     radar est un ordinateur autonome, pose a cote de son antenne, qui
+--     normalise ses echos en coordonnees absolues et les transmet ici.
+--
+--     Ce que cela change :
+--       - la couverture n'est plus limitee a la portee d'un seul radar ;
+--       - la chute d'une station degrade la couverture au lieu d'aveugler
+--         tout le systeme ;
+--       - chaque station declare sa position, donc son enveloppe fiable
+--         propre : la confirmation de destruction utilise celle de la station
+--         qui a REELLEMENT vu la cible, pas une portee moyenne fictive ;
+--       - une station posee au sol est un releve d'altitude exact pour le
+--         modele de terrain.
+--
+--     Un radar peut aussi etre accole directement au poste : il devient alors
+--     la station "LOCAL", traitee comme toutes les autres.
 --------------------------------------------------------------------------------
 
-local METHODES_RADAR = {
-  { nom = "getEntities",     nature = noyau.NATURES.ENTITE },
-  { nom = "getContraptions", nature = noyau.NATURES.VEHICULE },
-  { nom = "getPlayers",      nature = noyau.NATURES.JOUEUR },
-  { nom = "getTargets",      nature = noyau.NATURES.ENTITE },
-  { nom = "getRadarTargets", nature = noyau.NATURES.ENTITE },
-  { nom = "scan",            nature = noyau.NATURES.ENTITE },
-}
-
-local function detecterRadar()
-  local nom = cfg.peripheriqueRadar
-  if nom and peripheral.isPresent(nom) then
-    etat.radar, etat.radarNom = peripheral.wrap(nom), nom
-  else
-    if nom then avert(ETAPES.DETECTION_RADAR, "peripheriqueRadar force introuvable, detection automatique") end
-    for _, candidat in ipairs(peripheral.getNames()) do
-      local typ = peripheral.getType(candidat)
-      if type(typ) == "string" and typ:lower():find("radar", 1, true) then
-        etat.radar, etat.radarNom = peripheral.wrap(candidat), candidat
-        break
-      end
-    end
+local function enregistrerStation(nom, donnees, maintenant)
+  local station = etat.stations[nom]
+  local nouvelle = station == nil
+  if nouvelle then
+    station = { nom = nom, trames = 0 }
+    etat.stations[nom] = station
+    etat.nombreStations = etat.nombreStations + 1
   end
 
-  if not etat.radar then
-    erreur(ETAPES.DETECTION_RADAR, "aucun peripherique radar detecte : aucune detection possible")
+  station.designation = donnees.designation
+  station.x, station.y, station.z = donnees.x, donnees.y, donnees.z
+  station.portee   = nombreValide(donnees.portee) and donnees.portee or 0
+  station.contacts = type(donnees.contacts) == "table" and donnees.contacts or {}
+  station.recuA    = maintenant
+  station.trames   = station.trames + 1
+  station.locale   = donnees.locale == true
+
+  if nouvelle then
+    info(ETAPES.RECEPTION_RADAR, string.format(
+      "station radar %s entree dans le reseau : X=%.0f Y=%.0f Z=%.0f, portee %.0f",
+      nom, station.x or 0, station.y or 0, station.z or 0, station.portee))
+  end
+
+  -- Une station est posee au sol : sa position est un releve d'altitude exact.
+  if nombreValide(station.x) and nombreValide(station.y) and nombreValide(station.z) then
+    terrain.echantillonner(etat.terrain, station.x, station.y, station.z, "radar", maintenant)
+  end
+  return station
+end
+
+-- Station "LOCAL" : radar accole directement au poste de commandement.
+local radarLocal, methodesLocales, relativesLocales
+
+local function detecterRadarLocal()
+  if cfg.radarLocal == false then
+    info(ETAPES.DETECTION_RADAR,
+      "aucun radar local configure : le poste fonctionne uniquement sur les stations deportees")
     return false
   end
-
-  etat.methodesActives = {}
-  for _, methode in ipairs(METHODES_RADAR) do
-    if type(etat.radar[methode.nom]) == "function" then
-      etat.methodesActives[#etat.methodesActives + 1] = methode
-    end
-  end
-
-  if #etat.methodesActives == 0 then
-    erreur(ETAPES.DETECTION_RADAR, string.format(
-      "radar '%s' detecte mais aucune methode connue (essayees : getEntities, getContraptions, " ..
-      "getPlayers, getTargets, getRadarTargets, scan). Completez METHODES_RADAR.", etat.radarNom))
+  local r, nom, actives, motif = scanner.detecter(peripheral, cfg.peripheriqueRadar)
+  if not r then
+    info(ETAPES.DETECTION_RADAR, motif .. " ; le poste s'appuiera sur les stations deportees")
     return false
   end
-
-  local noms = {}
-  for _, m in ipairs(etat.methodesActives) do noms[#noms + 1] = m.nom end
-  info(ETAPES.DETECTION_RADAR, string.format("radar '%s' detecte, methodes : %s",
-    etat.radarNom, table.concat(noms, ", ")))
+  radarLocal, methodesLocales = r, actives
+  info(ETAPES.DETECTION_RADAR, motif .. " (station LOCAL)")
   return true
 end
 
--- Extrait une position d'un echo, quel que soit le format rendu par l'addon.
-local function positionEcho(echo)
-  if nombreValide(echo.x) and nombreValide(echo.y) and nombreValide(echo.z) then
-    return echo.x, echo.y, echo.z
-  end
-  local p = echo.position or echo.pos or echo.coords
-  if type(p) == "table" then
-    local x = p.x or p[1]
-    local y = p.y or p[2]
-    local z = p.z or p[3]
-    if nombreValide(x) and nombreValide(y) and nombreValide(z) then return x, y, z end
-  end
-  return nil
-end
+local function balayerRadarLocal(maintenant)
+  if not radarLocal then return end
+  local bruts = scanner.collecter(radarLocal, methodesLocales, function(fn)
+    return proteger(ETAPES.BALAYAGE_RADAR, fn)
+  end)
 
---[[
-  Determine une fois pour toutes si le radar rend des positions relatives.
-  Heuristique : si les echos sont tous a portee de l'ORIGINE du monde alors que
-  le radar en est tres eloigne, ce sont forcement des positions relatives.
-  Le resultat est journalise explicitement, et peut etre force en configuration.
-]]
-local function deciderReferentiel(echos)
-  if type(cfg.positionsRelatives) == "boolean" then
-    etat.positionsRelatives = cfg.positionsRelatives
-    info(ETAPES.NORMALISATION_ECHOS, "referentiel force par configuration : " ..
-      (etat.positionsRelatives and "RELATIF" or "ABSOLU"))
-    return
-  end
-  local r = cfg.positionRadar
-  local distanceRadarOrigine = math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
-  local portee = (nombreValide(cfg.porteeRadar) and cfg.porteeRadar > 0) and cfg.porteeRadar or 512
-
-  local prochesOrigine, prochesRadar = 0, 0
-  for _, echo in ipairs(echos) do
-    local x, y, z = positionEcho(echo)
-    if x then
-      if math.sqrt(x * x + y * y + z * z) <= portee * 1.5 then prochesOrigine = prochesOrigine + 1 end
-      local dx, dy, dz = x - r.x, y - r.y, z - r.z
-      if math.sqrt(dx * dx + dy * dy + dz * dz) <= portee * 1.5 then prochesRadar = prochesRadar + 1 end
+  if relativesLocales == nil then
+    if type(cfg.positionsRelatives) == "boolean" then
+      relativesLocales = cfg.positionsRelatives
+      info(ETAPES.NORMALISATION_ECHOS, "referentiel local force par configuration : "
+        .. (relativesLocales and "RELATIF" or "ABSOLU"))
+    else
+      local relatif, motif = scanner.deduireReferentiel(bruts, cfg.positionRadar, cfg.porteeRadar)
+      relativesLocales = relatif
+      info(ETAPES.NORMALISATION_ECHOS, motif)
     end
   end
 
-  if distanceRadarOrigine <= portee * 1.5 then
-    -- Radar proche de l'origine : les deux referentiels se confondent, on ne
-    -- peut pas trancher. On prend l'absolu et on le dit.
-    etat.positionsRelatives = false
-    avert(ETAPES.NORMALISATION_ECHOS,
-      "radar trop proche de l'origine du monde pour distinguer relatif et absolu : " ..
-      "referentiel ABSOLU suppose. Renseignez positionsRelatives en configuration.")
-    return
-  end
-
-  etat.positionsRelatives = (prochesOrigine > prochesRadar)
-  info(ETAPES.NORMALISATION_ECHOS, string.format(
-    "referentiel radar deduit : %s (%d echo(s) proche(s) de l'origine, %d du radar)",
-    etat.positionsRelatives and "RELATIF" or "ABSOLU", prochesOrigine, prochesRadar))
+  local contacts = scanner.normaliser(bruts, cfg.positionRadar, relativesLocales)
+  enregistrerStation("LOCAL", {
+    designation = "radar du poste de commandement", locale = true,
+    x = cfg.positionRadar.x, y = cfg.positionRadar.y, z = cfg.positionRadar.z,
+    portee = cfg.porteeRadar, contacts = contacts,
+  }, maintenant)
 end
 
 --------------------------------------------------------------------------------
--- 11. BALAYAGE ET MISE A JOUR DES PISTES  [ETAPE 1 : DETECTION]
+-- 11. FUSION DES PISTES  [ETAPE 1 : DETECTION]
+--
+--     Deux stations qui voient le meme aeronef ne doivent pas produire deux
+--     pistes : le systeme tirerait deux fois sur la meme cible et compterait
+--     deux menaces la ou il n'y en a qu'une. Les contacts sont donc regroupes
+--     par identifiant stable, et a defaut par proximite.
+--
+--     Quand plusieurs stations voient le meme contact, la position retenue est
+--     celle de la station LA PLUS PROCHE : c'est la mesure la moins degradee.
 --------------------------------------------------------------------------------
 
 local compteurAnonyme = 0
 
-local function identifiantEcho(echo)
-  local id = echo.id or echo.uuid or echo.uid or echo.entityId
-  if id ~= nil then return "ID:" .. tostring(id) end
-  local nom = echo.name or echo.nom or echo.label or echo.displayName
-  if type(nom) == "string" and nom ~= "" then return "NOM:" .. nom end
-  return nil
-end
-
-local function natureEcho(echo, natureParDefaut)
-  local typ = tostring(echo.type or echo.entityType or echo.kind or ""):lower()
-  if typ:find("player", 1, true) then return noyau.NATURES.JOUEUR end
-  if echo.isPlayer == true then return noyau.NATURES.JOUEUR end
-  if echo.isContraption == true or typ:find("contraption", 1, true)
-     or typ:find("ship", 1, true) or typ:find("vehicle", 1, true) then
-    return noyau.NATURES.VEHICULE
-  end
-  return natureParDefaut
-end
-
-local function collecterEchos()
-  local bruts = {}
-  for _, methode in ipairs(etat.methodesActives or {}) do
-    local ok, resultat = proteger(ETAPES.BALAYAGE_RADAR, function()
-      return etat.radar[methode.nom](etat.radar)
-    end)
-    if ok and type(resultat) == "table" then
-      for _, echo in ipairs(resultat) do
-        if type(echo) == "table" then
-          bruts[#bruts + 1] = { echo = echo, nature = methode.nature }
-        end
-      end
-    end
-  end
-  return bruts
-end
-
--- Retrouve la piste correspondant a un echo sans identifiant stable :
--- rapprochement par proximite du dernier point connu.
-local function apparierParProximite(x, y, z, nature, maintenant)
-  local meilleur, meilleureDistance = nil, cfg.toleranceAppariement or 24
-  for id, piste in pairs(etat.pistes) do
-    if piste.nature == nature and (maintenant - piste.vuA) <= (cfg.intervalleBalayage or 1) * 3 then
-      local d = noyau.distance3D(piste, { x = x, y = y, z = z })
+-- Rapprochement par proximite, pour les contacts sans identifiant stable.
+local function apparierParProximite(collection, x, y, z, nature, tolerance, filtreTemps)
+  local meilleur, meilleureDistance = nil, tolerance
+  for id, candidat in pairs(collection) do
+    if candidat.nature == nature and (not filtreTemps or filtreTemps(candidat)) then
+      local d = noyau.distance3D(candidat, { x = x, y = y, z = z })
       if d <= meilleureDistance then meilleur, meilleureDistance = id, d end
     end
   end
   return meilleur
 end
 
-local function mettreAJourPistes(maintenant)
-  local bruts = collecterEchos()
-  etat.compteurs.balayages = etat.compteurs.balayages + 1
+--[[
+  Un contact peut-il servir de sonde d'altitude ?
+  Les vehicules sont refuses par defaut : un aeronef en croisiere a altitude
+  constante passerait pour un vehicule au sol et empoisonnerait durablement le
+  modele de terrain. Un joueur qui marche, lui, est pose - c'est la sonde la
+  plus abondante et la plus fiable dont dispose le systeme.
+]]
+local function alimenterTerrain(piste, maintenant)
+  if piste.nature ~= noyau.NATURES.JOUEUR and cfg.sondesVehicules ~= true then return end
 
-  if etat.positionsRelatives == nil then
-    local echos = {}
-    for _, b in ipairs(bruts) do echos[#echos + 1] = b.echo end
-    deciderReferentiel(echos)
+  local sonde, motif = terrain.contactEstUneSonde(piste, cfg)
+  if not sonde then return end
+
+  -- Garde-fou : un releve qui contredit franchement une case deja bien etayee
+  -- n'est pas du terrain, c'est un contact en vol au-dessus.
+  local sol, confiance = terrain.hauteurSol(etat.terrain, piste.x, piste.z)
+  if confiance >= 0.5 and math.abs(piste.y - sol) > (cfg.ecartMaxSonde or 30) then
+    debug_(ETAPES.TERRAIN, string.format(
+      "releve de %s refuse : %.0f contre un sol connu a %.0f", piste.nom, piste.y, sol))
+    return
   end
 
-  local vus = {}
-  local r = cfg.positionRadar
+  local _, detail = terrain.echantillonner(etat.terrain, piste.x, piste.y, piste.z,
+    "contact", maintenant)
+  etat.terrainSale = true
+  debug_(ETAPES.TERRAIN, string.format("sonde %s [%s] : %s", piste.nom, motif, tostring(detail)))
+end
 
-  for _, brut in ipairs(bruts) do
-    local echo = brut.echo
-    local x, y, z = positionEcho(echo)
-    if not x then
-      debug_(ETAPES.NORMALISATION_ECHOS, "echo sans position exploitable, ignore")
+local function mettreAJourPistes(maintenant)
+  etat.compteurs.balayages = etat.compteurs.balayages + 1
+  proteger(ETAPES.BALAYAGE_RADAR, balayerRadarLocal, maintenant)
+
+  local validite = cfg.validiteStation or 15
+  local groupes, actives, neutresIgnorees = {}, 0, 0
+
+  for nom, station in pairs(etat.stations) do
+    local age = maintenant - (station.recuA or -1e9)
+    if age > validite then
+      if not station.muette then
+        station.muette = true
+        avert(ETAPES.RECEPTION_RADAR, string.format(
+          "station %s muette depuis %.0fs : sa couverture est perdue", nom, age))
+      end
     else
-      if etat.positionsRelatives then x, y, z = r.x + x, r.y + y, r.z + z end
-      local nature = natureEcho(echo, brut.nature)
+      if station.muette then
+        station.muette = false
+        info(ETAPES.RECEPTION_RADAR, "station " .. nom .. " de retour sur le reseau")
+      end
+      actives = actives + 1
 
-      -- Filtrage du bruit biologique : sans cela le systeme engage les vaches.
-      if nature == noyau.NATURES.ENTITE and cfg.traiterEntitesNeutres ~= true then
-        debug_(ETAPES.NORMALISATION_ECHOS, string.format(
-          "entite neutre ignoree en %.0f/%.0f/%.0f (traiterEntitesNeutres = false)", x, y, z))
-      else
-        local id = identifiantEcho(echo)
-        if not id then
-          id = apparierParProximite(x, y, z, nature, maintenant)
-          if not id then
-            compteurAnonyme = compteurAnonyme + 1
-            id = string.format("ANON-%d", compteurAnonyme)
+      for _, contact in ipairs(station.contacts or {}) do
+        local x, y, z = contact.x, contact.y, contact.z
+        if nombreValide(x) and nombreValide(y) and nombreValide(z) then
+          local nature = contact.nature or noyau.NATURES.ENTITE
+
+          -- Filtrage du bruit biologique : sans cela le systeme engage les vaches.
+          if nature == noyau.NATURES.ENTITE and cfg.traiterEntitesNeutres ~= true then
+            -- Comptees, pas journalisees une par une : une station peut en
+            -- rapporter des dizaines a chaque balayage.
+            neutresIgnorees = neutresIgnorees + 1
+          else
+            local id = contact.id
+            if not id then
+              -- Rapprochement d'abord avec ce que ce balayage a deja vu (une
+              -- autre station), puis avec les pistes existantes.
+              id = apparierParProximite(groupes, x, y, z, nature, cfg.toleranceFusion or 8)
+                or apparierParProximite(etat.pistes, x, y, z, nature,
+                     cfg.toleranceAppariement or 24,
+                     function(pi) return (maintenant - (pi.vuA or 0)) <= (cfg.intervalleBalayage or 1) * 3 end)
+              if not id then
+                compteurAnonyme = compteurAnonyme + 1
+                id = string.format("ANON-%d", compteurAnonyme)
+              end
+            end
+
+            local distance = noyau.distance3D({ x = x, y = y, z = z }, station)
+            local g = groupes[id]
+            if not g then
+              groupes[id] = {
+                id = id, nom = contact.nom or id, nature = nature,
+                x = x, y = y, z = z,
+                distance = distance, portee = station.portee,
+                stations = { nom },
+              }
+            else
+              g.stations[#g.stations + 1] = nom
+              -- La station la plus proche fournit la mesure la moins degradee.
+              if distance < g.distance then
+                g.x, g.y, g.z = x, y, z
+                g.distance, g.portee = distance, station.portee
+                g.nom = contact.nom or g.nom
+              end
+            end
           end
         end
-
-        local piste = etat.pistes[id]
-        if not piste then
-          piste = {
-            id = id,
-            nom = echo.name or echo.nom or echo.label or echo.displayName or id,
-            nature = nature,
-            echantillons = {},
-            premiereDetection = maintenant,
-            engagement = nil,
-          }
-          etat.pistes[id] = piste
-          etat.compteurs.detections = etat.compteurs.detections + 1
-          info(ETAPES.DETECTION, string.format(
-            "nouveau contact %s (%s) en X=%.0f Y=%.0f Z=%.0f",
-            piste.nom, nature, x, y, z))
-        end
-
-        -- Vitesses, calculees par Command a partir de sa propre piste : ne
-        -- dependre d'aucun champ optionnel de l'addon rend la mesure fiable.
-        local precedent = piste.echantillons[#piste.echantillons]
-        if precedent and maintenant > precedent.t then
-          local dt = maintenant - precedent.t
-          piste.vitesseHorizontale = noyau.distance2D(x, z, precedent.x, precedent.z) / dt
-          piste.vitesseVerticale   = (y - precedent.y) / dt
-        end
-
-        piste.x, piste.y, piste.z = x, y, z
-        piste.vuA = maintenant
-        piste.present = true
-        piste.distanceRadar = noyau.distance3D(piste, r)
-        piste.echantillons[#piste.echantillons + 1] = { t = maintenant, x = x, y = y, z = z }
-        while #piste.echantillons > (cfg.historiquePiste or 20) do
-          table.remove(piste.echantillons, 1)
-        end
-        vus[id] = true
       end
     end
   end
 
-  -- Pistes non revues lors de ce balayage.
+  etat.stationsActives = actives
+  if neutresIgnorees > 0 then
+    debug_(ETAPES.NORMALISATION_ECHOS, string.format(
+      "%d entite neutre ignoree(s) sur ce balayage (traiterEntitesNeutres = false)",
+      neutresIgnorees))
+  end
+
+  ------------------------------------------------------------------- pistes
+  local vus = {}
+  for id, g in pairs(groupes) do
+    local piste = etat.pistes[id]
+    if not piste then
+      piste = {
+        id = id, nom = g.nom, nature = g.nature,
+        echantillons = {}, premiereDetection = maintenant, engagement = nil,
+      }
+      etat.pistes[id] = piste
+      etat.compteurs.detections = etat.compteurs.detections + 1
+      info(ETAPES.DETECTION, string.format(
+        "nouveau contact %s (%s) en X=%.0f Y=%.0f Z=%.0f, vu par %s",
+        piste.nom, g.nature, g.x, g.y, g.z, table.concat(g.stations, "+")))
+    elseif #g.stations > 1 and not piste.multiStation then
+      piste.multiStation = true
+      debug_(ETAPES.FUSION_PISTES, string.format(
+        "contact %s vu simultanement par %d stations : %s",
+        piste.nom, #g.stations, table.concat(g.stations, "+")))
+    end
+
+    -- Vitesses calculees par Command sur sa propre piste : ne dependre d'aucun
+    -- champ optionnel de l'addon rend la mesure fiable.
+    local precedent = piste.echantillons[#piste.echantillons]
+    if precedent and maintenant > precedent.t then
+      local dt = maintenant - precedent.t
+      piste.vitesseHorizontale = noyau.distance2D(g.x, g.z, precedent.x, precedent.z) / dt
+      piste.vitesseVerticale   = (g.y - precedent.y) / dt
+    end
+
+    --[[
+      DETECTION CINEMATIQUE DE PROJECTILE
+      Quand le mod ne dit rien d'utile sur le type, la vitesse trahit : aucun
+      appareil pilote ne tient durablement la vitesse d'un obus. Un contact
+      anonyme au-dela du seuil est requalifie en MISSILE - donc affiche comme
+      tel et traite comme cible aerienne, quelle que soit son altitude.
+      La requalification est definitive pour la piste : un projectile ne
+      redevient pas un aeronef en ralentissant a l'impact.
+    ]]
+    if piste.nature ~= noyau.NATURES.MISSILE
+       and piste.nature ~= noyau.NATURES.JOUEUR
+       and nombreValide(piste.vitesseHorizontale)
+       and piste.vitesseHorizontale >= (cfg.vitesseProjectile or 30) then
+      piste.nature = noyau.NATURES.MISSILE
+      piste.verdictNom = nil
+      etat.compteurs.projectiles = etat.compteurs.projectiles + 1
+      avert(ETAPES.PROJECTILE, string.format(
+        "contact %s requalifie PROJECTILE : %.0f b/s, au-dela du seuil de %.0f b/s",
+        piste.nom, piste.vitesseHorizontale, cfg.vitesseProjectile or 30))
+    end
+
+    piste.x, piste.y, piste.z = g.x, g.y, g.z
+    piste.vuA = maintenant
+    piste.present = true
+    piste.stations = g.stations
+    -- Distance a la station qui a reellement vu la cible, et portee de CETTE
+    -- station : c'est sur elles que se calcule l'enveloppe fiable.
+    piste.distanceRadar  = g.distance
+    piste.porteeStation  = g.portee
+    piste.echantillons[#piste.echantillons + 1] = { t = maintenant, x = g.x, y = g.y, z = g.z }
+    while #piste.echantillons > (cfg.historiquePiste or 20) do
+      table.remove(piste.echantillons, 1)
+    end
+
+    proteger(ETAPES.TERRAIN, alimenterTerrain, piste, maintenant)
+    vus[id] = true
+  end
+
+  ------------------------------------------------------- pistes non revues
   for id, piste in pairs(etat.pistes) do
     if not vus[id] then
       if piste.present then
         piste.present = false
         debug_(ETAPES.MISE_A_JOUR_PISTES, string.format(
-          "contact %s perdu du radar a %.0fm du radar", piste.nom, piste.distanceRadar or -1))
+          "contact %s perdu du reseau radar a %.0fm de la station la plus proche",
+          piste.nom, piste.distanceRadar or -1))
       end
       -- Une piste sous evaluation de destruction n'est jamais oubliee avant
       -- d'avoir ete conclue : c'est la seule facon de trancher entre un crash
@@ -804,6 +974,13 @@ local function mettreAJourPistes(maintenant)
       local sousEvaluation = piste.engagement and piste.engagement.actif
       if not sousEvaluation and (maintenant - (piste.vuA or 0)) > (cfg.oubliPisteSecondes or 30) then
         etat.pistes[id] = nil
+        if etat.demandesAG[id] then
+          etat.demandesAG[id] = nil
+          etat.nombreDemandesAG = math.max(0, etat.nombreDemandesAG - 1)
+          info(ETAPES.DEMANDE_SCRAMBLE_AG, string.format(
+            "demande de scramble AG sur %s annulee : le contact a quitte la couverture radar",
+            piste.nom))
+        end
         debug_(ETAPES.MISE_A_JOUR_PISTES, "piste " .. piste.nom .. " oubliee")
       end
     end
@@ -866,23 +1043,66 @@ end
   Designe la ou les plateformes et emet les ordres correspondants.
   Retourne la liste des ordres reellement emis.
 ]]
-local function engager(piste, verdict, verdictNom, maintenant)
-  -- L'inventaire des plateformes vient de Fire Control. S'il est perime, on ne
-  -- designe pas au hasard : on alerte.
-  if #etat.plateformes == 0 then
-    alerterControleur("aucune plateforme declaree",
-      string.format("cible %s en %s, verdict %s, mais Fire Control n'a declare aucune plateforme",
-        piste.nom, piste.classeZone or "?", verdictNom))
-    return {}
-  end
-  local ageInventaire = maintenant - etat.inventaireRecuA
-  if ageInventaire > (cfg.validiteInventaire or 60) then
-    alerterControleur("inventaire Fire Control perime",
-      string.format("dernier inventaire recu il y a %.0fs (limite %.0fs) : les compteurs de tirs " ..
-        "et les positions de plateformes ne sont plus fiables", ageInventaire, cfg.validiteInventaire or 60))
+--[[
+  Liste des plateformes exploitables a cet instant.
+  Deux sources, fusionnees par nom :
+    - les BALISES DE LANCEUR, qui annoncent d'elles-memes position, munitions
+      restantes et tirs effectues. C'est la source de reference : elle est
+      vivante et porte le stock reel.
+    - l'inventaire global pousse par Fire Control, conserve pour les
+      installations sans balise propre.
+  Une balise perimee est ecartee : mieux vaut ne pas designer que designer une
+  plateforme dont on ne sait plus si elle existe encore.
+]]
+local function plateformesDisponibles(maintenant)
+  local validite = cfg.validiteInventaire or 60
+  local parNom, liste = {}, {}
+
+  for _, p in ipairs(etat.plateformes) do
+    local nom = tostring(p.nom or p.name or "?")
+    if not parNom[nom] then
+      parNom[nom] = p
+      liste[#liste + 1] = p
+    end
   end
 
-  local candidats, rejetes = noyau.designer(etat.plateformes, piste, cfg)
+  for nom, lanceur in pairs(etat.lanceurs) do
+    local age = maintenant - (lanceur.recuA or -1e9)
+    if age <= validite then
+      if parNom[nom] then
+        -- La balise fait autorite sur l'inventaire global : elle est plus
+        -- fraiche et elle seule connait le stock reel.
+        for i, p in ipairs(liste) do
+          if tostring(p.nom or p.name) == nom then liste[i] = lanceur break end
+        end
+      else
+        liste[#liste + 1] = lanceur
+      end
+      parNom[nom] = lanceur
+    elseif not lanceur.perimee then
+      lanceur.perimee = true
+      avert(ETAPES.RECEPTION_LANCEUR, string.format(
+        "balise du lanceur %s muette depuis %.0fs : la plateforme n'est plus designable",
+        nom, age))
+    end
+  end
+
+  return liste
+end
+
+local function engager(piste, verdict, verdictNom, maintenant, manuel)
+  local plateformes = plateformesDisponibles(maintenant)
+
+  -- Les plateformes s'annoncent d'elles-memes. Aucune annonce = aucune defense
+  -- joignable : on ne designe pas au hasard, on alerte.
+  if #plateformes == 0 then
+    alerterControleur("aucune plateforme joignable",
+      string.format("cible %s en %s, verdict %s, mais aucune balise de lanceur ni inventaire " ..
+        "Fire Control n'est valide", piste.nom, piste.classeZone or "?", verdictNom))
+    return {}
+  end
+
+  local candidats, rejetes = noyau.designer(plateformes, piste, cfg)
 
   for _, r in ipairs(rejetes) do
     debug_(ETAPES.DESIGNATION_TIREUR, string.format("plateforme %s ecartee : %s", r.nom, r.motif))
@@ -896,15 +1116,44 @@ local function engager(piste, verdict, verdictNom, maintenant)
   end
 
   local ordres = noyau.planifier(verdict, candidats)
-  local emis = {}
+  local emis, bloques = {}, {}
 
   for _, ordre in ipairs(ordres) do
     local c = ordre.candidat
+
+    --[[
+      Le scramble AG ne part jamais tout seul. La doctrine peut le reclamer,
+      le systeme peut designer la plateforme, mais c'est un humain qui lance
+      une patrouille contre de l'infanterie ou un vehicule. La demande est
+      enregistree, le controleur la valide depuis la carte.
+    ]]
+    if noyau.scrambleRequiertControleur(ordre.role, piste.categorie, cfg, manuel) then
+      if not etat.demandesAG[piste.id] then
+        etat.demandesAG[piste.id] = {
+          t = maintenant, nom = piste.nom, categorie = piste.categorie,
+          zone = piste.classeZone, verdictNom = verdictNom, plateforme = c.nom,
+        }
+        etat.nombreDemandesAG = etat.nombreDemandesAG + 1
+        etat.compteurs.demandesAG = etat.compteurs.demandesAG + 1
+        avert(ETAPES.DEMANDE_SCRAMBLE_AG, string.format(
+          "cible %s (%s) en zone %s : la doctrine appelle un %s, plateforme %s designee. " ..
+          "AUCUN ordre transmis : un controleur doit valider depuis la carte.",
+          piste.nom, piste.categorie, piste.classeZone or "?",
+          noyau.verbePourOrdre("SCRAMBLE", piste.categorie, cfg), c.nom))
+        alerterControleur("scramble AG en attente de validation",
+          string.format("%s (%s) en zone %s - plateforme proposee : %s",
+            piste.nom, piste.categorie, piste.classeZone or "?", c.nom))
+      end
+      bloques[#bloques + 1] = { role = ordre.role, plateforme = c.nom }
+    else
     info(ETAPES.DESIGNATION_TIREUR, string.format(
-      "cible %s -> plateforme %s designee pour %s (score %.3f = charge %.2f x %.1f + distance %.2f x %.1f, " ..
-      "%d tir(s) deja effectue(s), %.0fm)",
-      piste.nom, c.nom, ordre.role, c.score, c.chargeNormalisee, cfg.poidsTirs or 1,
-      c.distanceNormalisee, cfg.poidsDistance or 1, c.tirs, c.distance))
+      "cible %s -> plateforme %s designee pour %s (score %.3f = stock %.2f x %.1f + distance %.2f x %.1f " ..
+      "+ charge %.2f x %.1f ; %s munition(s), %d tir(s), %.0fm)",
+      piste.nom, c.nom, ordre.role, c.score,
+      c.penaliteStock, cfg.poidsMunitions or 1.5,
+      c.distanceNormalisee, cfg.poidsDistance or 1,
+      c.chargeNormalisee, cfg.poidsTirs or 0.5,
+      c.munitions and tostring(c.munitions) or "?", c.tirs, c.distance))
 
     local chaine = noyau.formaterOrdre(ordre.role, c.nom, piste.categorie, cfg)
     local details = {
@@ -928,9 +1177,10 @@ local function engager(piste, verdict, verdictNom, maintenant)
         "echec de transmission de l'ordre \"%s\" vers Fire Control", chaine))
       alerterControleur("transmission Fire Control impossible", chaine)
     end
+    end
   end
 
-  return emis
+  return emis, bloques
 end
 
 --------------------------------------------------------------------------------
@@ -938,36 +1188,33 @@ end
 --------------------------------------------------------------------------------
 
 local function decider(piste, maintenant)
-  ------------------------------------------------------------ resolution zone
+  --[[
+    CLASSIFICATION D'ABORD, JURIDICTION ENSUITE.
+    Une piste hors de toute zone classifiee ne declenche toujours AUCUNE
+    action - c'est la doctrine et elle ne bouge pas. Mais elle est desormais
+    classee quand meme, pour une raison precise : la carte tactique doit
+    l'afficher avec le bon symbole, et un controleur doit pouvoir cliquer
+    dessus pour ordonner un scramble a la main. Afficher un contact sans
+    savoir ce qu'il est n'aiderait personne.
+    Le cout est local : une lecture de terrain et un appariement de
+    transpondeur. Aucun ordre n'en sort.
+  ]]
+
+  ---------------------------------------------------------- classification
+  -- Le modele de terrain observe fournit l'altitude reelle du sol sous la
+  -- cible. C'est ce qui distingue un char sur une crete d'un aeronef en vol
+  -- rasant, la ou une altitude de reference unique se trompe des deux cotes.
+  local sol, confianceSol, motifSol = terrain.hauteurSol(etat.terrain, piste.x, piste.z)
+  local solConnu = (confianceSol > 0) and sol or nil
+  piste.solEstime, piste.confianceSol = sol, confianceSol
+
   local classe, zone, chevauchees = noyau.zonePourPoint(etat.zones, piste.x, piste.y, piste.z)
   piste.classeZone, piste.zone = classe, zone
 
-  if #chevauchees > 1 then
-    local noms = {}
-    for _, z in ipairs(chevauchees) do
-      noms[#noms + 1] = string.format("%s(%s)", z.nom, z.classe)
-    end
-    debug_(ETAPES.RESOLUTION_ZONE, string.format(
-      "cible %s dans %d zones : %s -> la plus stricte l'emporte : %s",
-      piste.nom, #chevauchees, table.concat(noms, ", "), classe))
-  end
+  local categorie, motifCategorie = noyau.categoriser(piste, cfg, zone, solConnu)
+  motifCategorie = string.format("%s ; terrain : %s (confiance %.2f)",
+    motifCategorie, motifSol, confianceSol)
 
-  if not classe then
-    -- Zone non classifiee : neutre ou hors juridiction. Le systeme ne fait
-    -- rien du tout, ni surveillance ni action.
-    if piste.verdictNom ~= "HORS_JURIDICTION" then
-      debug_(ETAPES.RESOLUTION_ZONE, string.format(
-        "cible %s hors de toute zone classifiee : aucune action", piste.nom))
-    end
-    if not (etat.alerteMax and cfg.alerteMaxCouvreHorsZone == true) then
-      piste.verdictNom, piste.verdict = "HORS_JURIDICTION", noyau.VERDICTS.HORS_JURIDICTION
-      piste.categorie, piste.iff = nil, nil
-      return
-    end
-  end
-
-  ---------------------------------------------------------- classification
-  local categorie, motifCategorie = noyau.categoriser(piste, cfg, zone)
   local transpondeur, motifAppariement = transpondeurPourPiste(piste, maintenant)
   local codes = {
     codeAllie = cfg.codeAllie,
@@ -975,7 +1222,8 @@ local function decider(piste, maintenant)
     codeGeneralPrecedent = cfg.codeGeneralPrecedent,
     rotationA = cfg.rotationA or 0,
   }
-  local iff, motifIff = noyau.statutIff(transpondeur, codes, maintenant, cfg)
+  piste.allieManuel = etat.alliesManuels[piste.nom] ~= nil
+  local iff, motifIff = noyau.statutIff(transpondeur, codes, maintenant, cfg, piste.allieManuel)
 
   local faction = etat.roster[piste.nom]
   local mentionFaction = faction
@@ -989,6 +1237,28 @@ local function decider(piste, maintenant)
     info(ETAPES.CLASSIFICATION, string.format(
       "cible %s classee %s [%s] ; IFF %s [%s ; %s]%s",
       piste.nom, categorie, motifCategorie, iff, motifIff, motifAppariement, mentionFaction))
+  end
+
+  ------------------------------------------------------------ resolution zone
+  if #chevauchees > 1 then
+    local noms = {}
+    for _, z in ipairs(chevauchees) do
+      noms[#noms + 1] = string.format("%s(%s)", z.nom, z.classe)
+    end
+    debug_(ETAPES.RESOLUTION_ZONE, string.format(
+      "cible %s dans %d zones : %s -> la plus stricte l'emporte : %s",
+      piste.nom, #chevauchees, table.concat(noms, ", "), classe))
+  end
+
+  if not classe then
+    if piste.verdictNom ~= "HORS_JURIDICTION" then
+      debug_(ETAPES.RESOLUTION_ZONE, string.format(
+        "cible %s hors de toute zone classifiee : aucune action", piste.nom))
+    end
+    if not (etat.alerteMax and cfg.alerteMaxCouvreHorsZone == true) then
+      piste.verdictNom, piste.verdict = "HORS_JURIDICTION", noyau.VERDICTS.HORS_JURIDICTION
+      return
+    end
   end
 
   ------------------------------------------------------------ escalade
@@ -1048,8 +1318,20 @@ local function decider(piste, maintenant)
     piste.engagement = nil
   end
 
-  local emis = engager(piste, verdict, verdictNom, maintenant)
-  if #emis == 0 then return end
+  local emis, bloques = engager(piste, verdict, verdictNom, maintenant)
+
+  if #emis == 0 then
+    -- Rien n'est parti parce qu'un scramble AG attend un controleur : la
+    -- sequence est close cote machine. Sans cela, la doctrine redemanderait
+    -- le meme scramble a chaque balayage et noierait le journal.
+    if #bloques > 0 then
+      piste.engagement = {
+        actif = false, termine = true, tentatives = 0,
+        verdictNom = verdictNom, attenteControleur = true,
+      }
+    end
+    return
+  end
 
   if verdict.feu then
     -- Seul un ordre de DESTRUCTION ouvre une evaluation de destruction. Un
@@ -1086,7 +1368,17 @@ local function evaluerEngagements(maintenant)
   for id, piste in pairs(etat.pistes) do
     local e = piste.engagement
     if e and e.actif then
-      local resultat, detail = noyau.evaluerDestruction(piste, e, cfg, maintenant)
+      --[[
+        L'enveloppe fiable se calcule sur la portee de la STATION QUI A VU la
+        cible, pas sur une portee moyenne du reseau. Une cible disparue a 400 m
+        d'une station de 512 m de portee est probablement detruite ; la meme
+        disparition a 400 m d'une station de 450 m est une sortie de portee.
+        Confondre les deux, c'est cesser le feu sur ce qui s'echappe.
+      ]]
+      local cfgPiste = setmetatable(
+        { porteeRadar = piste.porteeStation or cfg.porteeRadar },
+        { __index = cfg })
+      local resultat, detail = noyau.evaluerDestruction(piste, e, cfgPiste, maintenant)
 
       if resultat == noyau.RESULTATS_KILL.CONFIRME then
         e.actif, e.termine, e.resultat = false, true, "DETRUITE"
@@ -1190,6 +1482,7 @@ function actions.ajouterZone(zone)
       info(ETAPES.CONFIGURATION_ZONE, string.format(
         "zone '%s' redefinie : classe %s, forme %s", zone.nom, zone.classe, zone.forme))
       enregistrerZones()
+      etat.versionZones = etat.versionZones + 1
       for _, piste in pairs(etat.pistes) do piste.verdictNom = nil end
       return true
     end
@@ -1209,6 +1502,7 @@ function actions.supprimerZone(nom)
       avert(ETAPES.CONFIGURATION_ZONE, string.format(
         "zone '%s' (classe %s) supprimee : le secteur redevient hors juridiction", nom, z.classe))
       enregistrerZones()
+      etat.versionZones = etat.versionZones + 1
       for _, piste in pairs(etat.pistes) do piste.verdictNom = nil end
       return true
     end
@@ -1231,6 +1525,169 @@ function actions.changerCodeGeneral(nouveau)
   return true
 end
 
+--[[
+  ORDRE MANUEL DEPUIS LA CARTE TACTIQUE
+  Un clic gauche sur un contact ouvre un panneau ou le controleur coche ce
+  qu'il veut : scramble, attaque, les deux, ou « considerer comme allie ».
+
+  Ces ordres passent PAR-DESSUS la doctrine de zone, y compris hors
+  juridiction. C'est voulu : la doctrine automatise le cas general, l'humain
+  garde la main sur le cas particulier. Chaque ordre manuel est journalise
+  comme tel, avec la zone et le verdict automatique qu'il court-circuite, pour
+  qu'une relecture du journal distingue toujours une decision machine d'une
+  decision humaine.
+]]
+function actions.ordreManuel(pisteId, options)
+  options = options or {}
+  local piste = etat.pistes[pisteId]
+  if not piste then return false, "contact introuvable" end
+
+  if options.allie then
+    return actions.marquerAllie(pisteId)
+  end
+  if not (options.scramble or options.attaque) then
+    return false, "aucune action cochee"
+  end
+
+  -- Une cible sans categorie n'a rien a transmettre a Fire Control : la
+  -- classification est faite a chaque balayage, mais un contact tout juste
+  -- apparu peut ne pas encore l'avoir.
+  if not piste.categorie then
+    return false, "contact pas encore classe, reessayez au prochain balayage"
+  end
+
+  local nomVerdict, verdict
+  if options.attaque and options.scramble then
+    nomVerdict, verdict = "DESTRUCTION_SCRAMBLE", noyau.VERDICTS.DESTRUCTION_SCRAMBLE
+  elseif options.attaque then
+    nomVerdict, verdict = "DESTRUCTION", noyau.VERDICTS.DESTRUCTION
+  else
+    nomVerdict, verdict = "SCRAMBLE", noyau.VERDICTS.SCRAMBLE
+  end
+
+  local maintenant = os.clock()
+  avert(ETAPES.ORDRE_MANUEL, string.format(
+    "ORDRE MANUEL sur %s (%s) : %s demande par un controleur ; zone %s, verdict automatique %s",
+    piste.nom, piste.categorie, verdict.libelle,
+    piste.classeZone or "hors juridiction", piste.verdictNom or "aucun"))
+
+  -- Le drapeau 'manuel' leve le verrou du scramble AG : la decision humaine
+  -- que ce verrou attendait vient precisement d'etre prise.
+  local emis = engager(piste, verdict, nomVerdict, maintenant, true)
+  if #emis == 0 then
+    return false, "aucune plateforme n'a pu etre designee"
+  end
+  etat.compteurs.ordresManuels = etat.compteurs.ordresManuels + 1
+
+  if etat.demandesAG[pisteId] then
+    etat.demandesAG[pisteId] = nil
+    etat.nombreDemandesAG = math.max(0, etat.nombreDemandesAG - 1)
+    info(ETAPES.DEMANDE_SCRAMBLE_AG,
+      "demande de scramble AG sur " .. piste.nom .. " validee par un controleur")
+  end
+
+  if verdict.feu then
+    local vitesseRef = piste.vitesseHorizontale or 0
+    piste.engagement = {
+      actif = true, termine = false, tentatives = 1, verdictNom = nomVerdict,
+      ordreA = maintenant, vitesseRef = vitesseRef, ordres = emis, manuel = true,
+    }
+    info(ETAPES.EVALUATION_KILL, string.format(
+      "evaluation de destruction ouverte sur %s apres ordre manuel (tentative 1/%d)",
+      piste.nom, cfg.tentativesMax))
+  else
+    piste.engagement = {
+      actif = false, termine = true, tentatives = 0, verdictNom = nomVerdict,
+      ordres = emis, manuel = true,
+    }
+  end
+
+  local resume = {}
+  for _, o in ipairs(emis) do resume[#resume + 1] = o.chaine end
+  return true, table.concat(resume, " | ")
+end
+
+--[[
+  Declarer un contact ALLIE a la main.
+  Prime sur le transpondeur : c'est ce qui permet de couvrir immediatement un
+  appareil dont l'emetteur est detruit, sans attendre une rotation de code.
+  Consequence directe et voulue : tout engagement en cours sur ce contact est
+  interrompu sur-le-champ.
+]]
+function actions.marquerAllie(pisteId)
+  local piste = etat.pistes[pisteId]
+  if not piste then return false, "contact introuvable" end
+
+  etat.alliesManuels[piste.nom] = { t = os.clock(), horodatage = horodatage() }
+  etat.compteurs.alliesManuels = etat.compteurs.alliesManuels + 1
+  piste.allieManuel = true
+  piste.verdictNom = nil
+
+  if etat.demandesAG[pisteId] then
+    etat.demandesAG[pisteId] = nil
+    etat.nombreDemandesAG = math.max(0, etat.nombreDemandesAG - 1)
+    info(ETAPES.DEMANDE_SCRAMBLE_AG,
+      "demande de scramble AG sur " .. piste.nom .. " annulee : contact declare allie")
+  end
+
+  local interrompu = piste.engagement and piste.engagement.actif
+  if interrompu then
+    avert(ETAPES.ALLIE_MANUEL, string.format(
+      "engagement en cours sur %s INTERROMPU : le contact vient d'etre declare allie", piste.nom))
+  end
+  piste.engagement = nil
+
+  avert(ETAPES.ALLIE_MANUEL, string.format(
+    "contact %s declare ALLIE par un controleur : libre passage dans toutes les zones " ..
+    "jusqu'a revocation", piste.nom))
+  enregistrerEtat()
+  return true, piste.nom
+end
+
+--[[
+  Refus explicite d'une demande de scramble AG. Le contact reste suivi et
+  reste classe : seule la patrouille est ecartee. Le refus est journalise au
+  meme titre qu'une validation - un ordre non donne est une decision, et elle
+  doit se retrouver dans le journal.
+]]
+function actions.refuserDemandeAG(pisteId)
+  local demande = etat.demandesAG[pisteId]
+  if not demande then return false, "aucune demande sur ce contact" end
+  etat.demandesAG[pisteId] = nil
+  etat.nombreDemandesAG = math.max(0, etat.nombreDemandesAG - 1)
+  avert(ETAPES.DEMANDE_SCRAMBLE_AG, string.format(
+    "demande de scramble AG sur %s (%s, zone %s) REFUSEE par un controleur : " ..
+    "aucune patrouille ne part",
+    demande.nom, demande.categorie or "?", demande.zone or "?"))
+  return true, demande.nom
+end
+
+function actions.retirerAllie(nom)
+  if not etat.alliesManuels[nom] then return false, "ce contact n'est pas declare allie" end
+  etat.alliesManuels[nom] = nil
+  for _, piste in pairs(etat.pistes) do
+    if piste.nom == nom then piste.allieManuel, piste.verdictNom = false, nil end
+  end
+  avert(ETAPES.ALLIE_MANUEL, string.format(
+    "declaration d'allie revoquee pour %s : le contact repasse sous la doctrine de zone", nom))
+  enregistrerEtat()
+  return true
+end
+
+-- Releve d'altitude saisi a la main par un controleur, pour amorcer le modele
+-- de terrain sur un secteur qu'aucune sonde n'a encore visite.
+function actions.releverTerrain(x, y, z)
+  local _, detail = terrain.echantillonner(etat.terrain, x, y, z, "manuel", os.clock())
+  if not detail then return false, "coordonnees invalides" end
+  etat.terrainSale = true
+  info(ETAPES.TERRAIN, "releve manuel : " .. detail)
+  enregistrerTerrain()
+  return true, detail
+end
+
+actions.terrain = terrain
+actions.carte   = carte
+actions.plateformesDisponibles = plateformesDisponibles
 actions.etat  = etat
 actions.cfg   = cfg
 actions.noyau = noyau
@@ -1280,6 +1737,48 @@ local function boucleReseau()
             "code recu de %s (ordinateur %d)", cle, expediteur))
         end
 
+      elseif protocole == cfg.protocoleRadar and type(message) == "table"
+             and message.protocole == "FRENCHNET_RADAR" then
+        local nom = tostring(message.station or ("RAD-" .. expediteur))
+        proteger(ETAPES.RECEPTION_RADAR, enregistrerStation, nom, message, maintenant)
+
+      elseif protocole == cfg.protocoleLanceur and type(message) == "table"
+             and message.protocole == "FRENCHNET_LANCEUR" then
+        local nom = tostring(message.nom or ("LAN-" .. expediteur))
+        local precedent = etat.lanceurs[nom]
+        etat.lanceurs[nom] = {
+          nom = nom, designation = message.designation,
+          x = message.x, y = message.y, z = message.z,
+          portee = message.portee,
+          munitions = message.munitions, munitionsMax = message.munitionsMax,
+          tirs = message.tirs, disponible = message.disponible,
+          categories = message.categories,
+          recuA = maintenant, expediteur = expediteur, perimee = false,
+        }
+        etat.inventaireRecuA = maintenant
+
+        if not precedent then
+          info(ETAPES.RECEPTION_LANCEUR, string.format(
+            "plateforme %s entree dans le reseau : X=%.0f Y=%.0f Z=%.0f, %s munition(s), portee %.0f",
+            nom, message.x or 0, message.y or 0, message.z or 0,
+            tostring(message.munitions), message.portee or 0))
+        elseif precedent.munitions and message.munitions
+               and message.munitions ~= precedent.munitions then
+          debug_(ETAPES.RECEPTION_LANCEUR, string.format(
+            "%s : stock %s -> %s, %s tir(s) cumule(s)",
+            nom, tostring(precedent.munitions), tostring(message.munitions), tostring(message.tirs)))
+        end
+        if message.munitions == 0 and (not precedent or precedent.munitions ~= 0) then
+          avert(ETAPES.RECEPTION_LANCEUR, string.format(
+            "plateforme %s a court de munitions : elle ne sera plus designee", nom))
+        end
+
+        -- Un lanceur est pose au sol : sa position est un releve d'altitude.
+        if nombreValide(message.x) and nombreValide(message.y) and nombreValide(message.z) then
+          terrain.echantillonner(etat.terrain, message.x, message.y, message.z,
+            "plateforme", maintenant)
+        end
+
       elseif protocole == cfg.protocoleFireControl and type(message) == "table"
              and message.plateformes then
         local liste = {}
@@ -1319,12 +1818,34 @@ local function boucleBattement()
       if p.engagement and p.engagement.actif then engagees = engagees + 1 end
     end
     local c = etat.compteurs
+    local lanceurs = 0
+    for _ in pairs(etat.lanceurs) do lanceurs = lanceurs + 1 end
+    local stats = terrain.statistiques(etat.terrain)
     info("battement", string.format(
-      "mode %s%s | %d piste(s), %d engagement(s) en cours | %d zone(s), %d plateforme(s) | " ..
-      "feu %d, scramble %d, kills %d, perdues %d, reemissions %d, alertes %d",
+      "mode %s%s | %d piste(s), %d engagement(s) | %d/%d station(s) radar, %d lanceur(s), %d zone(s) | " ..
+      "terrain %d case(s) dont %d etayee(s) | feu %d, scramble %d, kills %d, perdues %d, " ..
+      "reemissions %d, manuels %d, alertes %d",
       etat.mode, etat.alerteMax and " + ALERTE MAX" or "",
-      pistes, engagees, #etat.zones, #etat.plateformes,
-      c.ordresFeu, c.ordresScramble, c.killsConfirmes, c.pistesPerdues, c.reemissions, c.alertes))
+      pistes, engagees, etat.stationsActives, etat.nombreStations, lanceurs, #etat.zones,
+      stats.cases, stats.etayees,
+      c.ordresFeu, c.ordresScramble, c.killsConfirmes, c.pistesPerdues, c.reemissions,
+      c.ordresManuels, c.alertes))
+
+    if etat.nombreDemandesAG > 0 then
+      avert(ETAPES.DEMANDE_SCRAMBLE_AG, string.format(
+        "%d demande(s) de scramble AG toujours en attente d'un controleur",
+        etat.nombreDemandesAG))
+    end
+
+    -- Le modele de terrain n'est ecrit que s'il a change depuis la derniere
+    -- sauvegarde : inutile de reecrire un fichier identique toutes les minutes.
+    if etat.terrainSale then proteger(ETAPES.ENREGISTREMENT_TERRAIN, enregistrerTerrain) end
+
+    if etat.nombreStations > 0 and etat.stationsActives == 0 then
+      alerterControleur("reseau radar entierement muet",
+        string.format("%d station(s) connue(s), aucune ne repond : le systeme est aveugle",
+          etat.nombreStations))
+    end
 
     -- Extinction automatique de l'alerte maximale, si configuree.
     if etat.alerteMax and nombreValide(cfg.alerteMaxDureeSecondes) and cfg.alerteMaxDureeSecondes > 0 then
@@ -1372,9 +1893,13 @@ local function demarrer()
   validerConfiguration()
   chargerEtat()
   chargerZones()
+  chargerTerrain()
 
   if not ouvrirReseau() then return false end
-  if not detecterRadar() then return false end
+
+  -- Un radar accole au poste est un bonus, pas une condition : le poste vit
+  -- des stations deportees. Demarrer sans radar local est normal.
+  detecterRadarLocal()
 
   etat.demarrageA = os.clock()
   info(ETAPES.DEMARRAGE, string.format(
@@ -1386,6 +1911,10 @@ local function demarrer()
       "aucune zone classifiee : tout le theatre est hors juridiction, le systeme " ..
       "n'engagera rien. Definissez les zones depuis le menu protege.")
   end
+
+  info(ETAPES.DEMARRAGE, string.format(
+    "en attente du reseau : stations radar sur '%s', balises de lanceur sur '%s'",
+    cfg.protocoleRadar, cfg.protocoleLanceur))
   return true
 end
 
@@ -1408,6 +1937,7 @@ local function executer()
     boucles[#boucles + 1] = function()
       local ok, err = pcall(interface.executer, {
         etat = etat, cfg = cfg, noyau = noyau, journal = journal,
+        terrain = terrain, carte = carte,
         actions = actions, version = VERSION_PROGRAMME,
       })
       if not ok then
@@ -1462,7 +1992,11 @@ while true do
   sleep(delai)
   delaiRedemarrage = math.min(delai * 2, cfg.redemarrageDelaiMax or 60)
 
-  -- Remise a zero de l'etat volatil, en conservant les zones et le mode.
+  -- Remise a zero de l'etat volatil. On CONSERVE les zones, le mode, les
+  -- declarations d'allies et surtout le modele de terrain : le relief appris
+  -- ne disparait pas parce qu'un chunk s'est recharge.
   etat.pistes, etat.transpondeurs = {}, {}
+  etat.stations, etat.nombreStations, etat.stationsActives = {}, 0, 0
+  etat.lanceurs = {}
   etat.echecsConsecutifs = 0
 end

@@ -61,6 +61,30 @@ local function queueEvent(...)
   etat.file[#etat.file + 1] = table.pack(...)
 end
 
+-- Emissions rednet PERIODIQUES. Une station radar ou une balise de lanceur
+-- emet en continu : la tester avec une seule trame injectee au demarrage ne
+-- prouverait rien, puisque le poste central declare muette toute source qui
+-- se tait. La fabrique recoit l'horloge virtuelle et rend la trame a envoyer.
+local function declencherProgrammes()
+  -- Evenements a date fixe : un clic d'operateur n'a de sens qu'une fois la
+  -- situation etablie a l'ecran.
+  for _, e in ipairs(etat.evenementsProgrammes or {}) do
+    if not e.emis and e.instant <= etat.horloge then
+      e.emis = true
+      queueEvent(table.unpack(e.args, 1, e.args.n))
+    end
+  end
+  for _, p in ipairs(etat.programmes or {}) do
+    local garde = 0
+    while p.prochain <= etat.horloge and p.intervalle > 0 and garde < 1000 do
+      local message = p.fabrique(etat.horloge)
+      if message then queueEvent("rednet_message", p.id, message, p.protocole) end
+      p.prochain = p.prochain + p.intervalle
+      garde = garde + 1
+    end
+  end
+end
+
 local function prochainEvenement()
   if #etat.file > 0 then
     return table.remove(etat.file, 1)
@@ -73,6 +97,7 @@ local function prochainEvenement()
   if not meilleur then return nil end
   etat.horloge = math.max(etat.horloge, meilleur)
   etat.minuteurs[id] = nil
+  declencherProgrammes()
   return table.pack("timer", id)
 end
 
@@ -91,6 +116,8 @@ function M.creer(options)
     rednetOuvert = false,
     echecBroadcast = false,
     limiteHorloge = options.limiteHorloge or 300,
+    programmes = {},
+    evenementsProgrammes = {},
   }
   M.etat = etat
 
@@ -396,6 +423,24 @@ end
 -- piloter l'interface de controle comme le ferait un operateur.
 function M.injecterEvenement(...)
   queueEvent(...)
+end
+
+--[[
+  Source rednet periodique : station radar, balise de lanceur, transpondeur.
+  'fabrique(horloge)' rend la trame a emettre, ou nil pour ne rien emettre a
+  cet instant - ce qui permet de simuler une station qui tombe en panne.
+]]
+-- Evenement brut declenche a un instant precis de l'horloge virtuelle.
+function M.programmerEvenement(instant, ...)
+  etat.evenementsProgrammes[#etat.evenementsProgrammes + 1] =
+    { instant = instant, args = table.pack(...) }
+end
+
+function M.programmerRednet(id, protocole, intervalle, fabrique)
+  etat.programmes[#etat.programmes + 1] = {
+    id = id, protocole = protocole, intervalle = intervalle,
+    fabrique = fabrique, prochain = 0,
+  }
 end
 
 function M.injecterModem(cote, canal, reponse, message)

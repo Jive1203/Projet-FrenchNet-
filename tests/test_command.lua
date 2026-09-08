@@ -539,6 +539,252 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 16 : modele de terrain observe ==")
+do
+  local terrain = dofile(RACINE .. "/command/terrain.lua")
+  local m = terrain.nouveau({ resolution = 16, altitudeDefaut = 64, rayonRecherche = 3 })
+
+  egal("modele vierge : altitude de repli", (terrain.hauteurSol(m, 0, 0)), 64)
+  local _, confiance = terrain.hauteurSol(m, 0, 0)
+  egal("modele vierge : confiance nulle", confiance, 0)
+
+  terrain.echantillonner(m, 100, 72, 100, "radar", 1)
+  local sol, conf = terrain.hauteurSol(m, 101, 101)
+  verifier("releve direct restitue", presque(sol, 72), tostring(sol))
+  verifier("releve direct : confiance non nulle", conf > 0.5, tostring(conf))
+
+  local _, confInterpolee = terrain.hauteurSol(m, 140, 100)
+  verifier("case voisine : interpolation a confiance reduite",
+    confInterpolee > 0 and confInterpolee <= 0.45, tostring(confInterpolee))
+
+  local _, confLoin = terrain.hauteurSol(m, 5000, 5000)
+  egal("hors de portee de tout releve : confiance nulle", confLoin, 0)
+
+  -- Une source fiable doit peser plus qu'une observation opportuniste.
+  local m2 = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  terrain.echantillonner(m2, 0, 100, 0, "radar", 1)     -- poids 4
+  terrain.echantillonner(m2, 0, 60, 0, "contact", 2)    -- poids 1
+  local melange = terrain.hauteurSol(m2, 0, 0)
+  verifier("la source fiable tire la moyenne a elle", melange > 90, tostring(melange))
+
+  -- Un plateau eleve : le contact y est au sol, pas en vol.
+  local m3 = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  terrain.echantillonner(m3, 500, 200, 500, "radar", 1)
+  local auSol = terrain.evaluerContact(m3, { x = 500, y = 205, z = 500 },
+    { hauteurAerienne = 25 })
+  verifier("vehicule sur un plateau a Y=205 : classe AU SOL", auSol)
+  local enVol = terrain.evaluerContact(m3, { x = 500, y = 260, z = 500 },
+    { hauteurAerienne = 25 })
+  verifier("aeronef au-dessus du meme plateau : classe EN VOL", not enVol)
+
+  -- Sans le modele, l'altitude absolue se trompait dans les deux sens.
+  local vierge = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  local fauxPositif = terrain.evaluerContact(vierge, { x = 500, y = 205, z = 500 },
+    { hauteurAerienne = 25 })
+  verifier("sans releve, le meme vehicule serait pris pour un aeronef",
+    not fauxPositif)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 17 : sondes de terrain, sans raisonnement circulaire ==")
+do
+  local terrain = dofile(RACINE .. "/command/terrain.lua")
+  local cfg = { sondeEchantillons = 3, sondeToleranceVerticale = 0.5, sondeVitesseSolMax = 12 }
+
+  local joueurPose = { nature = "JOUEUR", vitesseHorizontale = 4, echantillons = {
+    { t = 1, x = 0, y = 70, z = 0 }, { t = 2, x = 2, y = 70, z = 0 },
+    { t = 3, x = 4, y = 70.2, z = 0 },
+  } }
+  verifier("joueur a altitude stable : sonde acceptee",
+    (terrain.contactEstUneSonde(joueurPose, cfg)))
+
+  local joueurEnVol = { nature = "JOUEUR", vitesseHorizontale = 20, echantillons = {
+    { t = 1, x = 0, y = 150, z = 0 }, { t = 2, x = 20, y = 158, z = 0 },
+    { t = 3, x = 40, y = 166, z = 0 },
+  } }
+  verifier("joueur en montee : sonde refusee",
+    not (terrain.contactEstUneSonde(joueurEnVol, cfg)))
+
+  local stationnaire = { nature = "VEHICULE", vitesseHorizontale = 0, echantillons = {
+    { t = 1, x = 0, y = 150, z = 0 }, { t = 2, x = 0, y = 150, z = 0 },
+    { t = 3, x = 0, y = 150, z = 0 },
+  } }
+  verifier("vol stationnaire : sonde refusee, sinon le sol serait a 150",
+    not (terrain.contactEstUneSonde(stationnaire, cfg)))
+
+  local croisiere = { nature = "VEHICULE", vitesseHorizontale = 40, echantillons = {
+    { t = 1, x = 0, y = 150, z = 0 }, { t = 2, x = 40, y = 150, z = 0 },
+    { t = 3, x = 80, y = 150, z = 0 },
+  } }
+  verifier("aeronef en croisiere a altitude constante : sonde refusee",
+    not (terrain.contactEstUneSonde(croisiere, cfg)))
+
+  local court = { nature = "JOUEUR", echantillons = { { t = 1, x = 0, y = 70, z = 0 } } }
+  verifier("historique trop court : sonde refusee",
+    not (terrain.contactEstUneSonde(court, cfg)))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 18 : carte tactique ==")
+do
+  local carte = dofile(RACINE .. "/command/carte.lua")
+  local vue = carte.nouvelle({ centreX = 1000, centreZ = -2000, echelle = 32 })
+
+  local col, ligne, visible = carte.versEcran(vue, 1000, -2000, 51, 11)
+  verifier("le centre de la vue tombe au centre de l'ecran", visible)
+  local x, z = carte.versMonde(vue, col, ligne, 51, 11)
+  verifier("aller-retour ecran/monde dans la case d'origine",
+    math.abs(x - 1000) <= 32 and math.abs(z - (-2000)) <= 48,
+    string.format("%.0f / %.0f", x, z))
+
+  local _, _, dehors = carte.versEcran(vue, 100000, -2000, 51, 11)
+  verifier("point tres eloigne : hors champ", not dehors)
+
+  -- Zoom
+  local avant = carte.echelle(vue)
+  carte.zoomer(vue, -1)
+  verifier("zoom avant : echelle plus fine", carte.echelle(vue) < avant)
+  carte.zoomer(vue, 1)
+  egal("zoom arriere : retour a l'echelle initiale", carte.echelle(vue), avant)
+
+  -- Glyphes : la nature d'abord
+  egal("missile", carte.glyphe({ nature = "MISSILE", categorie = "AERIENNE" }), "*")
+  egal("aeronef", carte.glyphe({ nature = "VEHICULE", categorie = "AERIENNE" }), "^")
+  egal("joueur en vol", carte.glyphe({ nature = "JOUEUR", categorie = "AERIENNE" }), "o")
+  egal("vehicule au sol", carte.glyphe({ nature = "VEHICULE", categorie = "VEHICULE_SOL" }), "#")
+  egal("infanterie", carte.glyphe({ nature = "JOUEUR", categorie = "INFANTERIE" }), "i")
+
+  -- Couleurs : le code demande par le controleur
+  egal("code allie -> vert",
+    (carte.couleurContact({ iff = "ALLIE", verdict = { palier = 1 } })), "allie")
+  egal("allie declare a la main -> vert",
+    (carte.couleurContact({ iff = "INCONNU", allieManuel = true, verdict = { palier = 1 } })), "allie")
+  egal("code general -> bleu",
+    (carte.couleurContact({ iff = "GENERAL", verdict = { palier = 1 } })), "general")
+  egal("inconnu non engage -> orange",
+    (carte.couleurContact({ iff = "INCONNU", verdict = { palier = 1 } })), "inconnu")
+  egal("inconnu hors juridiction -> orange",
+    (carte.couleurContact({ iff = "INCONNU", verdict = { palier = 0 } })), "inconnu")
+  egal("destruction decidee -> rouge",
+    (carte.couleurContact({ iff = "INCONNU", verdict = { palier = 3 } })), "engage")
+  egal("engagement ouvert -> rouge",
+    (carte.couleurContact({ iff = "INCONNU", verdict = { palier = 2 },
+      engagement = { actif = true } })), "engage")
+
+  -- Selection par clic : le plus dangereux gagne quand deux contacts se
+  -- superposent.
+  local pistes = {
+    A = { id = "A", x = 1000, z = -2000, verdict = { palier = 1 } },
+    B = { id = "B", x = 1005, z = -2000, verdict = { palier = 3 } },
+  }
+  local touchee = carte.pisteSous(pistes, vue, col, ligne, 51, 11, 1)
+  egal("clic sur deux contacts superposes : le plus dangereux", touchee and touchee.id, "B")
+
+  local vide = carte.pisteSous(pistes, vue, 1, 1, 51, 11, 0)
+  verifier("clic dans le vide : aucune selection", vide == nil)
+
+  -- Carte mouvante
+  local vue2 = carte.nouvelle({ centreX = 0, centreZ = 0, echelle = 32, suivi = "MENACE" })
+  carte.appliquerSuivi(vue2, pistes, { x = 0, z = 0 }, 51, 11)
+  verifier("suivi MENACE : la carte s'accroche a la cible engagee",
+    math.abs(vue2.centreX - 1005) < 1, tostring(vue2.centreX))
+
+  local vue3 = carte.nouvelle({ centreX = 0, centreZ = 0, echelle = 32, suivi = "LIBRE" })
+  carte.appliquerSuivi(vue3, pistes, { x = 0, z = 0 }, 51, 11)
+  egal("suivi LIBRE : la carte ne bouge pas toute seule", vue3.centreX, 0)
+
+  carte.deplacer(vue2, 1, 0)
+  egal("un deplacement manuel rend la main au controleur", vue2.suivi, "LIBRE")
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 19 : projectiles et verrou du scramble AG ==")
+do
+  local scanner = dofile(RACINE .. "/command/scanner.lua")
+
+  egal("obus de Big Cannons reconnu",
+    scanner.natureEcho({ type = "createbigcannons:ap_shell" }, "ENTITE"), "MISSILE")
+  egal("missile reconnu par son nom",
+    scanner.natureEcho({ name = "Missile-SOL-AIR" }, "ENTITE"), "MISSILE")
+  egal("drapeau isProjectile reconnu",
+    scanner.natureEcho({ isProjectile = true, type = "inconnu" }, "ENTITE"), "MISSILE")
+  egal("une vache reste une vache",
+    scanner.natureEcho({ type = "minecraft:cow" }, "ENTITE"), "ENTITE")
+
+  -- Un projectile est aerien par nature, meme au ras du sol.
+  egal("obus rasant classe cible aerienne",
+    (noyau.categoriser({ y = 64, nature = "MISSILE" }, { altitudeSolReference = 64 })),
+    noyau.CATEGORIES.AERIENNE)
+
+  -- Le verrou : aucune patrouille air-sol ne part sans un humain.
+  verifier("scramble sur infanterie : validation controleur exigee",
+    noyau.scrambleRequiertControleur("SCRAMBLE", "INFANTERIE", {}, false))
+  verifier("scramble sur vehicule au sol : validation controleur exigee",
+    noyau.scrambleRequiertControleur("SCRAMBLE", "VEHICULE_SOL", {}, false))
+  verifier("scramble sur cible aerienne : automatique",
+    not noyau.scrambleRequiertControleur("SCRAMBLE", "AERIENNE", {}, false))
+  verifier("ordre manuel : le verrou est deja leve par la decision humaine",
+    not noyau.scrambleRequiertControleur("SCRAMBLE", "INFANTERIE", {}, true))
+  verifier("le feu n'est pas concerne par le verrou",
+    not noyau.scrambleRequiertControleur("FIRE", "INFANTERIE", {}, false))
+  verifier("scrambleAGAutomatique leve le verrou en connaissance de cause",
+    not noyau.scrambleRequiertControleur("SCRAMBLE", "INFANTERIE",
+      { scrambleAGAutomatique = true }, false))
+
+  egal("verbe air-sol", noyau.verbePourOrdre("SCRAMBLE", "VEHICULE_SOL", {}), "Scramble AG")
+  egal("verbe air-air", noyau.verbePourOrdre("SCRAMBLE", "AERIENNE", {}), "Scramble")
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 20 : designation par munitions restantes ==")
+do
+  local cible = { x = 0, y = 100, z = 0, categorie = "AERIENNE" }
+
+  -- Le stock prime sur la distance : une rampe presque vide perd la cible.
+  local candidats, rejetes = noyau.designer({
+    { nom = "Vide",   x = 0,   y = 100, z = 0, munitions = 0,  tirs = 0 },
+    { nom = "Basse",  x = 10,  y = 100, z = 0, munitions = 1,  tirs = 0 },
+    { nom = "Pleine", x = 200, y = 100, z = 0, munitions = 12, tirs = 0 },
+  }, cible, {})
+  egal("la plateforme la mieux approvisionnee est designee", candidats[1].nom, "Pleine")
+  verifier("la plateforme a stock nul est ecartee", #candidats == 2, "#" .. #candidats)
+  verifier("le motif de rejet nomme le stock",
+    rejetes[1] and rejetes[1].motif:find("munitions", 1, true) ~= nil,
+    rejetes[1] and rejetes[1].motif or "aucun rejet")
+
+  -- A stock egal, la distance tranche de nouveau.
+  candidats = noyau.designer({
+    { nom = "Loin",   x = 300, y = 100, z = 0, munitions = 10, tirs = 0 },
+    { nom = "Proche", x = 20,  y = 100, z = 0, munitions = 10, tirs = 0 },
+  }, cible, {})
+  egal("a stock egal, la plus proche", candidats[1].nom, "Proche")
+
+  -- A stock et distance comparables, l'usure se repartit.
+  candidats = noyau.designer({
+    { nom = "Usee",   x = 100, y = 100, z = 0, munitions = 10, tirs = 20 },
+    { nom = "Fraiche", x = 100, y = 100, z = 0, munitions = 10, tirs = 0 },
+  }, cible, {})
+  egal("a stock et distance egaux, la moins sollicitee", candidats[1].nom, "Fraiche")
+
+  -- Specialisation des plateformes.
+  candidats = noyau.designer({
+    { nom = "AA-pure", x = 0, y = 100, z = 0, munitions = 10, categories = { "AERIENNE" } },
+    { nom = "Appui",   x = 0, y = 100, z = 0, munitions = 10,
+      categories = { "INFANTERIE", "VEHICULE_SOL" } },
+  }, { x = 0, y = 70, z = 0, categorie = "INFANTERIE" }, {})
+  egal("une batterie anti-aerienne ne recoit pas d'ordre sur de l'infanterie",
+    candidats[1].nom, "Appui")
+  verifier("une seule plateforme retenue", #candidats == 1, "#" .. #candidats)
+
+  -- Sans balise annoncant de stock, le terme munitions est neutralise.
+  candidats = noyau.designer({
+    { nom = "Loin",   x = 300, y = 100, z = 0, tirs = 0 },
+    { nom = "Proche", x = 20,  y = 100, z = 0, tirs = 0 },
+  }, cible, {})
+  egal("aucun stock connu : la distance decide", candidats[1].nom, "Proche")
+end
+
+--------------------------------------------------------------------------------
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

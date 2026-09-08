@@ -27,10 +27,35 @@ return {
   -- Libelle libre affiche en tete d'ecran.
   designation = "Poste de commandement principal",
 
-  ------------------------------------------------------------------ RADAR -----
+  ---------------------------------------------------- RESEAU DE RADARS -------
 
-  -- Nom du peripherique radar (Create Radars). nil = detection automatique.
-  -- La detection cherche un peripherique dont le type contient "radar".
+  --[[
+    Le poste central ne balaie pas : il ECOUTE des stations radar deportees.
+    Chaque station est un ordinateur + un modem Ender + un radar, qui diffuse
+    ses contacts sur le protocole ci-dessous. Voir radar/config_radar.lua.
+
+    Un radar peut aussi etre accole directement au poste : il devient alors la
+    station "LOCAL". Mettre radarLocal a false pour ne pas le chercher.
+  ]]
+  protocoleRadar = "frenchnet_radar",
+
+  -- Duree sans trame au-dela de laquelle une station est declaree muette
+  -- (secondes). Sa couverture est alors perdue, et le journal le dit.
+  validiteStation = 15,
+
+  -- Distance en blocs sous laquelle deux echos venant de DEUX stations
+  -- differentes, sans identifiant stable, sont fusionnes en une seule piste.
+  -- Trop grand : deux appareils en formation n'en font plus qu'un. Trop petit :
+  -- le meme appareil compte double et recoit deux ordres de tir.
+  toleranceFusion = 8,
+
+  ------------------------------------------------------------ RADAR LOCAL ----
+
+  -- Chercher un radar accole au poste de commandement ?
+  -- false = le poste s'appuie uniquement sur les stations deportees.
+  radarLocal = true,
+
+  -- Nom du peripherique radar local. nil = detection automatique.
   peripheriqueRadar = nil,
 
   -- Position du bloc radar. INDISPENSABLE si le radar rend des positions
@@ -95,11 +120,71 @@ return {
   -- un allie rapide perd son code entre deux trames.
   toleranceAppariement = 24,
 
+  ---------------------------------------------------- MODELE DE TERRAIN ------
+
+  --[[
+    Le systeme APPREND le relief au lieu de le calculer.
+
+    Reconstituer la generation de Minecraft a partir de la seed du monde est
+    hors de portee d'un ordinateur CC: Tweaked : il faudrait la pile complete
+    des density functions, les splines de terrain et l'arithmetique 64 bits
+    exacte du generateur, pour un cout de plusieurs minutes par colonne - et le
+    resultat ignorerait tout ce que les joueurs ont construit ou creuse.
+
+    A la place, tout ce dont on connait la position et qui touche le sol est
+    une sonde d'altitude : chaque station radar, chaque lanceur, chaque joueur
+    qui marche. Le modele est enregistre dans command/terrain.dat et survit aux
+    redemarrages ; il devient plus fin avec le temps.
+
+    Si votre serveur peut exporter une heightmap, elle s'importe directement
+    dans terrain.dat : c'est la seule facon d'injecter de vraies donnees de
+    generation dans le systeme.
+  ]]
+
+  -- Cote d'une case du modele, en blocs. 16 = un chunk. Plus fin = plus precis
+  -- mais plus gourmand en memoire et plus long a couvrir.
+  terrainResolution = 16,
+
+  -- Nombre de cases explorees autour d'un point sans releve, avant d'abandonner
+  -- et de retomber sur l'altitude de reference.
+  terrainRayonRecherche = 3,
+
+  -- Plafond memoire, en nombre de cases. 4000 cases de 16 blocs couvrent
+  -- environ 1 000 000 de blocs carres. Au-dela, les cases les moins etayees
+  -- sont evincees.
+  terrainCellulesMax = 4000,
+
+  -- Utiliser les VEHICULES comme sondes d'altitude ?
+  --   false (defaut) : non. Un aeronef en croisiere a altitude constante
+  --                    passerait pour un vehicule au sol et empoisonnerait
+  --                    durablement le modele.
+  --   true           : oui, sur un theatre sans aviation de croisiere basse.
+  sondesVehicules = false,
+
+  -- Nombre de releves consecutifs a altitude stable exiges pour qu'un contact
+  -- soit accepte comme sonde.
+  sondeEchantillons = 3,
+
+  -- Variation verticale toleree entre ces releves, en blocs.
+  sondeToleranceVerticale = 0.5,
+
+  -- Vitesse horizontale maximale d'un vehicule accepte comme sonde (blocs/s).
+  sondeVitesseSolMax = 12,
+
+  -- Ecart maximal, en blocs, entre un releve et une case deja bien etayee.
+  -- Au-dela, le releve est refuse : ce n'est pas du terrain, c'est un contact
+  -- en vol au-dessus.
+  ecartMaxSonde = 30,
+
+  -- Periode d'enregistrement du modele sur disque (secondes). Le fichier n'est
+  -- reecrit que s'il a change.
+  terrainEnregistrement = 120,
+
   ------------------------------------------------------------ CATEGORISATION --
 
-  -- Altitude de reference du sol (Y). Sert a mesurer la hauteur au-dessus du
-  -- sol plutot qu'en Y absolu : un vehicule sur un plateau reste un vehicule.
-  -- Peut etre surchargee par zone (champ solY d'une zone).
+  -- Altitude de reference du sol (Y), utilisee UNIQUEMENT la ou le modele de
+  -- terrain ne sait pas encore repondre. Peut etre surchargee par zone
+  -- (champ solY d'une zone).
   altitudeSolReference = 64,
 
   -- Hauteur au-dessus du sol de reference a partir de laquelle une cible est
@@ -123,6 +208,12 @@ return {
 
   -- Protocole rednet d'ecoute des transpondeurs vehicules.
   protocoleTranspondeur = "frenchnet_transpondeur",
+
+  -- Protocole rednet d'ecoute des BALISES DE LANCEUR. Chaque plateforme de
+  -- defense y annonce sa position, ses munitions restantes et ses tirs.
+  -- C'est cette source qui alimente la designation du tireur.
+  -- Voir lanceur/config_lanceur.lua.
+  protocoleLanceur = "frenchnet_lanceur",
 
   -- Protocole rednet du roster de factions (pont Open Parties and Claims).
   -- Open Parties and Claims n'est pas lisible depuis un ordinateur CC: Tweaked :
@@ -173,14 +264,26 @@ return {
 
   ------------------------------------------------------ DESIGNATION DU TIREUR -
 
-  -- Poids relatifs de la repartition de charge. Les deux termes sont
-  -- normalises sur le lot de plateformes candidates avant ponderation.
-  --   poidsTirs     : privilegie la plateforme qui a le moins tire.
-  --   poidsDistance : privilegie la plateforme la plus proche.
-  -- 1.0 / 1.0 = equilibre. Monter poidsDistance pour une defense rapprochee,
-  -- monter poidsTirs pour epargner les munitions et repartir l'usure.
-  poidsTirs     = 1.0,
-  poidsDistance = 1.0,
+  --[[
+    Poids relatifs des trois criteres de designation. Les trois termes sont
+    normalises sur le lot de plateformes candidates avant ponderation :
+
+      score =   poidsMunitions * (1 - munitions / munitionsMax)
+              + poidsDistance  * (distance / distanceMax)
+              + poidsTirs      * (tirs / tirsMax)
+
+    poidsMunitions : privilegie la plateforme la mieux approvisionnee. Le plus
+                     lourd par defaut : envoyer l'ordre a une rampe presque
+                     vide, c'est perdre la cible au deuxieme tir. Une
+                     plateforme a stock NUL n'est jamais designee.
+    poidsDistance  : privilegie la plateforme la plus proche.
+    poidsTirs      : repartit l'usure entre les pieces, a stock et distance
+                     comparables. Volontairement plus leger que les deux
+                     autres.
+  ]]
+  poidsMunitions = 1.5,
+  poidsDistance  = 1.0,
+  poidsTirs      = 0.5,
 
   -- Si aucune plateforme n'est a portee de la menace :
   --   false (defaut) : aucune designation, alerte controleur.
@@ -249,7 +352,23 @@ return {
   -- A CHANGER. Sa seule fonction est d'eviter la fausse manoeuvre.
   codeAccesMenu = "1234",
 
+  -- Position du poste de commandement, utilisee comme origine de la carte
+  -- tactique. nil = reprend positionRadar.
+  positionPoste = nil,
+
+  -- Echelle initiale de la carte, en blocs par caractere.
+  -- Valeurs possibles : 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024.
+  echelleCarte = 32,
+
+  -- Mode de suivi initial de la carte mouvante :
+  --   "MENACE" : recentrage permanent sur le contact le plus dangereux
+  --   "POSTE"  : recentrage permanent sur le poste de commandement
+  --   "LIBRE"  : le controleur deplace la carte lui-meme
+  suiviCarte = "MENACE",
+
   -- Nom du moniteur externe a utiliser pour l'affichage. nil = terminal.
+  -- Un grand moniteur avance change tout pour la carte : 3x2 blocs a l'echelle
+  -- 0.5 donne une situation tactique reellement lisible.
   moniteur = nil,
 
   -- Echelle de texte du moniteur externe (0.5 a 5).

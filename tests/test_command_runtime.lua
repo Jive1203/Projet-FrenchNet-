@@ -41,6 +41,16 @@ local function compter(sorties, motif)
   return n
 end
 
+-- Quand l'interface tourne, elle prend la main sur l'affichage et le journal
+-- ne passe plus par print : il faut alors le relire sur le disque.
+local function journalDisque()
+  local f = io.open(BANC .. "/command/command.log", "r")
+  if not f then return "" end
+  local contenu = f:read("a") or ""
+  f:close()
+  return contenu
+end
+
 local function ordres(etat)
   local liste = {}
   for _, d in ipairs(etat.diffusions) do
@@ -90,7 +100,11 @@ return {
 
 local function preparer(zones, etatOperationnel, supplementConfig)
   os.execute("rm -rf " .. BANC .. " && mkdir -p " .. BANC .. "/command")
-  os.execute("cp " .. SRC .. "/command.lua " .. SRC .. "/noyau.lua " .. BANC .. "/command/")
+  -- Le poste charge desormais plusieurs modules : sans eux il refuse de
+  -- demarrer, ce qui est le comportement voulu mais ferait echouer tout le
+  -- banc de facon peu lisible.
+  os.execute("cp " .. SRC .. "/command.lua " .. SRC .. "/noyau.lua " .. SRC .. "/terrain.lua "
+    .. SRC .. "/carte.lua " .. SRC .. "/scanner.lua " .. BANC .. "/command/")
   local f = io.open(BANC .. "/command/config_command.lua", "w")
   f:write(string.format(CONFIG_BASE, supplementConfig or ""))
   f:close()
@@ -343,7 +357,7 @@ do
   craftos.executer(BANC .. "/command/command.lua", 12)
 
   verifier("Fire Control muet : alerte controleur",
-    (contient(etat2.sorties, "ALERTE CONTROLEUR - aucune plateforme declaree")))
+    (contient(etat2.sorties, "ALERTE CONTROLEUR - aucune plateforme joignable")))
   verifier("Fire Control muet : aucun ordre emis a l'aveugle", #ordres(etat2) == 0)
 end
 
@@ -454,6 +468,259 @@ do
   verifier("command.log ecrit sur le disque", #contenu > 0, "#" .. #contenu)
   verifier("le journal fichier porte les etapes",
     contenu:find("[etape: decision d'escalade]", 1, true) ~= nil)
+end
+
+--------------------------------------------------------------------------------
+-- Trame de station radar deportee, telle que radar/radar.lua l'emet.
+local function trameStation(nom, position, portee, contactsPour)
+  return function(t)
+    return {
+      protocole = "FRENCHNET_RADAR", station = nom,
+      x = position.x, y = position.y, z = position.z, portee = portee,
+      contacts = contactsPour(t) or {},
+    }
+  end
+end
+
+-- Trame de balise de lanceur, telle que lanceur/lanceur.lua l'emet.
+local function trameLanceur(nom, position, munitions, portee, categories)
+  return function()
+    return {
+      protocole = "FRENCHNET_LANCEUR", nom = nom,
+      x = position.x, y = position.y, z = position.z,
+      portee = portee, munitions = munitions, tirs = 0,
+      disponible = munitions > 0, categories = categories,
+    }
+  end
+end
+
+local SANS_RADAR_LOCAL = "radarLocal = false,"
+
+--------------------------------------------------------------------------------
+print("\n== TEST 11 : reseau multi-radars, une cible vue par deux stations ==")
+do
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL)
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  -- Le MEME contact, avec le meme identifiant stable, rapporte par deux
+  -- stations distinctes. Il ne doit produire QU'UNE piste : sinon le systeme
+  -- tire deux fois sur un seul appareil et compte deux menaces.
+  local function contact()
+    return { { id = "ID:42", nom = "Raider-7", nature = "VEHICULE",
+               x = 100, y = 150, z = 100 } }
+  end
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t) if t >= 5 and t <= 9 then return contact() end return {} end))
+  craftos.programmerRednet(12, "frenchnet_radar", 2,
+    trameStation("RAD-SUD", { x = 0, y = 80, z = 400 }, 500,
+      function(t) if t >= 5 and t <= 9 then return contact() end return {} end))
+  craftos.programmerRednet(13, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Est", { x = 150, y = 70, z = 0 }, 8, 600))
+  craftos.programmerRednet(14, "frenchnet_lanceur", 5,
+    trameLanceur("AirShip1", { x = 0, y = 200, z = 0 }, 8, 600))
+
+  craftos.executer(BANC .. "/command/command.lua", 22)
+  local s = etat.sorties
+  local liste = ordres(etat)
+
+  verifier("aucun radar local : le poste vit des stations deportees",
+    (contient(s, "aucun radar local configure")))
+  verifier("station nord entree dans le reseau",
+    (contient(s, "station radar RAD-NORD entree dans le reseau")))
+  verifier("station sud entree dans le reseau",
+    (contient(s, "station radar RAD-SUD entree dans le reseau")))
+  verifier("les deux plateformes se sont annoncees",
+    (contient(s, "plateforme SAM-Est entree dans le reseau"))
+    and (contient(s, "plateforme AirShip1 entree dans le reseau")))
+  verifier("le contact est fusionne, pas duplique",
+    (contient(s, "vu simultanement par 2 stations")))
+  verifier("une seule detection pour un contact vu deux fois",
+    compter(s, "nouveau contact Raider-7") == 1,
+    "#" .. compter(s, "nouveau contact Raider-7"))
+  verifier("un seul couple d'ordres (Alpha : destruction + scramble)",
+    #liste == 2, table.concat(liste, " | "))
+  verifier("la station la plus proche fournit la mesure",
+    (contient(s, "vu par RAD-NORD")) or (contient(s, "RAD-NORD+RAD-SUD"))
+    or (contient(s, "RAD-SUD+RAD-NORD")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 12 : designation par munitions, balises de lanceur ==")
+do
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL)
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 5 and t <= 9 then
+          return { { id = "ID:7", nom = "Raider-7", nature = "VEHICULE",
+                     x = 100, y = 150, z = 0 } }
+        end
+        return {}
+      end))
+  -- La rampe la plus proche est a sec ; la plus eloignee est pleine.
+  craftos.programmerRednet(21, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Sec", { x = 90, y = 70, z = 0 }, 0, 600))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Plein", { x = 400, y = 70, z = 0 }, 16, 600))
+  craftos.programmerRednet(23, "frenchnet_lanceur", 5,
+    trameLanceur("AirShip1", { x = 380, y = 200, z = 0 }, 16, 600))
+
+  craftos.executer(BANC .. "/command/command.lua", 22)
+  local s = etat.sorties
+
+  verifier("stock epuise signale", (contient(s, "a court de munitions")))
+  verifier("la rampe a sec est ecartee de la designation",
+    (contient(s, "stock de munitions epuise")))
+  verifier("aucun ordre a la rampe vide", not contientOrdre(etat, "SAM-Sec Fire type Aerial"))
+  verifier("l'ordre de tir part vers une rampe approvisionnee",
+    contientOrdre(etat, "SAM-Plein Fire type Aerial")
+    or contientOrdre(etat, "AirShip1 Fire type Aerial"),
+    table.concat(ordres(etat), " | "))
+  verifier("le journal detaille le stock retenu", (contient(s, "munition(s),")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 13 : le scramble AG n'est jamais automatique ==")
+do
+  -- Battement raccourci : le rappel periodique des demandes en attente doit
+  -- pouvoir etre observe dans la duree du banc.
+  preparer(ZONE_CHARLIE, ETAT_PAIX, SANS_RADAR_LOCAL .. " battementSecondes = 10,")
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  -- Vehicule au sol inconnu en zone Charlie en paix : la doctrine appelle un
+  -- scramble. Comme la cible est au sol, c'est un scramble AG : il ne doit
+  -- PAS partir tout seul.
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 5 then
+          return { { id = "ID:9", nom = "Convoi-3", nature = "VEHICULE",
+                     x = 100, y = 70, z = 0 } }
+        end
+        return {}
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("Appui-1", { x = 120, y = 70, z = 0 }, 10, 600))
+
+  craftos.executer(BANC .. "/command/command.lua", 25)
+  local s = etat.sorties
+
+  verifier("cible classee vehicule au sol", (contient(s, "classee VEHICULE_SOL")))
+  verifier("la doctrine appelle bien un scramble",
+    (contient(s, "palier 2 - scramble de verification")))
+  verifier("aucun ordre transmis a Fire Control", #ordres(etat) == 0,
+    table.concat(ordres(etat), " | "))
+  verifier("une demande de scramble AG est enregistree",
+    (contient(s, "AUCUN ordre transmis : un controleur doit valider")))
+  verifier("la plateforme proposee est nommee", (contient(s, "plateforme Appui-1 designee")))
+  verifier("le controleur est alerte",
+    (contient(s, "ALERTE CONTROLEUR - scramble AG en attente de validation")))
+  verifier("la demande n'est enregistree qu'une fois, pas a chaque balayage",
+    compter(s, "AUCUN ordre transmis : un controleur doit valider") == 1,
+    "#" .. compter(s, "AUCUN ordre transmis : un controleur doit valider"))
+  verifier("la demande est rappelee au battement",
+    (contient(s, "demande(s) de scramble AG toujours en attente")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 14 : projectiles ==")
+do
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL)
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t < 5 then return {} end
+        return {
+          -- Obus identifie par la station : cible aerienne, meme au ras du sol.
+          { id = "ID:OBUS", nom = "Obus", nature = "MISSILE", x = 60, y = 68, z = 0 },
+          -- Contact anonyme trop rapide pour etre pilote : requalification
+          -- cinematique par le poste central.
+          { id = "ID:RAPIDE", nom = "Trace", nature = "VEHICULE",
+            x = 100 + (t - 5) * 60, y = 150, z = 50 },
+        }
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Est", { x = 150, y = 70, z = 0 }, 20, 900))
+
+  craftos.executer(BANC .. "/command/command.lua", 16)
+  local s = etat.sorties
+
+  verifier("obus classe cible aerienne malgre son altitude au sol",
+    (contient(s, "cible Obus classee AERIENNE")))
+  verifier("le motif nomme le projectile",
+    (contient(s, "projectile detecte, cible aerienne par nature")))
+  verifier("contact trop rapide requalifie projectile",
+    (contient(s, "requalifie PROJECTILE")))
+  verifier("le seuil de vitesse est journalise", (contient(s, "au-dela du seuil de")))
+  verifier("les ordres portent bien la categorie aerienne",
+    contientOrdre(etat, "SAM-Est Fire type Aerial"), table.concat(ordres(etat), " | "))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 15 : carte tactique, du clic a l'ordre transmis ==")
+do
+  -- Scenario complet du poste de controle : la doctrine reclame un scramble
+  -- AG sur un vehicule au sol, s'arrete et demande validation ; l'operateur
+  -- ouvre la carte, clique sur le contact, coche le scramble, transmet.
+  preparer(ZONE_CHARLIE, ETAT_PAIX, SANS_RADAR_LOCAL)
+  os.execute("cp " .. SRC .. "/interface.lua " .. BANC .. "/command/")
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 3 then
+          return { { id = "ID:9", nom = "Convoi-3", nature = "VEHICULE",
+                     x = 100, y = 70, z = 0 } }
+        end
+        return {}
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("Appui-1", { x = 120, y = 70, z = 0 }, 10, 600))
+
+  -- Onglet Carte (barre du bas), puis clic sur le contact au centre de la
+  -- carte mouvante, case « Scramble AG », bouton TRANSMETTRE, touche pour
+  -- refermer l'accuse de reception.
+  craftos.programmerEvenement(10, "mouse_click", 1, 12, 19)
+  craftos.programmerEvenement(12, "mouse_click", 1, 26, 8)
+  craftos.programmerEvenement(14, "mouse_click", 1, 5, 15)
+  craftos.programmerEvenement(16, "mouse_click", 1, 5, 16)
+  craftos.programmerEvenement(18, "key", "touche_enter")
+
+  craftos.executer(BANC .. "/command/command.lua", 26)
+  local s = etat.sorties
+  local liste = ordres(etat)
+
+  verifier("l'interface et la carte se chargent sans faire tomber le poste",
+    not contient(s, "interface interrompue"),
+    (select(2, contient(s, "interface interrompue"))) or "")
+  local journal = journalDisque()
+  local function dansJournal(motif) return journal:find(motif, 1, true) ~= nil end
+
+  verifier("la demande de scramble AG a bien ete levee par la doctrine",
+    dansJournal("AUCUN ordre transmis : un controleur doit valider"))
+  verifier("le controleur a transmis un ordre manuel",
+    dansJournal("ORDRE MANUEL sur Convoi-3"))
+  verifier("l'ordre manuel est trace comme tel, avec le verdict automatique",
+    dansJournal("demande par un controleur"))
+  verifier("la demande en attente est marquee validee",
+    dansJournal("validee par un controleur"))
+  verifier("l'ordre transmis porte le verbe air-sol",
+    contientOrdre(etat, "Appui-1 Scramble AG type GroundVehicle"),
+    table.concat(liste, " | "))
+  verifier("un seul ordre est parti, celui du controleur", #liste == 1,
+    table.concat(liste, " | "))
 end
 
 --------------------------------------------------------------------------------

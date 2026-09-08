@@ -35,14 +35,27 @@ positionManuelle = { x = 1200, y = 210, z = -2600 },  -- F3, ligne "Block:"
 
 Défense aérienne autonome installée au sol. **Command décide, il ne tire pas** : il détecte, classe, identifie ami-ennemi, choisit un palier d'escalade, désigne la plateforme qui doit réagir, puis transmet à **FrenchNet Fire Control**.
 
+### Architecture — quatre types de machines
+
+| Machine | Rôle | Combien |
+|---|---|---|
+| **Poste de commandement** | décide. Ne balaie pas, ne tire pas. | 1 |
+| **Station radar** | balaie et transmet ses contacts au poste | 1 par radar |
+| **Balise de lanceur** | annonce position, **munitions restantes** et tirs | 1 par plateforme |
+| **Transpondeur** | émet le code IFF d'un véhicule | 1 par véhicule ami |
+
 ### Installation — poste de commandement
 
-Advanced Computer + modem Ender + radar (Create Radars), chunk **forceload**.
+Advanced Computer + modem Ender, chunk **forceload**. Un moniteur avancé 3×2
+change tout pour la carte tactique.
 
 ```
 mkdir command
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/command.lua command/command.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/noyau.lua command/noyau.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/terrain.lua command/terrain.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/carte.lua command/carte.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/scanner.lua command/scanner.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/interface.lua command/interface.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/config_command.lua command/config_command.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/startup.lua startup.lua
@@ -53,10 +66,42 @@ reboot
 Trois champs avant la mise en service :
 
 ```lua
-positionRadar = { x = 0, y = 80, z = 0 },   -- F3, ligne "Block:"
-codeAllie     = "FN-ALLIE-0000",             -- code fixe, à changer
-codeAccesMenu = "1234",                      -- code du menu protégé
+positionPoste = { x = 0, y = 80, z = 0 },   -- F3, ligne "Block:"
+codeAllie     = "FN-ALLIE-0000",              -- code fixe, à changer
+codeAccesMenu = "1234",                       -- code du menu protégé
 ```
+
+### Installation — chaque station radar
+
+Ordinateur + modem Ender + radar (Create Radars), chunk **forceload**.
+
+```
+mkdir radar
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/radar.lua radar/radar.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/config_radar.lua radar/config_radar.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/scanner.lua radar/scanner.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/startup.lua startup.lua
+edit radar/config_radar.lua
+reboot
+```
+
+Deux champs par station : `identifiant` (unique) et `position` (F3, « Block »).
+
+### Installation — chaque plateforme de défense
+
+Ordinateur + modem Ender + un coffre de munitions accolé (comptage réel).
+
+```
+mkdir lanceur
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/lanceur/lanceur.lua lanceur/lanceur.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/lanceur/config_lanceur.lua lanceur/config_lanceur.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/lanceur/startup.lua startup.lua
+edit lanceur/config_lanceur.lua
+reboot
+```
+
+L'`identifiant` est **le nom repris dans les ordres de tir** : il doit
+correspondre à ce que Fire Control connaît.
 
 ### Installation — chaque véhicule ami
 
@@ -83,6 +128,31 @@ transpondeur FN-ALLIE-0000
 - Chevauchement → **la classe la plus stricte l'emporte** : Roméo > Alpha > Bravo > Charlie.
 - Alerte maximale manuelle → régime **Roméo / Guerre** partout, en un clic.
 
+### Carte tactique
+
+Carte mouvante, zoomable de 2 à 1024 blocs par caractère, qui reste accrochée au
+contact le plus dangereux pendant tout l'engagement.
+
+**Le glyphe dit *ce que c'est*, la couleur dit *qui c'est*.**
+
+| Glyphe | | Couleur | |
+|---|---|---|---|
+| `*` | missile ou projectile | 🟢 vert | code allié — libre passage |
+| `^` | aéronef, navire volant | 🔵 bleu | code général |
+| `o` | joueur en vol | 🟠 orange | inconnu, hors zone ou non engagé |
+| `#` | véhicule au sol | 🔴 rouge | confirmé ennemi ou engagement en cours |
+| `i` | infanterie | fond jaune | scramble AG en attente de validation |
+| `R` `L` `+` | station radar, lanceur, poste | | |
+
+Le fond de carte est colorié par classe de zone, et calculé par le **même
+moteur** que les décisions : la carte ne peut pas mentir sur la doctrine.
+
+**Clic gauche sur un contact** ouvre le panneau d'ordre : cases à cocher
+**Scramble** (ou **Scramble AG**), **Attaque**, les deux, ou **Allié**.
+Déclarer un contact allié interrompt immédiatement tout engagement en cours.
+
+`+`/`−` zoom · flèches déplacer · `C` poste · `M` menace · `1`–`6` onglets
+
 ### Interface
 
 - **Écran d'accueil, sans code** : bascule guerre / paix en **un clic** (raccourci `G`), alerte maximale, état opérationnel.
@@ -91,13 +161,30 @@ transpondeur FN-ALLIE-0000
 ### Ordres transmis à Fire Control
 
 ```
-AirShip1 Fire type Aerial
+SAM-Est Fire type Aerial
 AirShip1 Scramble type Aerial
+Appui-1 Scramble AG type GroundVehicle
 ```
 
 Trois catégories seulement : `Aerial`, `GroundVehicle`, `Infantry`. Le choix de l'arme ne regarde pas Command.
 
 > ⚠ Les verbes `Fire` et `Scramble` sont **distincts par défaut**. Un scramble de vérification n'est pas un ordre de tir : en zone Roméo en temps de guerre, un allié en scramble serait abattu par Fire Control si les deux verbes étaient confondus. `formatUniqueFire = true` revient à un verbe unique, en connaissance de cause.
+
+> ⚠ **Le Scramble AG ne part jamais tout seul.** Quand la doctrine appelle un scramble sur de l'infanterie ou un véhicule, Command ne transmet rien : il désigne la plateforme, enregistre une **demande** et alerte le contrôleur, qui valide ou refuse depuis la carte. Les deux issues sont journalisées — un ordre non donné est une décision. Le feu, lui, reste automatique.
+
+### Désignation du tireur
+
+```
+score =   1.5 × (1 − munitions / munitionsMax)     <- le stock pèse le plus lourd
+        + 1.0 × (distance / distanceMax)
+        + 0.5 × (tirs / tirsMax)
+```
+
+Une plateforme à **stock nul n'est jamais désignée** : envoyer l'ordre à une rampe vide, c'est perdre la cible au deuxième tir. La balise déduit les tirs des **baisses de stock** — aucune déclaration à faire.
+
+### Terrain
+
+Le système **apprend** le relief au lieu de le calculer : reconstituer la génération de Minecraft depuis la seed est hors de portée d'un ordinateur CC: Tweaked, et ignorerait de toute façon tout ce que les joueurs ont construit. Chaque station radar, chaque lanceur et chaque joueur qui marche est une sonde d'altitude. Le modèle survit aux redémarrages et devient plus fin avec le temps.
 
 ### Confirmation de destruction
 
@@ -111,8 +198,8 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 ### Vérifier
 
 ```
-lua5.4 tests/test_command.lua           -- 133 vérifications : la doctrine d'engagement
-lua5.4 tests/test_command_runtime.lua   --  55 vérifications : la chaîne complète, radar simulé
+lua5.4 tests/test_command.lua           -- 191 vérifications : doctrine, terrain, carte
+lua5.4 tests/test_command_runtime.lua   --  88 vérifications : la chaîne complète, réseau simulé
 ```
 
 ---
@@ -138,8 +225,13 @@ Consultable à l'écran (onglet **Journal**) ou dans `balise/balise.log` / `comm
 | `balise/recepteur.lua` | Moniteur de constellation |
 | `command/command.lua` | Programme principal du poste de commandement |
 | `command/noyau.lua` | Moteur de décision pur, testable hors du jeu |
-| `command/interface.lua` | Interface de contrôle |
+| `command/terrain.lua` | Modèle de terrain observé, testable hors du jeu |
+| `command/carte.lua` | Projection et symbologie de la carte, testable hors du jeu |
+| `command/scanner.lua` | Adaptateur radar, partagé poste ↔ stations |
+| `command/interface.lua` | Interface de contrôle et carte tactique |
 | `command/config_command.lua` | Config du poste (à éditer) |
+| `radar/radar.lua` | Station radar déportée |
+| `lanceur/lanceur.lua` | Balise de lanceur (munitions, tirs) |
 | `command/transpondeur.lua` | Émetteur de code, à poser sur chaque véhicule |
 | `tests/test_command.lua` | Banc d'essai de la doctrine (noyau pur) |
 | `tests/test_command_runtime.lua` | Banc d'essai de la chaîne complète (CraftOS émulé) |

@@ -48,7 +48,9 @@ noyau.IFF = { ALLIE = "ALLIE", GENERAL = "GENERAL", INCONNU = "INCONNU" }
 noyau.CATEGORIES = { INFANTERIE = "INFANTERIE", VEHICULE_SOL = "VEHICULE_SOL", AERIENNE = "AERIENNE" }
 
 -- Nature brute du contact, telle que rapportee par le radar.
-noyau.NATURES = { JOUEUR = "JOUEUR", VEHICULE = "VEHICULE", ENTITE = "ENTITE" }
+noyau.NATURES = {
+  JOUEUR = "JOUEUR", VEHICULE = "VEHICULE", ENTITE = "ENTITE", MISSILE = "MISSILE",
+}
 
 --[[
   PALIERS D'ESCALADE
@@ -269,14 +271,29 @@ end
 --    l'arme appartient a Fire Control.
 --------------------------------------------------------------------------------
 
-function noyau.categoriser(contact, config, zone)
+--[[
+  solConnu : altitude du sol mesuree par le modele de terrain observe, quand
+  celui-ci sait repondre pour ce point. Elle prime sur toute valeur declaree :
+  un releve vaut mieux qu'une hypothese. A defaut, on retombe sur le sol de
+  reference de la zone, puis sur celui de la configuration.
+]]
+function noyau.categoriser(contact, config, zone, solConnu)
   config = config or {}
-  local solReference = (zone and nombreValide(zone.solY) and zone.solY)
+  local solReference = (nombreValide(solConnu) and solConnu)
+                    or (zone and nombreValide(zone.solY) and zone.solY)
                     or (nombreValide(config.altitudeSolReference) and config.altitudeSolReference)
                     or 64
   local hauteurAerienne = nombreValide(config.hauteurAerienne) and config.hauteurAerienne or 25
   local vitesseVerticaleAerienne = nombreValide(config.vitesseVerticaleAerienne)
                                    and config.vitesseVerticaleAerienne or 6
+
+  -- Un missile est une cible AERIENNE quelle que soit son altitude. Un obus
+  -- qui rase le sol reste un projectile : le classer "vehicule au sol" le
+  -- ferait traiter par un appui sol, contre quelque chose qui va trop vite
+  -- pour ca.
+  if contact.nature == noyau.NATURES.MISSILE then
+    return noyau.CATEGORIES.AERIENNE, "projectile detecte, cible aerienne par nature"
+  end
 
   local hauteurSol = (nombreValide(contact.y) and (contact.y - solReference)) or 0
 
@@ -317,10 +334,21 @@ end
 --                  qui n'a pas encore recu le nouveau code.
 --------------------------------------------------------------------------------
 
-function noyau.statutIff(transpondeur, codes, maintenant, config)
+function noyau.statutIff(transpondeur, codes, maintenant, config, allieManuel)
   codes = codes or {}
   config = config or {}
   maintenant = maintenant or 0
+
+  --[[
+    Declaration manuelle par un controleur, depuis la carte tactique.
+    Elle PRIME sur le transpondeur : un allie dont l'emetteur est detruit ou
+    dont l'ordinateur a saute doit pouvoir etre couvert a la main, tout de
+    suite, sans passer par une rotation de code. C'est une decision humaine
+    assumee, donc journalisee comme telle et revocable d'un clic.
+  ]]
+  if allieManuel then
+    return noyau.IFF.ALLIE, "allie declare manuellement par un controleur"
+  end
 
   if type(transpondeur) ~= "table" or type(transpondeur.code) ~= "string"
      or transpondeur.code == "" then
@@ -416,31 +444,59 @@ end
 -- 8. DESIGNATION DU TIREUR
 --
 --    Command ne choisit pas d'arme. Il choisit QUI reagit, parmi les
---    plateformes que Fire Control lui a declarees, en repartissant la charge :
+--    plateformes dont les balises de lanceur se sont annoncees :
 --
---        score = poidsTirs * (tirs / tirsMax) + poidsDistance * (dist / distMax)
+--      score =   poidsMunitions * (1 - munitions / munitionsMax)
+--              + poidsDistance  * (distance / distanceMax)
+--              + poidsTirs      * (tirs / tirsMax)
 --
---    Les deux termes sont normalises sur le lot de candidats, sinon un reseau
---    etendu ferait toujours gagner le nombre de tirs et un reseau serre
---    toujours la distance. Score le plus BAS = designe.
+--    Les trois termes sont normalises sur le lot de candidats, sinon un reseau
+--    etendu ferait toujours gagner la distance et un reseau bien approvisionne
+--    toujours les munitions. Score le plus BAS = designe.
+--
+--    Le terme munitions est le premier de la liste et le plus lourd par
+--    defaut : envoyer l'ordre a une rampe presque vide, c'est perdre la cible
+--    au deuxieme tir. Une plateforme a stock NUL n'est pas designee du tout.
+--    Le terme tirs subsiste, plus leger : a munitions et distance comparables,
+--    il repartit l'usure entre les pieces.
 --
 --    Egalite parfaite : ordre alphabetique. Le determinisme n'est pas un
 --    detail : c'est ce qui rend une decision rejouable a partir du journal.
 --------------------------------------------------------------------------------
 
+-- Une plateforme peut declarer les categories qu'elle sait traiter. Une
+-- batterie anti-aerienne pure ne doit pas recevoir un ordre sur de l'infanterie.
+local function traiteLaCategorie(p, categorie)
+  if type(p.categories) ~= "table" or #p.categories == 0 then return true end
+  if not categorie then return true end
+  for _, c in ipairs(p.categories) do
+    if c == categorie then return true end
+  end
+  return false
+end
+
 function noyau.designer(plateformes, cible, config)
   config = config or {}
-  local poidsTirs     = nombreValide(config.poidsTirs) and config.poidsTirs or 1.0
-  local poidsDistance = nombreValide(config.poidsDistance) and config.poidsDistance or 1.0
-  local horsPortee    = config.designerHorsPortee == true
+  local poidsMunitions = nombreValide(config.poidsMunitions) and config.poidsMunitions or 1.5
+  local poidsDistance  = nombreValide(config.poidsDistance) and config.poidsDistance or 1.0
+  local poidsTirs      = nombreValide(config.poidsTirs) and config.poidsTirs or 0.5
+  local horsPortee     = config.designerHorsPortee == true
 
   local candidats, rejetes = {}, {}
   if type(plateformes) ~= "table" then return candidats, rejetes end
 
   for _, p in ipairs(plateformes) do
     local nom = tostring(p.nom or p.name or "?")
-    if p.disponible == false then
+    -- Le stock passe avant le drapeau de disponibilite : une balise a sec se
+    -- declare aussi indisponible, et « stock de munitions epuise » dit au
+    -- controleur quoi faire, la ou « indisponible » ne dit rien.
+    if nombreValide(p.munitions) and p.munitions <= 0 then
+      rejetes[#rejetes + 1] = { nom = nom, motif = "stock de munitions epuise" }
+    elseif p.disponible == false then
       rejetes[#rejetes + 1] = { nom = nom, motif = "declaree indisponible" }
+    elseif not traiteLaCategorie(p, cible and cible.categorie) then
+      rejetes[#rejetes + 1] = { nom = nom,
+        motif = "ne traite pas la categorie " .. tostring(cible and cible.categorie) }
     elseif not (nombreValide(p.x) and nombreValide(p.y) and nombreValide(p.z)) then
       rejetes[#rejetes + 1] = { nom = nom, motif = "position invalide" }
     else
@@ -450,7 +506,9 @@ function noyau.designer(plateformes, cible, config)
           motif = string.format("hors portee (%.0f > %.0f)", d, p.portee) }
       else
         candidats[#candidats + 1] = {
-          nom = nom, distance = d, tirs = nombreValide(p.tirs) and p.tirs or 0,
+          nom = nom, distance = d,
+          tirs      = nombreValide(p.tirs) and p.tirs or 0,
+          munitions = nombreValide(p.munitions) and p.munitions or nil,
           plateforme = p,
         }
       end
@@ -459,18 +517,31 @@ function noyau.designer(plateformes, cible, config)
 
   if #candidats == 0 then return candidats, rejetes end
 
-  local tirsMax, distMax = 0, 0
+  local tirsMax, distMax, munitionsMax = 0, 0, 0
+  local munitionsConnues = false
   for _, c in ipairs(candidats) do
     if c.tirs > tirsMax then tirsMax = c.tirs end
     if c.distance > distMax then distMax = c.distance end
+    if c.munitions then
+      munitionsConnues = true
+      if c.munitions > munitionsMax then munitionsMax = c.munitions end
+    end
   end
   if tirsMax <= 0 then tirsMax = 1 end
   if distMax <= 0 then distMax = 1 end
+  if munitionsMax <= 0 then munitionsMax = 1 end
 
   for _, c in ipairs(candidats) do
-    c.chargeNormalisee   = c.tirs / tirsMax
     c.distanceNormalisee = c.distance / distMax
-    c.score = poidsTirs * c.chargeNormalisee + poidsDistance * c.distanceNormalisee
+    c.chargeNormalisee   = c.tirs / tirsMax
+    -- Sans aucune balise de lanceur annoncant son stock, le terme munitions
+    -- serait arbitraire : on le neutralise plutot que d'inventer une valeur.
+    c.stockNormalise = munitionsConnues and ((c.munitions or 0) / munitionsMax) or 1
+    c.penaliteStock  = munitionsConnues and (1 - c.stockNormalise) or 0
+
+    c.score = poidsMunitions * c.penaliteStock
+            + poidsDistance  * c.distanceNormalisee
+            + poidsTirs      * c.chargeNormalisee
   end
 
   table.sort(candidats, function(a, b)
@@ -502,16 +573,61 @@ noyau.CATEGORIES_FIRE_CONTROL = {
   INFANTERIE   = "Infantry",
 }
 
+--[[
+  SCRAMBLE AIR-SOL
+  Un intercepteur lance contre un aeronef et un appui lance contre de
+  l'infanterie ne font pas le meme metier, ne partent pas avec la meme charge
+  et n'abordent pas la cible de la meme facon. Les deux paliers de scramble
+  portent donc des verbes distincts :
+
+      cible AERIENNE                      -> « Scramble »
+      cible INFANTERIE ou VEHICULE_SOL    -> « Scramble AG »   (air-sol)
+
+  Exemple : « AirShip1 Scramble AG type GroundVehicle »
+]]
+noyau.CATEGORIES_SOL = { INFANTERIE = true, VEHICULE_SOL = true }
+
+--[[
+  LE SCRAMBLE AG N'EST JAMAIS AUTOMATIQUE.
+
+  Lancer une patrouille air-sol contre de l'infanterie ou un vehicule engage
+  des hommes et des appareils sur une cible qui, la plupart du temps, se
+  trouve simplement au mauvais endroit : un joueur qui traverse a pied, un
+  convoi allie sans transpondeur. Le systeme sait detecter et classer ; il ne
+  decide pas seul d'envoyer une patrouille au sol.
+
+  Quand la doctrine de zone appelle un scramble sur une cible au sol, Command
+  ne transmet donc rien : il enregistre une DEMANDE DE SCRAMBLE AG et alerte
+  le controleur, qui la valide - ou non - depuis la carte tactique. Un ordre
+  manuel, lui, part immediatement : c'est deja une decision humaine.
+
+  Le feu n'est pas concerne : une destruction decidee par la doctrine reste
+  automatique, au sol comme en l'air.
+]]
+function noyau.scrambleRequiertControleur(role, categorie, config, manuel)
+  config = config or {}
+  if role ~= "SCRAMBLE" then return false end
+  if manuel then return false end
+  if not noyau.CATEGORIES_SOL[categorie] then return false end
+  return config.scrambleAGAutomatique ~= true
+end
+
+function noyau.verbePourOrdre(role, categorie, config)
+  config = config or {}
+  if role ~= "SCRAMBLE" then return config.verbeFeu or "Fire" end
+  -- Fire Control qui ne comprend qu'un seul verbe : tout devient « Fire ».
+  if config.formatUniqueFire == true then return config.verbeFeu or "Fire" end
+  if noyau.CATEGORIES_SOL[categorie] then
+    return config.verbeScrambleAG or "Scramble AG"
+  end
+  return config.verbeScramble or "Scramble"
+end
+
 function noyau.formaterOrdre(role, nomPlateforme, categorie, config)
   config = config or {}
   local table_categories = config.categoriesFireControl or noyau.CATEGORIES_FIRE_CONTROL
   local libelle = table_categories[categorie] or tostring(categorie)
-
-  local verbe = "Fire"
-  if role == "SCRAMBLE" and config.formatUniqueFire ~= true then
-    verbe = config.verbeScramble or "Scramble"
-  end
-
+  local verbe = noyau.verbePourOrdre(role, categorie, config)
   local modele = config.modeleOrdre or "%s %s type %s"
   return string.format(modele, tostring(nomPlateforme), verbe, libelle)
 end
