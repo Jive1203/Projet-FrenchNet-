@@ -10,17 +10,36 @@ L'ADS surveille en continu le radar de bord, identifie les projectiles qui conve
 
 ---
 
-## 1. Ce que l'ADS ne peut pas faire
+## 1. Ce contre quoi l'ADS fonctionne — et ce contre quoi il ne fonctionne pas
 
-À lire **avant** de l'installer, pour ne pas lui faire confiance au mauvais endroit.
+**Le système est calibré pour les missiles guidés.** C'est le cas où il apporte quelque chose de mesurable, et les réglages par défaut sont réglés pour eux.
 
-**Un obus de Create Big Cannons ne se dodge pas.** Un obus file à 100–200 blocs/s. Détecté à 200 blocs, il arrive en 1 à 2 secondes. Le temps que le radar l'échantillonne trois fois, que le navire encaisse l'ordre de barre et qu'un dirigeable de plusieurs centaines de tonnes commence à répondre, l'obus est déjà passé. Contre du tir direct, l'ADS **réduit** la probabilité d'impact, il ne l'annule pas. Le blindage et la distance restent vos vraies défenses.
+### Ce que le banc d'essai mesure réellement
 
-**Les leurres ne fonctionnent que sur ce qui vise.** Un projectile balistique ne regarde rien. Les flares n'ont d'effet que sur un autoguidage. L'ADS largue quand même, parce qu'il ne peut pas savoir à coup sûr si l'entrant est guidé, et qu'un leurre coûte moins cher qu'un navire.
+Le test 17 fait voler un missile à guidage proportionnel **en boucle fermée** : il lit la position du navire à chaque scan et corrige sa trajectoire, donc il réagit aux ordres que l'ADS vient d'envoyer. Chaque profil est joué deux fois, une fois sans évasion (témoin) et une fois avec. Distance de passage minimale réellement atteinte :
 
-**Ce sur quoi l'ADS est réellement efficace** : les missiles guidés lents, les torpilles, tout ce qui met plus de trois secondes à arriver. C'est là que la manœuvre perpendiculaire sature la capacité de correction du guidage, et c'est là que les leurres comptent.
+| Profil de missile | Sans évasion | Avec évasion |
+|---|---|---|
+| Agile — 50 b/s, 40°/s de virage | **0 bloc (impact)** | 3,1 blocs (manqué) |
+| Lourd — 40 b/s, 8°/s de virage | 7,5 blocs | **30,7 blocs** |
 
-**Les API des mods ne sont pas figées.** Create Radars et Create Aeronautics changent de noms de méthodes d'une version à l'autre. L'ADS ne code aucun nom en dur : il **sonde** le matériel au démarrage et écrit dans le journal ce qu'il a retenu. Si le sondage échoue, il liste tous les périphériques présents avec leurs méthodes — une ligne de `config_ads.lua` suffit alors à rattraper, sans toucher au programme (§7).
+Contre un missile agile, l'évasion transforme un impact certain en un passage à 3 blocs. Contre un missile peu manœuvrant, elle quadruple la distance de passage. C'est là que l'ADS gagne sa place.
+
+**Mais le gain n'est pas universel.** Sur un troisième profil testé (60 b/s, 12°/s), l'évasion **dégrade** la distance de passage : 10 blocs sans manœuvre, 5,4 blocs avec. La raison est physique et vaut d'être comprise : *virer par le travers réduit la vitesse de rapprochement, donc allonge le temps de vol restant du missile, donc le nombre de degrés qu'il peut encore corriger*. Contre un missile qui allait déjà manquer, rompre peut lui offrir la correction.
+
+C'est le rationnel du réglage `secondesAvantDegagement` (§8) — tenir la route puis rompre tard. **Honnêteté : cette doctrine n'est pas validée par la simulation.** Sur quatre profils, elle n'améliore nettement qu'un cas et reste dans le bruit ailleurs. Elle est fournie désactivée par défaut, à mesurer sur votre serveur.
+
+### Les leurres ne trompent que ce qui vise
+
+Un projectile balistique ne regarde rien. Les flares n'ont d'effet que sur un autoguidage — c'est-à-dire précisément sur la menace visée ici. L'ADS largue dès la confirmation, sans attendre de savoir si l'entrant est guidé : un leurre coûte moins cher qu'un navire.
+
+### Un obus de tir direct ne s'esquive pas
+
+Hors sujet ici, mais à savoir : un obus de Create Big Cannons file à 100–200 b/s. Détecté à 200 blocs, il arrive en 1 à 2 secondes — moins que le temps de réponse d'un dirigeable. L'ADS le détectera, le classera et le journalisera, mais ne le fera pas manquer. Ne réglez pas le système sur lui : les motifs par défaut le couvrent, c'est tout ce qu'il faut.
+
+### Les API des mods ne sont pas figées
+
+Create Radars et Create Aeronautics changent de noms de méthodes d'une version à l'autre. L'ADS ne code aucun nom en dur : il **sonde** le matériel au démarrage et écrit dans le journal ce qu'il a retenu. Si le sondage échoue, il liste tous les périphériques présents avec leurs méthodes — une ligne de `config_ads.lua` suffit à rattraper, sans toucher au programme (§7).
 
 ---
 
@@ -89,6 +108,14 @@ Le radar rend une photographie instantanée : des positions, sans continuité d'
 
 La vitesse est obtenue par **régression linéaire** sur l'historique plutôt que par différence entre deux points : le radar échantillonne des positions arrondies, et une simple différence est très bruitée.
 
+**Détection d'autoguidage.** Un obus vole droit : lisser sur toute la fenêtre est alors la meilleure estimation possible. Un missile guidé, lui, corrige en permanence — lisser sur douze échantillons revient à moyenner sa trajectoire d'il y a trois secondes avec celle d'il y a une seconde, et l'ADS poursuit alors un fantôme. L'ADS compare donc la vitesse de la première moitié de la fenêtre à celle de la seconde ; au-delà de `seuilManoeuvreDegresSec` (8 °/s), le contact est classé **manœuvrant** :
+
+- son calcul de vitesse bascule sur une fenêtre courte, plus bruitée mais à jour ;
+- il porte le marqueur `GUIDE(x deg/s)` dans le journal — c'est l'information la plus utile pour comprendre ce qui vous a tiré dessus ;
+- il lui est demandé **une confirmation de moins** avant déclenchement : un contact qui manœuvre en gardant le navire dans son axe est un autoguidage verrouillé, pas un obus qui passe par hasard.
+
+**Vitesse et repère.** La vitesse dérivée de l'historique est exprimée dans le même repère que les positions, donc déjà relative au navire — c'est exactement ce que demande le calcul d'interception, et c'est pourquoi elle est préférée dès trois échantillons. La vitesse *fournie* par le radar, elle, est celle du contact dans le monde : sur un navire en mouvement, l'utiliser telle quelle fausse tout. Elle n'est donc gardée qu'en dépannage sur les deux premiers échos, et corrigée de la vitesse propre du navire. En repère absolu, la position du navire est rafraîchie **à chaque scan** par l'interface de pilotage : la boucle GPS générale n'interroge que toutes les 5 s, et un navire à 20 b/s s'est déplacé de 100 blocs entre-temps — écart qui serait attribué aux contacts.
+
 ### 5.3 Les quatre critères de menace
 
 Le cahier des charges demande « se rapprocher de façon constante » et « garder une trajectoire alignée ». Ces deux critères sont nécessaires mais **pas suffisants**, et c'est le point important :
@@ -107,9 +134,11 @@ Les quatre critères doivent tenir **simultanément** :
 | Critère | Réglage | Défaut | Sens |
 |---|---|---|---|
 | Rapprochement constant | `rapprochementMiniBlocsSec`, `echantillonsRapprochementMini` | 3 b/s, 3 scans | il se rapproche vraiment, et pas par accident |
-| Cap tenu vers le navire | `alignementMini` | 0.965 (15°) | il pointe sur nous |
-| Il passera assez près | `rayonMenace` | 12 blocs | **il nous touchera** |
-| C'est imminent | `horizonMenaceSecondes` | 12 s | ce n'est pas pour dans une minute |
+| Cap tenu vers le navire | `alignementMini` | 0.94 (20°) | il pointe sur nous |
+| Il passera assez près | `rayonMenace` | 16 blocs | **il nous touchera** |
+| C'est imminent | `horizonMenaceSecondes` | 20 s | ce n'est pas pour dans une minute |
+
+> **Sur l'angle d'anticipation.** Un missile à guidage proportionnel ne vise pas votre position actuelle : il vise le point d'interception, donc il pointe *à côté* de vous. On pourrait croire que le critère d'alignement le rejetterait. Il n'en est rien, parce que tout est calculé dans le **repère navire** : la vitesse d'un contact y est déjà la vitesse *relative*, et pour une trajectoire de collision la vitesse relative pointe exactement sur le navire, quel que soit l'angle d'anticipation. La tolérance de 20° sert à encaisser ses corrections en cours de vol, pas son avance de tir. Ce raisonnement ne tient que dans le repère navire — d'où l'avertissement du journal quand le repère est absolu et que la position du navire est inconnue.
 
 Puis `confirmationsMini` scans consécutifs qualifiants avant déclenchement — **sauf urgence** : sous `urgenceSecondes` (2,5 s) avant impact, l'ADS déclenche dès le premier scan qualifiant. Attendre deux confirmations à 2 secondes de l'impact revient à ne rien faire.
 
@@ -244,9 +273,13 @@ Un tick Minecraft vaut 0,05 s ; c'est le plancher. À 0,25 s, un obus à 150 b/s
 
 Descendez à 0,1 s sur un navire qui affronte du tir direct, remontez à 0,5 s sur un cargo qui ne croise que des missiles lents.
 
+### `secondesAvantDegagement` — le break tardif
+
+0 par défaut : rupture immédiate dès la confirmation. Le porter à 3 s fait tenir la route au navire jusqu'à ce que le missile n'ait plus assez de temps de vol pour corriger, puis rompre franchement. Physiquement fondé (§1), **non validé par la simulation** : mesurez vos distances de passage sur votre serveur avant de l'adopter. La préemption et les leurres ne sont pas retardés — seule la manœuvre l'est.
+
 ### `rayonMenace`
 
-Demi-diamètre du navire plus une marge. Trop grand, l'ADS se déclenche pour des tirs qui passent au large et brûle ses leurres. Trop petit, il laisse passer ce qui frôle. C'est le réglage à ajuster en premier avec les données du journal.
+Demi-diamètre du navire, plus le rayon de souffle du missile, plus une marge. Trop grand, l'ADS se déclenche pour des tirs qui passent au large et brûle ses leurres. Trop petit, il laisse passer ce qui frôle. C'est le réglage à ajuster en premier avec les données du journal.
 
 ### `alignementMini`
 
@@ -328,11 +361,15 @@ Lecture seule. Par navire : état (`VEILLE` / `MENACE` / `DEGAGEMENT` / `REPRISE
 ## 11. Banc d'essai
 
 ```
-lua5.4 tests/test_ads.lua        # 127 verifications
+lua5.4 tests/test_ads.lua        # 136 verifications
 lua5.4 tests/test_balise.lua     # 49 verifications
 ```
 
-`tests/craftos.lua` émule CraftOS hors du jeu : événements, minuteurs, rednet, modem, redstone, radar (Create Radars) et interface de pilotage (Create Aeronautics). Les tests couvrent la cinématique pure (CPA, alignement, axes d'évasion, caps Minecraft, régression de vitesse), l'engagement complet, le rejet d'un tir qui passe au large, la menace persistante, les contacts ignorés, l'absence de radar, la panne de radar en vol, l'absence de largueur, le mode simulation, la configuration invalide ou absente, `Ctrl+T`, l'autonomie totale, la télémétrie, la reprise de tâche et le repère absolu.
+`tests/craftos.lua` émule CraftOS hors du jeu : événements, minuteurs, rednet, modem, redstone, radar (Create Radars) et interface de pilotage (Create Aeronautics).
+
+Le **test 17** va plus loin qu'une vérification de comportement : il simule un missile à guidage proportionnel **en boucle fermée** — le missile lit la position du navire à chaque scan et corrige, le navire a une inertie de barre finie — et compare la distance de passage avec et sans évasion. C'est le seul montage qui prouve que la manœuvre sert à quelque chose ; vérifier qu'un ordre de barre a été émis ne prouve rien.
+
+Les autres tests couvrent la cinématique pure (CPA, alignement, axes d'évasion, caps Minecraft, régression de vitesse), l'engagement complet, le rejet d'un tir qui passe au large, la menace persistante, les contacts ignorés, l'absence de radar, la panne de radar en vol, l'absence de largueur, le mode simulation, la configuration invalide ou absente, `Ctrl+T`, l'autonomie totale, la télémétrie, la reprise de tâche et le repère absolu.
 
 ---
 

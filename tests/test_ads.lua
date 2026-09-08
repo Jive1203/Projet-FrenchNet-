@@ -70,6 +70,118 @@ local function scenarioRectiligne(nom, p, v, fin)
   end
 end
 
+--------------------------------------------------------------------------------
+-- Simulation en BOUCLE FERMEE d'un missile a guidage proportionnel.
+--
+-- C'est le seul montage qui prouve quelque chose sur la menace reelle : le
+-- missile lit la position du navire a chaque scan et corrige sa trajectoire,
+-- donc il reagit aux ordres que l'ADS vient d'envoyer. Un scenario rectiligne,
+-- lui, ne peut pas distinguer une evasion utile d'une evasion inutile.
+--
+-- Le navire est modelise avec une INERTIE DE BARRE : l'ADS fixe un cap de
+-- consigne, le navire s'y rend a vitesse angulaire finie. Sans cela le test
+-- serait complaisant.
+--------------------------------------------------------------------------------
+
+local function vsomme(a, b) return { x = a.x + b.x, y = a.y + b.y, z = a.z + b.z } end
+local function vdiff(a, b) return { x = a.x - b.x, y = a.y - b.y, z = a.z - b.z } end
+local function vmul(a, k) return { x = a.x * k, y = a.y * k, z = a.z * k } end
+local function vnorme(a) return math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z) end
+local function vunit(a)
+  local n = vnorme(a)
+  if n < 1e-9 then return nil end
+  return vmul(a, 1 / n)
+end
+local function vcross(a, b)
+  return { x = a.y * b.z - a.z * b.y,
+           y = a.z * b.x - a.x * b.z,
+           z = a.x * b.y - a.y * b.x }
+end
+local function vdot(a, b) return a.x * b.x + a.y * b.y + a.z * b.z end
+
+--- Direction unitaire correspondant a un cap Minecraft (yaw 0 = +Z, 90 = -X).
+local function directionDepuisCap(cap)
+  local r = math.rad(cap)
+  return { x = -math.sin(r), y = 0, z = math.cos(r) }
+end
+
+--- Fait tourner 'd' vers 'cible' d'au plus 'angleMax' radians (Rodrigues).
+local function tournerVers(d, cible, angleMax)
+  local cosang = math.max(-1, math.min(1, vdot(d, cible)))
+  local angle = math.acos(cosang)
+  if angle <= angleMax or angle < 1e-9 then return cible end
+  local axe = vunit(vcross(d, cible))
+  if not axe then return d end
+  local c, si = math.cos(angleMax), math.sin(angleMax)
+  return vunit(vsomme(vmul(d, c), vmul(vcross(axe, d), si))) or d
+end
+
+--- Construit un scenario de poursuite. Renvoie la fonction radar et une table
+-- de mesure ou l'on relit la distance minimale reellement atteinte.
+local function scenarioPoursuite(etat, reglages)
+  local mesure = { distanceMini = math.huge, impact = false, duree = 0 }
+  -- La direction du missile est tenue a part : les operations vectorielles
+  -- renvoient des tables neuves et perdraient un champ porte par la position.
+  local navire, missile, dirMissile, capReel, dernier
+
+  return function(horloge)
+    if not dernier then
+      dernier  = horloge
+      navire   = { x = 0, y = 150, z = 0 }
+      capReel  = 0
+      missile    = { x = 0, y = 150, z = reglages.distance }
+      dirMissile = { x = 0, y = 0, z = -1 }
+      etat.navire.x, etat.navire.y, etat.navire.z = navire.x, navire.y, navire.z
+      return { { name = "aeronautics:guided_missile",
+                 x = missile.x, y = missile.y, z = missile.z,
+                 vx = dirMissile.x * reglages.vitesseMissile,
+                 vy = dirMissile.y * reglages.vitesseMissile,
+                 vz = dirMissile.z * reglages.vitesseMissile } }
+    end
+
+    local dt = horloge - dernier
+    dernier = horloge
+    if dt <= 0 then dt = 0.0001 end
+    mesure.duree = mesure.duree + dt
+
+    -- 1. Barre du navire : le cap reel rejoint le cap de consigne a vitesse
+    --    angulaire finie. etat.navire.cap est ce que l'ADS a demande.
+    local consigne = etat.navire.cap or 0
+    local ecart = ((consigne - capReel + 180) % 360) - 180
+    local maxi = reglages.viragNavireDegSec * dt
+    capReel = capReel + math.max(-maxi, math.min(maxi, ecart))
+
+    -- 2. Deplacement du navire, altitude suivie sur la consigne.
+    local dirNavire = directionDepuisCap(capReel)
+    navire = vsomme(navire, vmul(dirNavire, reglages.vitesseNavire * dt))
+    local altitudeVisee = etat.navire.altitude or navire.y
+    local dyMax = reglages.vitesseVerticale * dt
+    navire.y = navire.y + math.max(-dyMax, math.min(dyMax, altitudeVisee - navire.y))
+    etat.navire.x, etat.navire.y, etat.navire.z = navire.x, navire.y, navire.z
+
+    -- 3. Guidage du missile : poursuite avec anticipation (point d'interception
+    --    estime), limitee par sa vitesse de rotation.
+    local versNavire = vdiff(navire, missile)
+    local distance = vnorme(versNavire)
+    local tVol = distance / reglages.vitesseMissile
+    local anticipation = vsomme(navire, vmul(vmul(dirNavire, reglages.vitesseNavire), tVol))
+    local voulue = vunit(vdiff(anticipation, missile)) or dirMissile
+    dirMissile = tournerVers(dirMissile, voulue, math.rad(reglages.virageMissileDegSec) * dt)
+    missile = vsomme(missile, vmul(dirMissile, reglages.vitesseMissile * dt))
+
+    -- 4. Mesure : distance minimale reellement atteinte sur tout le vol.
+    local d = vnorme(vdiff(missile, navire))
+    if d < mesure.distanceMini then mesure.distanceMini = d end
+    if d <= reglages.rayonImpact then mesure.impact = true end
+
+    return { { name = "aeronautics:guided_missile",
+               x = missile.x, y = missile.y, z = missile.z,
+               vx = dirMissile.x * reglages.vitesseMissile,
+               vy = dirMissile.y * reglages.vitesseMissile,
+               vz = dirMissile.z * reglages.vitesseMissile } }
+  end, mesure
+end
+
 local CONFIG_NOMINALE = [[
 return {
   identifiant = "NAV-01-CORSAIRE",
@@ -736,6 +848,85 @@ return {
     if valeur then restees[#restees + 1] = cote end
   end
   verifier("toutes les sorties refermees", #restees == 0, table.concat(restees, ","))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 17 : missile guide en boucle fermee (l'evasion sert-elle ?) ==")
+do
+  -- Deux passages par profil : un temoin sans evasion, un avec. Seule cette
+  -- comparaison dit si la manoeuvre apporte quelque chose ; verifier qu'un
+  -- ordre de barre a ete emis ne prouve rien du tout.
+  local function passage(evasionActive, reglages)
+    preparer(string.format([[
+return {
+  identifiant = "NAV-SIM",
+  intervalleScanSecondes = 0.25,
+  radarRepere = "absolu",
+  radarPortee = 400,
+  rayonMenace = 16,
+  horizonMenaceSecondes = 20,
+  piloteMode = "auto",
+  altitudeMin = 80, altitudeMax = 300,
+  vitesseEvasionEstimee = %d,
+  evasionActive = %s,
+  leurresActifs = false, largueurs = {},
+  journalNiveauEcran = "DEBUG",
+}
+]], reglages.vitesseNavire, tostring(evasionActive)))
+
+    local craftos = dofile(SCR .. "/craftos.lua")
+    local env, etat = craftos.creer({
+      racine = BANC, programme = "ads/ads.lua",
+      pilote = { cap = 0, altitude = 150, x = 0, y = 150, z = 0 },
+    })
+    local radar, mesure = scenarioPoursuite(etat, reglages)
+    craftos.ajouterPeripherique("create_radars:radar_0", "radar",
+      { getEntities = function() return radar(etat.horloge) end })
+    craftos.executer(BANC .. "/ads/ads.lua", 20)
+    return mesure, etat
+  end
+
+  local function profil(vitesseMissile, virageMissileDegSec, distance)
+    return { vitesseMissile = vitesseMissile, virageMissileDegSec = virageMissileDegSec,
+             vitesseNavire = 25, viragNavireDegSec = 45, vitesseVerticale = 8,
+             distance = distance, rayonImpact = 3 }
+  end
+
+  -- Profil 1 : missile agile. Sans evasion, il touche.
+  local agile = profil(50, 40, 300)
+  local temoinAgile = passage(false, agile)
+  local avecAgile, etatAgile = passage(true, agile)
+
+  verifier("temoin : sans evasion, le missile agile touche",
+    temoinAgile.impact, string.format("%.1fb", temoinAgile.distanceMini))
+  verifier("avec evasion, le missile agile manque",
+    not avecAgile.impact, string.format("%.1fb", avecAgile.distanceMini))
+  verifier("l'evasion creuse la distance de passage",
+    avecAgile.distanceMini > temoinAgile.distanceMini,
+    string.format("%.1fb -> %.1fb", temoinAgile.distanceMini, avecAgile.distanceMini))
+
+  local sorties = etatAgile.sorties
+  verifier("missile detecte et engage", (contient(sorties, "MENACE ENTRANTE")))
+  verifier("contact reconnu comme autoguidage (manoeuvrant)",
+    (contient(sorties, "contact MANOEUVRANT")))
+  verifier("marqueur GUIDE porte dans le journal", (contient(sorties, "GUIDE(")))
+  verifier("vitesse radar corrigee de la vitesse propre du navire",
+    (contient(sorties, "radar (corrigee)")) or (contient(sorties, "(derivee")))
+  verifier("le navire a reellement change de cap",
+    math.abs(((etatAgile.navire.cap or 0) + 180) % 360 - 180) > 20,
+    tostring(etatAgile.navire.cap))
+
+  -- Profil 2 : missile lourd, peu manoeuvrant. C'est la que l'evasion paie le plus.
+  local lourd = profil(40, 8, 300)
+  local temoinLourd = passage(false, lourd)
+  local avecLourd = passage(true, lourd)
+  verifier("missile lourd : l'evasion multiplie la distance de passage",
+    avecLourd.distanceMini > temoinLourd.distanceMini * 2,
+    string.format("%.1fb -> %.1fb", temoinLourd.distanceMini, avecLourd.distanceMini))
+
+  print(string.format("     [mesure] agile : %.1fb sans evasion -> %.1fb avec | "
+    .. "lourd : %.1fb -> %.1fb", temoinAgile.distanceMini, avecAgile.distanceMini,
+    temoinLourd.distanceMini, avecLourd.distanceMini))
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))

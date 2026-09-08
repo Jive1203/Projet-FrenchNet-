@@ -44,7 +44,7 @@ gps locate     -- teste le GPS depuis n'importe quelle machine
 
 ## ADS — contre-mesures embarquées
 
-Sur **chaque navire**. Le radar de bord est surveillé en continu ; dès qu'un projectile converge vers le navire, l'ADS déclenche **simultanément** le largage de leurres et une manœuvre d'évasion prioritaire qui interrompt la tâche en cours, puis rend automatiquement la main une fois la menace passée.
+Sur **chaque navire**. Le radar de bord est surveillé en continu ; dès qu'un **missile** converge vers le navire, l'ADS déclenche **simultanément** le largage de leurres et une manœuvre d'évasion prioritaire qui interrompt la tâche en cours, puis rend automatiquement la main une fois la menace passée. Un contact qui corrige sa trajectoire est reconnu comme autoguidage, marqué `GUIDE` dans le journal, et engagé plus vite.
 
 Indépendant des systèmes au sol et du scramble, mais conçu pour tourner en parallèle d'eux sur le même navire.
 
@@ -73,7 +73,7 @@ largueurs   = { { type = "redstone", cote = "left" },         -- sans eux, aucun
 
 `piloteMode = "simulation"` et `journalNiveauEcran = "DEBUG"` : l'ADS détecte, calcule et journalise tout sans toucher aux commandes. Vérifiez dans `ads/ads.log` que les vraies menaces déclenchent et que les tirs qui passent au large ne déclenchent pas, ajustez `rayonMenace` et `motifsProjectile`, puis passez en `"auto"`.
 
-**Trois limites à connaître avant de lui faire confiance** : un obus de tir direct arrive plus vite que le navire ne répond, les leurres ne trompent que ce qui vise, et les noms de méthodes des mods changent d'une version à l'autre (l'ADS les sonde et écrit son choix dans le journal). Détail dans [le guide](docs/guide-ads.md#1-ce-que-lads-ne-peut-pas-faire).
+**Calibré pour les missiles guidés.** Mesuré en boucle fermée sur le banc d'essai, contre un missile qui corrige sa trajectoire : un missile agile qui touchait à coup sûr passe à 3 blocs, un missile lourd passe de 7,5 à 30,7 blocs. Le gain n'est pas universel — sur un profil testé, l'évasion dégrade la distance de passage, pour une raison physique expliquée dans [le guide](docs/guide-ads.md#1-ce-contre-quoi-lads-fonctionne--et-ce-contre-quoi-il-ne-fonctionne-pas). Un obus de tir direct, lui, arrive plus vite que le navire ne répond : il est détecté et journalisé, pas esquivé.
 
 ```
 console_ads    -- etat ADS de toute la flotte (lecture seule)
@@ -110,7 +110,7 @@ Consultable à l'écran ou dans `balise/balise.log` / `ads/ads.log`. Chaque guid
 
 ```
 lua5.4 tests/test_balise.lua     # 49 verifications
-lua5.4 tests/test_ads.lua        # 127 verifications
+lua5.4 tests/test_ads.lua        # 136 verifications
 ```
 
 `tests/craftos.lua` émule CraftOS hors du jeu (événements, minuteurs, rednet, modem, redstone, radar, interface de pilotage), ce qui permet de tester le fonctionnement nominal **et** le comportement en panne sans lancer Minecraft.

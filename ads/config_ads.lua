@@ -12,6 +12,12 @@
       piloteMode       -> sans lui, le navire ne manoeuvre pas
       rayonMenace      -> trop grand, l'ADS se declenche pour rien
 
+  CIBLE DU SYSTEME : les MISSILES GUIDES. Les reglages par defaut sont
+  calibres pour eux (horizon long, rayon de menace large, tolerance d'angle
+  ouverte pour encaisser les corrections d'un autoguidage). Un obus de tir
+  direct sera detecte et signale, mais il arrive trop vite pour etre esquive :
+  ne reglez pas le systeme sur lui.
+
   MISE EN SERVICE PRUDENTE : commencez avec piloteMode = "simulation" et
   journalNiveauEcran = "DEBUG". L'ADS detecte, calcule et journalise tout,
   mais ne touche pas aux commandes. Vous lisez ads.log, vous verifiez que les
@@ -96,13 +102,23 @@ return {
 
   -- Vitesse minimale, en blocs/s, pour qu'un contact anonyme soit traite comme
   -- un projectile. Sert de repli quand le radar ne nomme pas les entites.
-  vitesseProjectileMini = 6,
+  -- 5 b/s laisse passer les navires lents sans rater un missile de croisiere.
+  vitesseProjectileMini = 5,
+
+  -- Taux de virage, en degres/s, au-dela duquel un contact est classe
+  -- MANOEUVRANT. Un projectile balistique vole droit ; un contact qui corrige
+  -- en gardant le navire dans son axe est un AUTOGUIDAGE verrouille sur vous.
+  -- L'ADS le marque "GUIDE" dans le journal, bascule son calcul de vitesse sur
+  -- une fenetre courte (sinon il poursuit une trajectoire perimee) et lui
+  -- demande une confirmation de moins avant de declencher.
+  seuilManoeuvreDegresSec = 8,
 
   -- Reconnaissance par le nom du contact (recherche litterale, insensible a
   -- la casse). Completez avec les noms reels lus dans votre journal DEBUG.
   motifsProjectile = {
-    "missile", "rocket", "roquette", "shell", "obus", "projectile", "cannon",
-    "cbc", "ap_shell", "he_shell", "flak", "torpedo", "torpille", "bomb",
+    "missile", "rocket", "roquette", "torpedo", "torpille", "guided", "seeker",
+    "projectile", "shell", "obus", "cannon", "cbc", "ap_shell", "he_shell",
+    "flak", "bomb",
   },
 
   -- Contacts JAMAIS consideres comme une menace. Ajoutez-y le nom de vos
@@ -115,16 +131,23 @@ return {
 
   -- Distance d'approche minimale, en blocs, en dessous de laquelle un
   -- projectile est considere comme dangereux. Prenez le demi-diametre du
-  -- navire plus une marge. Trop grand = declenchements pour rien.
-  rayonMenace = 12,
+  -- navire, plus le rayon de souffle du missile, plus une marge.
+  -- Trop grand = declenchements pour rien.
+  rayonMenace = 16,
 
   -- Au-dela de cet horizon (secondes avant le passage au plus pres), la
   -- menace n'est pas jugee imminente et l'ADS laisse la tache se poursuivre.
-  horizonMenaceSecondes = 12,
+  -- 20 s parce qu'un missile a une longue phase de croisiere : le detecter
+  -- tot laisse le temps de larguer plusieurs salves de leurres.
+  horizonMenaceSecondes = 20,
 
-  -- Alignement minimal : cosinus de l'angle entre la trajectoire du
-  -- projectile et la direction du navire. 0.965 = 15 deg, 0.985 = 10 deg.
-  alignementMini = 0.965,
+  -- Alignement minimal : cosinus de l'angle entre la trajectoire RELATIVE du
+  -- projectile et la direction du navire. 0.94 = 20 deg, 0.965 = 15 deg.
+  -- Note : le calcul se fait dans le repere navire, donc la vitesse est deja
+  -- relative et un missile a guidage proportionnel presente un alignement
+  -- proche de 1 malgre son angle d'anticipation. La tolerance de 20 deg sert
+  -- a encaisser ses corrections en cours de vol, pas son avance de tir.
+  alignementMini = 0.94,
 
   -- Vitesse de rapprochement minimale, en blocs/s.
   rapprochementMiniBlocsSec = 3,
@@ -237,6 +260,22 @@ return {
   -- comparer les axes de degagement entre eux. Une valeur approximative
   -- suffit : c'est le CLASSEMENT des axes qui compte, pas la valeur absolue.
   vitesseEvasionEstimee = 20,
+
+  -- BREAK TARDIF, en secondes avant impact. 0 = rupture immediate des la
+  -- confirmation de la menace (defaut).
+  --
+  -- Rationnel : virer par le travers reduit la vitesse de rapprochement, donc
+  -- allonge le temps de vol restant du missile, donc le nombre de degres qu'il
+  -- peut encore corriger. Rompre trop tot peut lui OFFRIR la correction. La
+  -- doctrine consiste a tenir la route puis a rompre quand il ne lui reste plus
+  -- assez de temps de vol.
+  --
+  -- HONNETETE : cette doctrine n'a PAS ete validee par la simulation du banc
+  -- d'essai. Sur quatre profils de missile testes, elle n'ameliore nettement
+  -- qu'un seul cas et reste dans le bruit sur les autres. Elle est fournie
+  -- parce qu'elle est physiquement fondee et mesurable sur votre serveur :
+  -- essayez 3 s et comparez vos distances de passage. Laissez 0 par defaut.
+  secondesAvantDegagement = 0,
 
   -- Preference de degagement : "auto", "horizontale" ou "verticale".
   -- Un dirigeable lourd vire mal mais plonge bien : "verticale" lui convient.

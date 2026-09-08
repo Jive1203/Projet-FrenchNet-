@@ -97,19 +97,21 @@ local DEFAUTS = {
   pisteMemoireSecondes        = 6,         -- duree de vie d'une piste sans echo
   pisteEchantillonsMax        = 12,        -- profondeur de l'historique
   pisteRayonAssociation       = 24,        -- gate d'association (blocs)
-  vitesseProjectileMini       = 6,         -- blocs/s : en dessous, pas un projectile
+  vitesseProjectileMini       = 5,         -- blocs/s : en dessous, pas un projectile
+  seuilManoeuvreDegresSec     = 8,         -- au-dela : contact classe manoeuvrant
   motifsProjectile            = {          -- reconnaissance par le nom du contact
-    "missile", "rocket", "roquette", "shell", "obus", "projectile", "cannon",
-    "cbc", "ap_shell", "he_shell", "flak", "torpedo", "torpille", "bomb",
+    "missile", "rocket", "roquette", "torpedo", "torpille", "guided", "seeker",
+    "projectile", "shell", "obus", "cannon", "cbc", "ap_shell", "he_shell",
+    "flak", "bomb",
   },
   motifsIgnores               = {          -- jamais considere comme une menace
     "player", "item", "flare", "leurre", "chaff", "particle", "boat", "minecart",
   },
 
   --------------------------------------------------------------- menace ------
-  rayonMenace                 = 12,        -- distance d'approche minimale (blocs)
-  horizonMenaceSecondes       = 12,        -- au-dela, la menace n'est pas imminente
-  alignementMini              = 0.965,     -- cos(15 deg) : cap tenu vers le navire
+  rayonMenace                 = 16,        -- distance d'approche minimale (blocs)
+  horizonMenaceSecondes       = 20,        -- au-dela, la menace n'est pas imminente
+  alignementMini              = 0.94,      -- cos(20 deg) : cap tenu vers le navire
   rapprochementMiniBlocsSec   = 3,         -- vitesse de rapprochement minimale
   echantillonsRapprochementMini = 3,       -- scans consecutifs de rapprochement
   confirmationsMini           = 2,         -- scans consecutifs avant declenchement
@@ -138,6 +140,7 @@ local DEFAUTS = {
   altitudeMin                 = 80,
   altitudeMax                 = 300,
   vitesseEvasionEstimee       = 20,        -- blocs/s, sert au calcul du meilleur axe
+  secondesAvantDegagement     = 0,         -- 0 = break immediat ; sinon break tardif
   preferenceEvasion           = "auto",    -- auto | horizontale | verticale
   intervalleManoeuvreSecondes = 1,         -- re-evaluation de l'axe d'evasion
   pleinGazEnEvasion           = true,
@@ -552,6 +555,50 @@ function cinematique.axeEvasion(r, v, vitesseNavire, filtre)
   return meilleur, candidats
 end
 
+--- Vitesse d'un contact, avec detection de manoeuvre.
+--
+-- POURQUOI CE N'EST PAS UNE SIMPLE REGRESSION. Un obus vole droit : lisser sur
+-- toute la fenetre est alors la meilleure estimation possible. Un MISSILE
+-- GUIDE, lui, corrige en permanence : lisser sur douze echantillons revient a
+-- moyenner sa trajectoire d'il y a trois secondes avec celle d'il y a une
+-- seconde, et l'ADS poursuit alors un fantome.
+--
+-- On compare donc la vitesse de la premiere moitie de la fenetre a celle de la
+-- seconde. Un ecart franc signe une manoeuvre : on bascule sur une fenetre
+-- courte, plus bruitee mais a jour. Et cet ecart est en lui-meme l'indice le
+-- plus fiable qu'un contact est un AUTOGUIDAGE et non un projectile balistique.
+-- @return vitesse, manoeuvrante (booleen), taux de virage (deg/s)
+function cinematique.vitesseAdaptative(echantillons, seuilVirageDegresSec)
+  local n = #echantillons
+  local complete = cinematique.vitesseParRegression(echantillons)
+  if n < 4 or not complete then return complete, false, 0 end
+
+  local milieu = math.floor(n / 2)
+  local ancienne, recente = {}, {}
+  for i = 1, milieu do ancienne[#ancienne + 1] = echantillons[i] end
+  for i = milieu + 1, n do recente[#recente + 1] = echantillons[i] end
+
+  local va = cinematique.vitesseParRegression(ancienne)
+  local vr = cinematique.vitesseParRegression(recente)
+  if not va or not vr then return complete, false, 0 end
+
+  local da, dr = vec.normaliser(va), vec.normaliser(vr)
+  if not da or not dr then return complete, false, 0 end
+
+  -- Angle entre les deux directions, ramene a un taux de virage.
+  local cosinus = math.max(-1, math.min(1, vec.scalaire(da, dr)))
+  local duree = echantillons[n].t - echantillons[1].t
+  if duree <= 1e-9 then return complete, false, 0 end
+  local tauxVirage = math.deg(math.acos(cosinus)) / duree
+
+  if tauxVirage >= (seuilVirageDegresSec or 8) then
+    -- Contact manoeuvrant : seule la fenetre recente decrit ce qu'il fait
+    -- maintenant, et c'est maintenant qui compte.
+    return vr, true, tauxVirage
+  end
+  return complete, false, tauxVirage
+end
+
 --- Vitesse d'un contact par regression lineaire sur son historique.
 -- Une simple difference entre deux echantillons est tres bruitee (le radar
 -- echantillonne des positions entieres). La regression sur toute la fenetre
@@ -626,13 +673,14 @@ local function validerConfiguration(config)
   local numeriques = {
     "delaiGps", "radarPortee", "intervalleScanSecondes", "radarEchecsAvantReinit",
     "pisteMemoireSecondes", "pisteEchantillonsMax", "pisteRayonAssociation",
-    "vitesseProjectileMini", "rayonMenace", "horizonMenaceSecondes",
+    "vitesseProjectileMini", "seuilManoeuvreDegresSec",
+    "rayonMenace", "horizonMenaceSecondes",
     "rapprochementMiniBlocsSec", "echantillonsRapprochementMini",
     "confirmationsMini", "urgenceSecondes", "hysteresisLevee",
     "perteContactSecondes", "delaiSecuriteSecondes", "leurresParSalve",
     "salvesParEngagement", "intervalleSalveSecondes", "stockLeurres",
     "delaiReengagementSecondes", "amplitudeVirageDegres", "amplitudeAltitudeBlocs",
-    "altitudeMin", "altitudeMax", "vitesseEvasionEstimee",
+    "altitudeMin", "altitudeMax", "vitesseEvasionEstimee", "secondesAvantDegagement",
     "intervalleManoeuvreSecondes", "delaiInterrogationTache",
     "rafraichirTacheSecondes", "intervalleTelemetrieSecondes",
     "journalTailleMax", "battementSecondes", "erreursAvantReinit",
@@ -1267,6 +1315,33 @@ end
 --         limite de 'pisteRayonAssociation'.
 --------------------------------------------------------------------------------
 
+--- Rafraichissement RAPIDE de la position du navire (aucun appel bloquant).
+-- Indispensable en repere absolu : la boucle de position generale n'interroge
+-- le GPS que toutes les 5 s, et un navire a 20 b/s s'est deplace de 100 blocs
+-- entre-temps. Cet ecart serait attribue aux contacts, qui paraitraient donc
+-- se rapprocher ou s'eloigner alors qu'ils ne bougent pas.
+local function rafraichirNavireRapide(contexte, maintenant)
+  local brut = lirePilote(contexte, "lirePos")
+  if type(brut) ~= "table" then return end
+  local x = premierNombre(brut, { "x", 1 })
+  local y = premierNombre(brut, { "y", 2 })
+  local z = premierNombre(brut, { "z", 3 })
+  if not (x and y and z) then return end
+
+  local position = vec.creer(x, y, z)
+  contexte.positionNavire = position
+  if nombreValide(y) then contexte.altitude = y end
+
+  local echantillons = contexte.echantillonsNavire
+  echantillons[#echantillons + 1] = { t = maintenant, p = position }
+  while #echantillons > contexte.config.pisteEchantillonsMax do
+    table.remove(echantillons, 1)
+  end
+  if #echantillons >= 3 then
+    contexte.vitesseNavire = cinematique.vitesseParRegression(echantillons)
+  end
+end
+
 --- Position predite d'une piste a l'instant t (extrapolation lineaire).
 local function positionPredite(piste, t)
   if not piste.vitesse then return piste.position end
@@ -1346,19 +1421,39 @@ local function mettreAJourPistes(contexte, contacts, maintenant)
     echantillons[#echantillons + 1] = { t = maintenant, p = contact.position }
     while #echantillons > config.pisteEchantillonsMax do table.remove(echantillons, 1) end
 
-    -- Vitesse : celle du radar si elle existe, sinon derivee de l'historique.
-    -- La derivee est preferee des que l'historique est fourni : elle est
-    -- exprimee dans le meme repere que les positions, donc deja relative.
-    local derivee = cinematique.vitesseParRegression(echantillons)
+    -- Vitesse : derivee de l'historique des que possible, car elle est
+    -- exprimee dans le meme repere que les positions, donc deja RELATIVE au
+    -- navire. La vitesse fournie par le radar, elle, est celle du contact dans
+    -- le monde : sur un navire en mouvement, l'utiliser telle quelle fausse
+    -- tout le calcul d'interception. Elle n'est donc gardee qu'en depannage,
+    -- sur les deux premiers echos, et corrigee de notre propre vitesse.
+    local derivee, manoeuvrante, tauxVirage =
+      cinematique.vitesseAdaptative(echantillons, config.seuilManoeuvreDegresSec)
     if derivee and #echantillons >= 3 then
       piste.vitesse = derivee
-      piste.sourceVitesse = "derivee"
+      piste.sourceVitesse = manoeuvrante and "derivee (fenetre courte)" or "derivee"
     elseif contact.vitesseFournie then
-      piste.vitesse = contact.vitesseFournie
-      piste.sourceVitesse = "radar"
+      local vitesse = contact.vitesseFournie
+      if contexte.vitesseNavire then
+        vitesse = vec.soustraire(vitesse, contexte.vitesseNavire)
+      end
+      piste.vitesse = vitesse
+      piste.sourceVitesse = contexte.vitesseNavire and "radar (corrigee)" or "radar"
     elseif derivee then
       piste.vitesse = derivee
       piste.sourceVitesse = "derivee"
+    end
+
+    piste.tauxVirage = tauxVirage or 0
+    -- Un contact qui manoeuvre en nous gardant dans son axe n'est pas un obus :
+    -- c'est un autoguidage. On l'ecrit une fois, c'est l'information la plus
+    -- utile du journal pour comprendre ce qui a tire sur le navire.
+    if manoeuvrante and not piste.manoeuvrante then
+      piste.manoeuvrante = true
+      journal.avert(ETAPES.PISTAGE, string.format(
+        "contact MANOEUVRANT (%s deg/s) : comportement d'autoguidage, "
+        .. "le contact corrige sa trajectoire -> %s",
+        fmt(tauxVirage), piste.cle))
     end
   end
 
@@ -1426,8 +1521,17 @@ local function evaluerMenace(contexte, piste, maintenant)
   end
   mesure.confirmations = piste.confirmations
 
+  -- Un contact qui MANOEUVRE en gardant le navire dans son axe est un
+  -- autoguidage verrouille sur nous : exiger de lui autant de confirmations
+  -- que d'un obus qui passe par hasard, c'est perdre une seconde pour rien.
+  local confirmationsExigees = config.confirmationsMini
+  if piste.manoeuvrante then
+    confirmationsExigees = math.max(1, config.confirmationsMini - 1)
+  end
+  mesure.confirmationsExigees = confirmationsExigees
+
   mesure.declenche = mesure.qualifiee
-    and (mesure.urgente or piste.confirmations >= config.confirmationsMini)
+    and (mesure.urgente or piste.confirmations >= confirmationsExigees)
 
   -- Levee de menace : hysteresis, sinon une piste oscillant autour du seuil
   -- ferait entrer et sortir le navire d'evasion plusieurs fois par seconde.
@@ -1449,9 +1553,11 @@ local function decrirePiste(piste)
       piste.cle, piste.nom, fmt(piste.position.x), fmt(piste.position.y), fmt(piste.position.z))
   end
   return string.format(
-    "%s [%s] dist=%sb rapprochement=%sb/s vitesse=%sb/s (%s) alignement=%.3f "
+    "%s [%s]%s dist=%sb rapprochement=%sb/s vitesse=%sb/s (%s) alignement=%.3f "
     .. "CPA=%sb dans %ss | rapproche x%d, confirme x%d",
-    piste.cle, piste.nom, fmt(m.distance), fmt(m.rapprochement),
+    piste.cle, piste.nom,
+    piste.manoeuvrante and string.format(" GUIDE(%s deg/s)", fmt(piste.tauxVirage)) or "",
+    fmt(m.distance), fmt(m.rapprochement),
     fmt(m.vitesseRelative), piste.sourceVitesse or "?", m.alignement,
     fmt(m.distanceCpa), fmt(m.tCpa, 2),
     m.rapprochementsConsecutifs or 0, m.confirmations or 0)
@@ -1602,6 +1708,36 @@ end
 local function manoeuvrerContre(contexte, piste)
   local config = contexte.config
   if not piste or not piste.vitesse then return false end
+
+  local mesureCourante = piste.derniereMesure
+
+  -- BREAK TARDIF. Virer par le travers reduit la vitesse de rapprochement,
+  -- donc allonge le temps de vol restant du missile - et donc le nombre de
+  -- degres qu'il peut encore corriger. Contre un autoguidage, se degager trop
+  -- tot lui OFFRE la correction. La doctrine est de tenir la route jusqu'a ce
+  -- que son temps de vol restant soit trop court pour rattraper l'ecart, puis
+  -- de rompre franchement. 0 desactive le retard (rupture immediate).
+  if config.secondesAvantDegagement > 0 and mesureCourante
+     and nombreValide(mesureCourante.tCpa)
+     and mesureCourante.tCpa > config.secondesAvantDegagement then
+    if not piste.breakRetenuSignale then
+      piste.breakRetenuSignale = true
+      journal.info(ETAPES.MANOEUVRE_EVASION, string.format(
+        "engagement #%d : degagement RETENU, route tenue. Impact estime dans %ss, "
+        .. "rupture programmee a %ss. Rompre maintenant reduirait le rapprochement "
+        .. "et donnerait au missile le temps de corriger.",
+        contexte.engagement, fmt(mesureCourante.tCpa, 2),
+        fmt(config.secondesAvantDegagement, 2)))
+    end
+    contexte.manoeuvres = contexte.manoeuvres + 1
+    return true
+  end
+  if piste.breakRetenuSignale and not piste.breakEngageSignale then
+    piste.breakEngageSignale = true
+    journal.info(ETAPES.MANOEUVRE_EVASION, string.format(
+      "engagement #%d : RUPTURE ENGAGEE (impact estime dans %ss)",
+      contexte.engagement, fmt(mesureCourante and mesureCourante.tCpa or 0, 2)))
+  end
 
   local altitudeCourante = contexte.altitude
   local margeSecurite = math.max(2, config.amplitudeAltitudeBlocs * 0.25)
@@ -1994,6 +2130,8 @@ local function scannerRadar(contexte)
 
   local repere = determinerRepere(contexte, contacts)
   if repere == "absolu" then
+    -- La position du navire doit dater de CE scan, pas de la derniere mesure GPS.
+    rafraichirNavireRapide(contexte, os.clock())
     if not contexte.positionNavire then
       if not contexte.avertRepereAbsolu then
         contexte.avertRepereAbsolu = true
@@ -2043,7 +2181,8 @@ local function analyserPistes(contexte, maintenant)
           piste.preavis = true
           journal.avert(ETAPES.EVALUATION_MENACE, string.format(
             "piste qualifiee, confirmation en cours (%d/%d scans) -> %s",
-            mesure.confirmations, config.confirmationsMini, decrirePiste(piste)))
+            mesure.confirmations, mesure.confirmationsExigees or config.confirmationsMini,
+            decrirePiste(piste)))
         elseif not mesure.qualifiee and piste.preavis then
           piste.preavis = false
           journal.info(ETAPES.EVALUATION_MENACE, string.format(
@@ -2462,6 +2601,7 @@ local function cycleDeVie(etat)
     etat             = ETAT_VEILLE,
     pistes           = {},
     impulsions       = {},
+    echantillonsNavire = {},
     compteurPiste    = 0,
     scans            = 0,
     contactsVus      = 0,
