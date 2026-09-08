@@ -1,19 +1,38 @@
-# FrenchNet — CC: Tweaked pour AERONAUTICS WARFARE
+# FrenchNet — AERONAUTICS WARFARE (CC: Tweaked)
 
-Deux systèmes indépendants :
+Systèmes embarqués du serveur **AERONAUTICS WARFARE** (Create Aeronautics, NeoForge 1.21.1).
 
-| Système | Rôle | Documentation |
+| Système | Rôle | Guide |
 |---|---|---|
-| **Balises GPS** | Constellation GPS du serveur, position X/Y/Z diffusée en continu | [guide complet](docs/guide-complet.md) |
-| **Navire intercepteur** | Système embarqué de scramble : interception prédictive, arc arrière, tir, évasion, retour base | [guide complet](docs/intercepteur.md) |
+| **Balises GPS** | Constellation de balises fixes, hôtes GPS pour tout le serveur | [guide](docs/guide-complet.md) |
+| **Autopilote** | Bibliothèque de pilotage autonome pour véhicules aériens | [guide](docs/guide-autopilote.md) |
+| **Câblage** | Brancher un ordinateur sur un véhicule et le faire bouger | [guide](docs/guide-cablage.md) |
+| **Installation** | Poser les fichiers sur les ordinateurs, et dépannage | [guide](docs/guide-installation.md) |
 
 ---
 
-# 1. Balises GPS
+> ⚠️ **`wget` renvoie 404 ?** Le dépôt est **privé**, et CC: Tweaked ne peut pas s'authentifier sur GitHub : aucune adresse `raw.githubusercontent.com` ne répondra. Rendez le dépôt public, ou passez les fichiers par la sauvegarde du monde. Marche à suivre complète dans le **[guide d'installation](docs/guide-installation.md)**.
 
-Balises fixes. Chaque balise diffuse sa position X/Y/Z en continu par rednet (modem Ender, portée illimitée) et sert d'hôte GPS pour les avions.
+## Installation en une commande
 
-## Installation
+Dépôt public requis. Sur chaque ordinateur :
+
+```
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/installe.lua installe
+installe balise       -- balise GPS fixe
+installe vehicule     -- autopilote d'un véhicule
+installe satellite    -- ordinateur de sortie déporté
+```
+
+L'installateur crée les dossiers, vérifie chaque fichier téléchargé (une page d'erreur HTML enregistrée comme du Lua est détectée et refusée) et préserve les configurations déjà réglées.
+
+---
+
+## Balises GPS
+
+Balises fixes qui diffusent leur position X/Y/Z en continu par rednet (modem Ender, portée illimitée) et servent d'hôte GPS pour les avions.
+
+### Installation
 
 Sur chaque ordinateur balise (1 ordinateur + 1 modem Ender collé) :
 
@@ -26,8 +45,6 @@ edit balise/config_balise.lua
 reboot
 ```
 
-## Configuration
-
 Deux lignes à changer sur **chaque** balise :
 
 ```lua
@@ -35,37 +52,93 @@ identifiant      = "BAL-01-NORD",                     -- unique sur le serveur
 positionManuelle = { x = 1200, y = 210, z = -2600 },  -- F3, ligne "Block:"
 ```
 
-C'est tout : la balise démarre, diffuse toutes les 5 s et redémarre seule en cas d'erreur.
-
-## Déploiement
-
-4 balises minimum, **non alignées** et à **4 altitudes différentes** (sinon le GPS est faux) :
-
-| Identifiant | X | Y | Z |
-|---|---|---|---|
-| `BAL-01-NORD` | 1200 | 210 | -2600 |
-| `BAL-02-EST` | 4300 | 95 | 500 |
-| `BAL-03-SUD` | -800 | 140 | 3300 |
-| `BAL-04-OUEST` | -3500 | 60 | -400 |
-
-Les chunks des balises doivent rester **chargés** (`forceload`), sinon elles cessent d'émettre.
-
-## Vérifier
+4 balises minimum, **non alignées** et à **4 altitudes différentes**, dans des chunks **maintenus chargés**.
 
 ```
 recepteur      -- liste les balises actives et leur distance
 gps locate     -- teste le GPS depuis n'importe quelle machine
 ```
 
-## En cas de problème
+📖 **[Guide des balises](docs/guide-complet.md)** — options, format des messages, diagnostic.
 
-Le journal indique toujours l'étape exacte :
+---
+
+## Autopilote
+
+Bibliothèque de pilotage autonome, installable telle quelle sur n'importe quel véhicule aérien : dirigeable de livraison, intercepteur de scramble, navire armé. Ce n'est pas un programme final — les autres systèmes FrenchNet lui donnent une cible ou une liste de points de passage, et il amène le véhicule avec précision.
+
+### Installation
+
+Sur chaque véhicule (1 ordinateur + 1 modem Ender pour le GPS) :
 
 ```
-[ERREUR] [etape: envoi rednet (broadcast)] erreur detectee a l'etape 'envoi rednet (broadcast)' : ...
+mkdir autopilote
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/autopilote.lua autopilote/autopilote.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/config_vehicule.lua autopilote/config_vehicule.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/ravitaillement.lua autopilote/ravitaillement.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/interface.lua autopilote/interface.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/cablage.lua autopilote/cablage.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/autopilote/startup.lua startup.lua
+interface                                   -- réglage du véhicule à l'écran
+cablage                                     -- vérification du câblage, pilotage manuel
+reboot
 ```
 
-Consultable à l'écran ou dans `balise/balise.log`.
+**Premier montage ?** Commencez par le [guide de câblage](docs/guide-cablage.md) : il explique face par face comment brancher l'ordinateur pour avancer, pivoter, monter et descendre, et comment vérifier chaque sens avec l'outil `cablage`.
+
+### Utilisation
+
+```lua
+local autopilote = dofile("/autopilote/autopilote.lua")
+local ap = autopilote.nouveau()          -- lit config_vehicule.lua
+
+ap.initialiser()                         -- relit la position AVANT tout mouvement
+ap.suivreItineraire({
+  { x =  480, y = 120, z = -1200, nom = "SORTIE-HANGAR" },
+  { x = 1980, y = 118, z = -3100, nom = "ENTREPOT-3", type = "depot" },
+})
+
+parallel.waitForAny(ap.executer, function()
+  ap.attendreArrivee(600)
+  print("cargaison larguee")
+  ap.rejoindreRavitaillement()
+end)
+```
+
+`allerA` · `suivreItineraire` · `maintenirPosition` · `arreter` — les programmes de mission ne touchent jamais à la logique de vol.
+
+### Ce qu'il fait tout seul
+
+- **Asservissement en cascade** sur quatre axes (altitude, cap, avance, dérive) : une boucle de position calcule une vitesse cible, une boucle de vitesse produit la commande — le véhicule ralentit progressivement au lieu de dépasser puis revenir.
+- **PID robustes** : intégrale bornée et gelée en saturation, dérivée sur la mesure, limitation de pente, temps réellement écoulé.
+- **Repli automatique en zone morte** si un axe devient instable, avec hystérésis, journalisation et forçage manuel.
+- **Arrivée** validée seulement après une durée continue dans les marges, puis **maintien de position** avec des gains plus serrés.
+- **Décalages** du point de référence GPS et du point de dépôt, tournés selon le cap : le pilotage vise le centre réel, et la charge tombe sur la cible.
+- **Robustesse** : perte GPS → estime puis mode secours, plantage → relance, redémarrage → relecture de la position avant tout mouvement, journal détaillé à chaque étape.
+
+### Réglage
+
+```
+interface            -- configuration du véhicule (au sol)
+cablage              -- vérification du câblage et pilotage manuel au clavier
+interface vol        -- réglage des gains PID en vol, avec courbes temps réel
+interface journal    -- consultation du journal
+```
+
+Chaque véhicule a son propre `config_vehicule.lua` : identité, décalages, tolérances, vitesses, gabarit, gains PID. **Aucune valeur de vol n'est écrite en dur dans le code** — une valeur obligatoire manquante empêche le démarrage et est nommée en clair. La position de ravitaillement est une constante de réseau verrouillée (`ravitaillement.lua`), affichée mais non modifiable.
+
+📖 **[Guide de l'autopilote](docs/guide-autopilote.md)** — API complète, conventions, méthode de réglage, table de diagnostic.
+
+---
+
+## Tests
+
+Bancs d'essai hors du jeu, sur un interpréteur Lua 5.4 :
+
+```
+lua5.4 tests/test_balise.lua        -- 49 vérifications
+lua5.4 tests/test_autopilote.lua    -- 180 vérifications, dont un vol simulé en boucle fermée
+```
 
 ## Fichiers
 
@@ -74,84 +147,13 @@ Consultable à l'écran ou dans `balise/balise.log`.
 | `balise/balise.lua` | Programme de la balise |
 | `balise/config_balise.lua` | Config (à éditer par balise) |
 | `balise/startup.lua` | Démarrage automatique |
-| `balise/recepteur.lua` | Moniteur de contrôle |
-
-📖 **[Guide complet](docs/guide-complet.md)** — toutes les options, format des messages, table de diagnostic, intégration côté avion.
-
----
-
-# 2. Navire intercepteur de scramble
-
-Système **embarqué**, indépendant du système de défense au sol. Il ne connaît ni les zones, ni les classes Charlie / Bravo / Alpha / Roméo, et n'accepte que **deux ordres** : `SCRAMBLE` (intercepter la cible désignée) et `FEU` (ouvrir le feu sur cette même cible).
-
-Mods : Create Aeronautics, Create Radars, Create Big Cannons, CC: Tweaked.
-
-## Ce qu'il fait
-
-- **Interception prédictive** — il résout le temps de vol et vise la position *future* de la cible, pas sa position actuelle.
-- **Arc arrière 4 h – 8 h, 300 à 400 blocs** — jamais de face. Hors de l'arc, il contourne par le flanc.
-- **Orbite ou zigzag** une fois en position, avec vitesse asservie sur celle de la cible (ni trop vite, ni trop lentement, sans percuter).
-- **Évasion prioritaire** sur détection de dégât, en break alterné, puis reprise de la position d'attaque.
-- **Retour base automatique** sur destruction confirmée, via des points de retour configurables. Le réarmement reste **manuel**.
-- **Journal détaillé** à chaque étape critique, pour tracer tout comportement anormal après coup.
-
-## ⚠️ Le module d'autopilote n'est pas dans ce dépôt
-
-Ce système **n'écrit aucune loi de vol** : `intercepteur/autopilote.lua` est un *adaptateur* qui charge votre module d'autopilote standardisé, normalise son API et lui transmet la configuration véhicule. L'asservissement en cascade, le PID et le repli dead-band restent chez lui.
-
-Si le module est introuvable, **le navire refuse de décoller** — c'est délibéré.
-
-Les critères de dégât et les points de retour n'existant pas non plus dans ce dépôt, ils sont définis explicitement dans `intercepteur/config_intercepteur.lua`, en un seul endroit. Voir [§1 du guide](docs/intercepteur.md).
-
-## Installation
-
-```
-mkdir intercepteur
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/intercepteur.lua        intercepteur/intercepteur.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/config_intercepteur.lua intercepteur/config_intercepteur.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/noyau.lua               intercepteur/noyau.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/interception.lua        intercepteur/interception.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/autopilote.lua          intercepteur/autopilote.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/radar.lua               intercepteur/radar.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/armement.lua            intercepteur/armement.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/liaison.lua             intercepteur/liaison.lua
-wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/interceptor-ship-onboard-system-uca5no/intercepteur/startup.lua             startup.lua
-edit intercepteur/config_intercepteur.lua
-reboot
-```
-
-## Configuration minimale
-
-```lua
-identifiant      = "INT-01",                      -- unique sur le serveur
-cheminAutopilote = "/autopilote/autopilote.lua",  -- votre module standardisé
-retour = {
-  pointsRetour = {                                -- le dernier point est la base
-    { x = 1500, y = 220, z = -2400, nom = "point de degagement" },
-    { x = 1200, y = 150, z = -2600, nom = "base" },
-  },
-},
-```
-
-## Tests
-
-```
-lua5.4 tests/test_interception.lua    # 87/87 — maths d'interception, hors CraftOS
-lua5.4 tests/test_intercepteur.lua    # 86/86 — mission complète simulée
-lua5.4 tests/test_balise.lua          # 49/49 — non-régression des balises
-```
-
-## Fichiers
-
-| Fichier | Rôle |
-|---|---|
-| `intercepteur/intercepteur.lua` | Machine à états et superviseur |
-| `intercepteur/config_intercepteur.lua` | **Config par véhicule**, partagée avec l'autopilote |
-| `intercepteur/interception.lua` | Prédiction, arc arrière, critères de dégât, solution de tir |
-| `intercepteur/autopilote.lua` | Adaptateur vers le module d'autopilote standardisé |
-| `intercepteur/radar.lua` | Radar embarqué et pistage (Create Radars) |
-| `intercepteur/armement.lua` | Affût et cadence de tir (Create Big Cannons) |
-| `intercepteur/liaison.lua` | Ordres du sol — SCRAMBLE et FEU uniquement |
-| `intercepteur/noyau.lua` | Journal, étapes, exécution protégée, géométrie |
-
-📖 **[Guide complet](docs/intercepteur.md)** — contrat d'interface autopilote, géométrie de l'arc arrière, critères de dégât, déploiement et réglages à mesurer avant le premier vol armé.
+| `balise/recepteur.lua` | Moniteur de constellation |
+| `autopilote/autopilote.lua` | La bibliothèque de pilotage |
+| `autopilote/config_vehicule.lua` | Config (à éditer par véhicule) |
+| `autopilote/ravitaillement.lua` | Station de ravitaillement (verrouillée) |
+| `autopilote/interface.lua` | Interface de réglage et menu de vol |
+| `autopilote/cablage.lua` | Vérification du câblage et pilotage manuel |
+| `autopilote/startup.lua` | Démarrage automatique du véhicule |
+| `autopilote/exemple_mission.lua` | Trois missions types |
+| `tests/banc_vol.lua` | Mini-CraftOS + simulateur de vol |
+| `installe.lua` | Installateur en une commande |
