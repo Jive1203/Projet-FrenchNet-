@@ -46,60 +46,202 @@ scanner.MOTIFS_PROJECTILE = {
   "fireball", "torpedo", "warhead", "bomb",
 }
 
--- Nom de methode -> nature par defaut des contacts qu'elle rend.
+--[[
+  METHODES DE BALAYAGE CONNUES
+  Nom de methode -> nature par defaut des contacts qu'elle rend.
+
+  La liste est volontairement large. Un nom manquant ici n'est pas grave : la
+  detection ci-dessous procede PAR METHODE et non par nom de peripherique,
+  donc tout peripherique exposant l'une de ces fonctions est reconnu comme
+  radar, quel que soit le nom de type que le mod lui donne.
+
+  Si votre version de Create Radars expose une methode absente de cette liste,
+  lancez 'diagnostic' sur la station : il affiche toutes les methodes reelles
+  du peripherique. Ajoutez-la ici, et la correction profite du meme coup aux
+  stations et au poste central, qui partagent ce fichier.
+]]
 scanner.METHODES = {
-  { nom = "getEntities",     nature = scanner.NATURES.ENTITE },
-  { nom = "getContraptions", nature = scanner.NATURES.VEHICULE },
-  { nom = "getPlayers",      nature = scanner.NATURES.JOUEUR },
-  { nom = "getTargets",      nature = scanner.NATURES.ENTITE },
-  { nom = "getRadarTargets", nature = scanner.NATURES.ENTITE },
-  { nom = "scan",            nature = scanner.NATURES.ENTITE },
+  -- Noms les plus courants
+  { nom = "getEntities",         nature = scanner.NATURES.ENTITE },
+  { nom = "getContraptions",     nature = scanner.NATURES.VEHICULE },
+  { nom = "getPlayers",          nature = scanner.NATURES.JOUEUR },
+  -- Variantes rencontrees selon les versions et les forks
+  { nom = "getTargets",          nature = scanner.NATURES.ENTITE },
+  { nom = "getRadarTargets",     nature = scanner.NATURES.ENTITE },
+  { nom = "getRadarEntities",    nature = scanner.NATURES.ENTITE },
+  { nom = "getEntitiesInRange",  nature = scanner.NATURES.ENTITE },
+  { nom = "getTrackedEntities",  nature = scanner.NATURES.ENTITE },
+  { nom = "getDetectedEntities", nature = scanner.NATURES.ENTITE },
+  { nom = "getContacts",         nature = scanner.NATURES.ENTITE },
+  { nom = "getBlips",            nature = scanner.NATURES.ENTITE },
+  { nom = "listEntities",        nature = scanner.NATURES.ENTITE },
+  { nom = "listContraptions",    nature = scanner.NATURES.VEHICULE },
+  { nom = "getVehicles",         nature = scanner.NATURES.VEHICULE },
+  { nom = "getShips",            nature = scanner.NATURES.VEHICULE },
+  { nom = "getAircraft",         nature = scanner.NATURES.VEHICULE },
+  { nom = "getAirships",         nature = scanner.NATURES.VEHICULE },
+  { nom = "scan",                nature = scanner.NATURES.ENTITE },
+  { nom = "scanEntities",        nature = scanner.NATURES.ENTITE },
+  { nom = "getAll",              nature = scanner.NATURES.ENTITE },
+}
+
+-- Methodes a NE PAS confondre avec un balayage : presentes sur beaucoup de
+-- peripheriques et sans rapport avec la detection.
+scanner.METHODES_IGNOREES = {
+  getMetadata = true, getDocs = true, getType = true, getNames = true,
 }
 
 --------------------------------------------------------------------------------
--- 1. DETECTION DU PERIPHERIQUE
+-- 1 bis. INVENTAIRE DES PERIPHERIQUES
+--
+--   Sert a deux choses : au diagnostic affiche a l'operateur, et au message
+--   d'erreur quand aucun radar n'est trouve. Un message qui dit seulement
+--   « aucun radar detecte » n'aide personne ; celui-ci dit ce QUI a ete vu.
 --------------------------------------------------------------------------------
 
+-- peripheral.getType rend PLUSIEURS valeurs quand un bloc porte plusieurs
+-- types (par exemple "createradars:radar" et "peripheral"). N'en lire qu'une
+-- fait manquer le bon type : on les collecte toutes.
+function scanner.typesDe(peripheriques, nom)
+  local types = table.pack(pcall(peripheriques.getType, nom))
+  if not types[1] then return {} end
+  local liste = {}
+  for i = 2, types.n do
+    if type(types[i]) == "string" then liste[#liste + 1] = types[i] end
+  end
+  return liste
+end
+
+function scanner.methodesDe(peripheriques, nom)
+  -- getMethods est la voie propre ; a defaut on parcourt la table enveloppee.
+  if type(peripheriques.getMethods) == "function" then
+    local ok, liste = pcall(peripheriques.getMethods, nom)
+    if ok and type(liste) == "table" then return liste end
+  end
+  local ok, enveloppe = pcall(peripheriques.wrap, nom)
+  if not ok or type(enveloppe) ~= "table" then return {} end
+  local liste = {}
+  for cle, valeur in pairs(enveloppe) do
+    if type(valeur) == "function" then liste[#liste + 1] = cle end
+  end
+  table.sort(liste)
+  return liste
+end
+
 --[[
-  Retourne : radar, nom, methodes actives, motif
-  radar = nil signifie echec ; le motif est directement journalisable.
+  Inventaire complet : pour chaque peripherique visible, son nom, ses types et
+  ses methodes. C'est la seule facon honnete de repondre a « l'ordinateur ne
+  trouve pas le radar » : montrer ce qu'il voit reellement.
+]]
+function scanner.inventaire(peripheriques)
+  local liste = {}
+  local ok, noms = pcall(peripheriques.getNames)
+  if not ok or type(noms) ~= "table" then return liste end
+  for _, nom in ipairs(noms) do
+    liste[#liste + 1] = {
+      nom = nom,
+      types = scanner.typesDe(peripheriques, nom),
+      methodes = scanner.methodesDe(peripheriques, nom),
+    }
+  end
+  return liste
+end
+
+local function resumerInventaire(inventaire)
+  if #inventaire == 0 then
+    return "AUCUN peripherique visible. Le radar doit toucher l'ordinateur par " ..
+           "une face, ou etre relie par un modem filaire (cable + modem colles aux deux blocs, " ..
+           "modem active d'un clic droit)."
+  end
+  local morceaux = {}
+  for _, p in ipairs(inventaire) do
+    morceaux[#morceaux + 1] = string.format("%s [%s] (%d methode(s))",
+      p.nom, table.concat(p.types, ", "), #p.methodes)
+  end
+  return "peripheriques visibles : " .. table.concat(morceaux, " ; ")
+end
+scanner.resumerInventaire = resumerInventaire
+
+--------------------------------------------------------------------------------
+-- 1 ter. DETECTION DU PERIPHERIQUE
+--------------------------------------------------------------------------------
+
+-- Methodes de balayage effectivement exposees par un peripherique donne.
+local function methodesActivesPour(peripheriques, nom)
+  local disponibles = {}
+  for _, m in ipairs(scanner.methodesDe(peripheriques, nom)) do disponibles[m] = true end
+  local actives = {}
+  for _, methode in ipairs(scanner.METHODES) do
+    if disponibles[methode.nom] then actives[#actives + 1] = methode end
+  end
+  return actives, disponibles
+end
+
+--[[
+  Retourne : radar, nom, methodes actives, motif journalisable, inventaire.
+
+  ORDRE DE RECHERCHE, du plus sur au plus large :
+    1. le peripherique force en configuration, s'il expose une methode connue ;
+    2. tout peripherique exposant une methode de balayage connue - c'est le
+       critere principal : il ne depend d'aucun nom de type, donc il survit a
+       un changement de nommage du mod ;
+    3. a defaut, tout peripherique dont un type contient "radar", meme sans
+       methode reconnue : on rend alors une erreur explicite qui NOMME ses
+       methodes reelles, pour qu'elles soient ajoutees a scanner.METHODES.
+
+  Chercher d'abord par methode et seulement ensuite par nom est deliberé :
+  un radar qui repond est un radar, quel que soit son nom ; un bloc nommé
+  "radar" qui ne repond a rien n'en est pas un.
 ]]
 function scanner.detecter(peripheriques, nomForce)
-  local radar, nom
+  local inventaire = scanner.inventaire(peripheriques)
 
-  if nomForce and peripheriques.isPresent(nomForce) then
-    radar, nom = peripheriques.wrap(nomForce), nomForce
-  else
-    for _, candidat in ipairs(peripheriques.getNames()) do
-      local typ = peripheriques.getType(candidat)
-      if type(typ) == "string" and typ:lower():find("radar", 1, true) then
-        radar, nom = peripheriques.wrap(candidat), candidat
-        break
+  -- 1. Peripherique force
+  if nomForce then
+    local ok, present = pcall(peripheriques.isPresent, nomForce)
+    if ok and present then
+      local actives = methodesActivesPour(peripheriques, nomForce)
+      if #actives > 0 then
+        return peripheriques.wrap(nomForce), nomForce, actives, string.format(
+          "radar force '%s' accepte, %d methode(s) de balayage", nomForce, #actives), inventaire
+      end
+      local reelles = scanner.methodesDe(peripheriques, nomForce)
+      return nil, nomForce, nil, string.format(
+        "peripheriqueRadar force sur '%s', mais il n'expose aucune methode de balayage connue. " ..
+        "Ses methodes reelles sont : %s. Ajoutez la bonne a scanner.METHODES.",
+        nomForce, #reelles > 0 and table.concat(reelles, ", ") or "aucune"), inventaire
+    end
+    -- On ne s'arrete pas la : la detection automatique reste possible.
+  end
+
+  -- 2. Detection par METHODE (critere principal)
+  for _, p in ipairs(inventaire) do
+    local actives = methodesActivesPour(peripheriques, p.nom)
+    if #actives > 0 then
+      local noms = {}
+      for _, m in ipairs(actives) do noms[#noms + 1] = m.nom end
+      return peripheriques.wrap(p.nom), p.nom, actives, string.format(
+        "radar detecte sur '%s' [%s] par ses methodes : %s",
+        p.nom, table.concat(p.types, ", "), table.concat(noms, ", ")), inventaire
+    end
+  end
+
+  -- 3. Un bloc se dit radar mais ne repond a aucune methode connue
+  for _, p in ipairs(inventaire) do
+    for _, typ in ipairs(p.types) do
+      if typ:lower():find("radar", 1, true) then
+        return nil, p.nom, nil, string.format(
+          "peripherique '%s' de type '%s' trouve, mais AUCUNE de ses methodes n'est reconnue. " ..
+          "Methodes reelles : %s. Ajoutez la bonne a scanner.METHODES (voir 'diagnostic').",
+          p.nom, typ,
+          #p.methodes > 0 and table.concat(p.methodes, ", ") or "aucune"), inventaire
       end
     end
   end
 
-  if not radar then
-    return nil, nil, nil, "aucun peripherique radar detecte"
-  end
-
-  local actives = {}
-  for _, methode in ipairs(scanner.METHODES) do
-    if type(radar[methode.nom]) == "function" then actives[#actives + 1] = methode end
-  end
-
-  if #actives == 0 then
-    local essayees = {}
-    for _, m in ipairs(scanner.METHODES) do essayees[#essayees + 1] = m.nom end
-    return nil, nom, nil, string.format(
-      "radar '%s' detecte mais aucune methode connue (essayees : %s). Completez scanner.METHODES.",
-      nom, table.concat(essayees, ", "))
-  end
-
-  local noms = {}
-  for _, m in ipairs(actives) do noms[#noms + 1] = m.nom end
-  return radar, nom, actives, string.format("radar '%s' detecte, methodes : %s",
-    nom, table.concat(noms, ", "))
+  -- 4. Rien du tout : on dit ce qu'on voit.
+  return nil, nil, nil,
+    "aucun peripherique radar detecte. " .. resumerInventaire(inventaire), inventaire
 end
 
 --------------------------------------------------------------------------------
@@ -153,6 +295,39 @@ end
 
 function scanner.nomEcho(echo, repli)
   return echo.name or echo.nom or echo.label or echo.displayName or repli
+end
+
+--[[
+  IDENTIFICATION FOURNIE PAR LE RADAR
+  Create Radars ne rend pas que des coordonnees. Selon les contraptions et les
+  versions, un echo peut porter le PROPRIETAIRE de l'engin, son EQUIPE, son
+  type exact. Ces champs constituent une voie d'identification a part entiere,
+  independante du transpondeur - et c'est precisement leur interet : deux
+  sources qui ne peuvent pas mentir de la meme facon.
+
+  Un transpondeur se capture avec l'appareil qui le porte ; le proprietaire
+  d'une contraption, non. Recouper les deux permet de reperer un code allie
+  porte par un engin qui n'a rien d'allie.
+
+  Tous ces champs sont facultatifs : leur absence ne degrade rien, elle prive
+  seulement le systeme de sa seconde voie.
+]]
+function scanner.metaEcho(echo)
+  local meta = {}
+  meta.proprietaire = echo.owner or echo.ownerName or echo.player or echo.pilot
+                   or echo.proprietaire
+  meta.equipe       = echo.team or echo.faction or echo.clan or echo.equipe
+                   or echo.group
+  meta.typeExact    = echo.type or echo.entityType or echo.kind
+  if type(echo.health) == "number" then meta.sante = echo.health end
+  if type(echo.size) == "number" then meta.taille = echo.size
+  elseif type(echo.mass) == "number" then meta.taille = echo.mass
+  elseif type(echo.blocks) == "number" then meta.taille = echo.blocks end
+
+  -- Rien d'exploitable : on rend nil plutot qu'une table vide, pour que le
+  -- reste du systeme sache qu'il n'a qu'une seule voie d'identification.
+  for _ in pairs(meta) do return meta end
+  return nil
 end
 
 --------------------------------------------------------------------------------
@@ -238,6 +413,7 @@ function scanner.normaliser(bruts, positionRadar, relatives)
         id     = scanner.identifiantEcho(brut.echo),
         nom    = scanner.nomEcho(brut.echo, nil),
         nature = scanner.natureEcho(brut.echo, brut.nature),
+        meta   = scanner.metaEcho(brut.echo),
         x = x, y = y, z = z,
       }
     end

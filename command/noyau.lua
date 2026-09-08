@@ -386,6 +386,214 @@ function noyau.statutIff(transpondeur, codes, maintenant, config, allieManuel)
 end
 
 --------------------------------------------------------------------------------
+-- 6 bis. DEUXIEME VOIE D'IDENTIFICATION : LES DONNEES DU RADAR
+--
+--   Le transpondeur repond a « quel code porte cet appareil ». Le radar
+--   repond a « qu'est-ce que cet appareil, et a qui est-il ». Ce sont deux
+--   questions differentes, et c'est ce qui fait leur valeur : un transpondeur
+--   se capture avec l'engin qui le porte, le proprietaire d'une contraption
+--   non. Un code allie porte par un engin identifie hostile est le signe d'un
+--   transpondeur capture - exactement ce qu'une voie unique laisserait passer.
+--
+--   Sources de la voie radar, par ordre de priorite :
+--     1. les listes nomsHostiles / nomsAllies de la configuration : aucune
+--        dependance exterieure, utilisables des le premier jour ;
+--     2. le roster de factions pousse par un pont Open Parties and Claims ;
+--     3. les champs proprietaire et equipe rendus par Create Radars.
+--
+--   La voie radar ne DONNE jamais l'acces a elle seule : la doctrine reste
+--   « pas de code valide = INCONNU ». Elle peut en revanche le RETIRER, et
+--   c'est tout son interet defensif.
+--------------------------------------------------------------------------------
+
+noyau.IDENTIFICATION_RADAR = {
+  ALLIE = "ALLIE", HOSTILE = "HOSTILE", NEUTRE = "NEUTRE", INCONNU = "INCONNU",
+}
+
+noyau.CONCORDANCE = {
+  CONFIRME  = "CONFIRME",   -- les deux voies disent la meme chose
+  PARTIEL   = "PARTIEL",    -- une seule voie s'est prononcee
+  DISCORDANT = "DISCORDANT", -- les deux voies se contredisent
+  AUCUNE    = "AUCUNE",     -- aucune voie ne s'est prononcee
+}
+
+-- Correspondance d'un libelle avec une liste. Egalite exacte d'abord, puis
+-- sous-chaine insensible a la casse : un escadron nomme "RAID-01" doit pouvoir
+-- etre couvert par l'entree "RAID" sans enumerer tous ses appareils.
+local function figureDansListe(valeur, liste)
+  if type(valeur) ~= "string" or type(liste) ~= "table" then return false end
+  for _, entree in ipairs(liste) do
+    if type(entree) == "string" and entree ~= "" then
+      if valeur == entree then return true, entree end
+      if valeur:lower():find(entree:lower(), 1, true) then return true, entree end
+    end
+  end
+  return false
+end
+noyau.figureDansListe = figureDansListe
+
+--[[
+  Identification par les seules donnees du radar.
+  Retourne : statut, motif journalisable.
+]]
+function noyau.identifierParRadar(contact, roster, config)
+  config = config or {}
+  roster = roster or {}
+  if config.identificationRadarActive == false then
+    return noyau.IDENTIFICATION_RADAR.INCONNU, "voie radar desactivee en configuration"
+  end
+
+  local meta = contact.meta or {}
+  -- Le nom du contact, son proprietaire et son equipe sont examines : l'un
+  -- des trois suffit a trancher.
+  local candidats = {
+    { valeur = contact.nom, source = "nom" },
+    { valeur = meta.proprietaire, source = "proprietaire" },
+    { valeur = meta.equipe, source = "equipe" },
+  }
+
+  -- Hostile d'abord : en cas de double appartenance, le doute ne profite pas
+  -- a la cible.
+  for _, c in ipairs(candidats) do
+    local trouve, entree = figureDansListe(c.valeur, config.nomsHostiles)
+    if trouve then
+      return noyau.IDENTIFICATION_RADAR.HOSTILE, string.format(
+        "%s '%s' figure sur la liste hostile (entree '%s')", c.source, tostring(c.valeur), entree)
+    end
+  end
+
+  for _, c in ipairs(candidats) do
+    if type(c.valeur) == "string" then
+      local entree = roster[c.valeur]
+      if type(entree) == "table" then
+        local hostilite = tostring(entree.hostilite or ""):upper()
+        if hostilite == "HOSTILE" then
+          return noyau.IDENTIFICATION_RADAR.HOSTILE, string.format(
+            "%s '%s' declare hostile par le roster (faction %s)",
+            c.source, c.valeur, tostring(entree.faction))
+        end
+        if hostilite == "ALLIEE" or hostilite == "ALLIE" then
+          return noyau.IDENTIFICATION_RADAR.ALLIE, string.format(
+            "%s '%s' declare allie par le roster (faction %s)",
+            c.source, c.valeur, tostring(entree.faction))
+        end
+        return noyau.IDENTIFICATION_RADAR.NEUTRE, string.format(
+          "%s '%s' connu du roster, faction %s sans hostilite declaree",
+          c.source, c.valeur, tostring(entree.faction))
+      end
+    end
+  end
+
+  for _, c in ipairs(candidats) do
+    local trouve, entree = figureDansListe(c.valeur, config.nomsAllies)
+    if trouve then
+      return noyau.IDENTIFICATION_RADAR.ALLIE, string.format(
+        "%s '%s' figure sur la liste alliee (entree '%s')", c.source, tostring(c.valeur), entree)
+    end
+  end
+
+  local vus = {}
+  for _, c in ipairs(candidats) do
+    if type(c.valeur) == "string" then
+      vus[#vus + 1] = c.source .. "=" .. c.valeur
+    end
+  end
+  return noyau.IDENTIFICATION_RADAR.INCONNU,
+    #vus > 0 and ("aucune correspondance pour " .. table.concat(vus, ", "))
+    or "le radar ne fournit aucun element d'identification"
+end
+
+--[[
+  IDENTIFICATION COMBINEE - c'est cette fonction que le systeme appelle.
+
+  Retourne : iff, motif journalisable, detail.
+  detail = {
+    transpondeur = { statut, motif },
+    radar        = { statut, motif },
+    concordance  = ...,
+    alerte       = message a remonter au controleur, ou nil,
+  }
+
+  Regle cardinale, inchangee : sans code valide, la cible est INCONNUE. La
+  voie radar ne delivre aucun laissez-passer. Elle peut seulement en retirer
+  un, quand elle contredit franchement le transpondeur.
+]]
+function noyau.identifier(contact, transpondeur, codes, roster, maintenant, config, allieManuel)
+  config = config or {}
+  local detail = {}
+
+  local statutTr, motifTr = noyau.statutIff(transpondeur, codes, maintenant, config, allieManuel)
+  local statutRa, motifRa = noyau.identifierParRadar(contact, roster, config)
+  detail.transpondeur = { statut = statutTr, motif = motifTr }
+  detail.radar        = { statut = statutRa, motif = motifRa }
+
+  local R = noyau.IDENTIFICATION_RADAR
+  local C = noyau.CONCORDANCE
+
+  -- La declaration manuelle d'un controleur est une decision humaine : elle
+  -- n'est pas soumise au recoupement, et elle est deja journalisee ailleurs.
+  if allieManuel then
+    detail.concordance = C.PARTIEL
+    return noyau.IFF.ALLIE, motifTr, detail
+  end
+
+  local codePorteur = (statutTr == noyau.IFF.ALLIE) or (statutTr == noyau.IFF.GENERAL)
+
+  ----------------------------------------------------------------- discordance
+  if codePorteur and statutRa == R.HOSTILE then
+    detail.concordance = C.DISCORDANT
+    detail.alerte = string.format(
+      "code %s valide porte par un contact identifie HOSTILE par le radar (%s) : " ..
+      "transpondeur probablement capture",
+      statutTr == noyau.IFF.ALLIE and "ALLIE" or "GENERAL", motifRa)
+    if config.discordanceDeclasse ~= false then
+      return noyau.IFF.INCONNU, string.format(
+        "DISCORDANCE des deux voies -> declasse INCONNU | transpondeur : %s | radar : %s",
+        motifTr, motifRa), detail
+    end
+    return statutTr, string.format(
+      "DISCORDANCE des deux voies, code conserve (discordanceDeclasse = false) | " ..
+      "transpondeur : %s | radar : %s", motifTr, motifRa), detail
+  end
+
+  ------------------------------------------------------------------ concordance
+  if codePorteur then
+    detail.concordance = (statutRa == R.ALLIE) and C.CONFIRME or C.PARTIEL
+    return statutTr, string.format("%s | transpondeur : %s | radar : %s",
+      detail.concordance == C.CONFIRME and "identification CONFIRMEE par les deux voies"
+        or "identification par transpondeur seul",
+      motifTr, motifRa), detail
+  end
+
+  ------------------------------------------------- pas de code valide : inconnu
+  if statutRa == R.ALLIE then
+    -- Le radar reconnait un ami, mais la doctrine est formelle : sans code
+    -- valide la cible reste INCONNUE. Le signaler permet au controleur de la
+    -- declarer alliee a la main en connaissance de cause, plutot que de la
+    -- laisser se faire engager.
+    detail.concordance = C.DISCORDANT
+    detail.alerte = string.format(
+      "contact identifie ALLIE par le radar (%s) mais SANS code transpondeur valide (%s) : " ..
+      "emetteur en panne ? Il reste INCONNU tant qu'un controleur ne le declare pas allie",
+      motifRa, motifTr)
+    return noyau.IFF.INCONNU, string.format(
+      "sans code valide -> INCONNU malgre une identification radar alliee | " ..
+      "transpondeur : %s | radar : %s", motifTr, motifRa), detail
+  end
+
+  if statutRa == R.HOSTILE then
+    detail.concordance = C.CONFIRME
+    return noyau.IFF.INCONNU, string.format(
+      "hostile CONFIRME par les deux voies | transpondeur : %s | radar : %s",
+      motifTr, motifRa), detail
+  end
+
+  detail.concordance = (statutRa == R.INCONNU) and C.AUCUNE or C.PARTIEL
+  return noyau.IFF.INCONNU, string.format(
+    "transpondeur : %s | radar : %s", motifTr, motifRa), detail
+end
+
+--------------------------------------------------------------------------------
 -- 7. VERDICT D'ENGAGEMENT
 --------------------------------------------------------------------------------
 

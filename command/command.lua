@@ -67,6 +67,8 @@ local ETAPES = {
   CHARGEMENT_TERRAIN   = "chargement du modele de terrain",
   ENREGISTREMENT_TERRAIN = "enregistrement du modele de terrain",
   ORDRE_MANUEL         = "ordre manuel du controleur",
+  IDENTIFICATION       = "identification a deux voies",
+  DISCORDANCE_IFF      = "discordance entre les deux voies d'identification",
   DEMANDE_SCRAMBLE_AG  = "demande de scramble AG en attente de controleur",
   PROJECTILE           = "detection de projectile",
   ALLIE_MANUEL         = "declaration d'allie par un controleur",
@@ -279,6 +281,10 @@ local DEFAUTS = {
   ecartMaxSonde            = 30,
   poidsMunitions           = 1.5,
   scrambleAGAutomatique    = false,
+  identificationRadarActive = true,
+  discordanceDeclasse      = true,
+  nomsAllies               = nil,
+  nomsHostiles             = nil,
   vitesseProjectile        = 30,
   echelleCarte             = 32,
   suiviCarte               = "MENACE",
@@ -452,6 +458,7 @@ local etat = {
     ordresFeu = 0, ordresScramble = 0,
     killsConfirmes = 0, pistesPerdues = 0, reemissions = 0, alertes = 0,
     ordresManuels = 0, alliesManuels = 0, demandesAG = 0, projectiles = 0,
+    discordances = 0,
   },
   echecsConsecutifs = 0,
   derniereDecision  = nil,
@@ -723,9 +730,22 @@ local function detecterRadarLocal()
       "aucun radar local configure : le poste fonctionne uniquement sur les stations deportees")
     return false
   end
-  local r, nom, actives, motif = scanner.detecter(peripheral, cfg.peripheriqueRadar)
+  local r, nom, actives, motif, inventaire = scanner.detecter(peripheral, cfg.peripheriqueRadar)
+
+  for _, p in ipairs(inventaire or {}) do
+    debug_(ETAPES.DETECTION_RADAR, string.format(
+      "peripherique '%s' types [%s] methodes [%s]",
+      p.nom, table.concat(p.types, ", "),
+      #p.methodes > 0 and table.concat(p.methodes, ", ") or "aucune"))
+  end
+
   if not r then
+    -- Absence de radar local : normal, le poste vit des stations deportees.
+    -- On le dit en INFO, pas en ERREUR, mais on donne quand meme la piste.
     info(ETAPES.DETECTION_RADAR, motif .. " ; le poste s'appuiera sur les stations deportees")
+    info(ETAPES.DETECTION_RADAR,
+      "Si un radar est cense etre accole ici, lancez 'diagnostic' pour voir ce que " ..
+      "l'ordinateur percoit reellement.")
     return false
   end
   radarLocal, methodesLocales = r, actives
@@ -865,12 +885,16 @@ local function mettreAJourPistes(maintenant)
             if not g then
               groupes[id] = {
                 id = id, nom = contact.nom or id, nature = nature,
+                meta = contact.meta,
                 x = x, y = y, z = z,
                 distance = distance, portee = station.portee,
                 stations = { nom },
               }
             else
               g.stations[#g.stations + 1] = nom
+              -- Les metadonnees d'identification sont conservees des qu'une
+              -- station en fournit : toutes ne renseignent pas les memes champs.
+              g.meta = g.meta or contact.meta
               -- La station la plus proche fournit la mesure la moins degradee.
               if distance < g.distance then
                 g.x, g.y, g.z = x, y, z
@@ -942,6 +966,7 @@ local function mettreAJourPistes(maintenant)
         piste.nom, piste.vitesseHorizontale, cfg.vitesseProjectile or 30))
     end
 
+    piste.meta = g.meta or piste.meta
     piste.x, piste.y, piste.z = g.x, g.y, g.z
     piste.vuA = maintenant
     piste.present = true
@@ -1223,12 +1248,27 @@ local function decider(piste, maintenant)
     rotationA = cfg.rotationA or 0,
   }
   piste.allieManuel = etat.alliesManuels[piste.nom] ~= nil
-  local iff, motifIff = noyau.statutIff(transpondeur, codes, maintenant, cfg, piste.allieManuel)
 
-  local faction = etat.roster[piste.nom]
-  local mentionFaction = faction
-    and string.format(", faction %s (Open Parties and Claims)", tostring(faction.faction))
-    or ""
+  --[[
+    DEUX VOIES D'IDENTIFICATION, RECOUPEES.
+    Le transpondeur dit quel code porte l'appareil ; les donnees de Create
+    Radars disent ce qu'il est et a qui il appartient. Un transpondeur se
+    capture avec l'engin qui le porte, le proprietaire d'une contraption non :
+    c'est le recoupement qui fait la valeur du dispositif.
+    La doctrine ne bouge pas - sans code valide, la cible reste INCONNUE. La
+    voie radar ne delivre aucun laissez-passer, elle peut seulement en retirer
+    un quand elle contredit franchement le transpondeur.
+  ]]
+  local iff, motifIff, identification = noyau.identifier(
+    piste, transpondeur, codes, etat.roster, maintenant, cfg, piste.allieManuel)
+  piste.identification = identification
+
+  local meta = piste.meta or {}
+  local mentionMeta = ""
+  if meta.proprietaire or meta.equipe then
+    mentionMeta = string.format(" ; radar : proprietaire %s, equipe %s",
+      tostring(meta.proprietaire or "-"), tostring(meta.equipe or "-"))
+  end
 
   local changement = (piste.categorie ~= categorie) or (piste.iff ~= iff)
   piste.categorie, piste.iff = categorie, iff
@@ -1236,7 +1276,24 @@ local function decider(piste, maintenant)
   if changement then
     info(ETAPES.CLASSIFICATION, string.format(
       "cible %s classee %s [%s] ; IFF %s [%s ; %s]%s",
-      piste.nom, categorie, motifCategorie, iff, motifIff, motifAppariement, mentionFaction))
+      piste.nom, categorie, motifCategorie, iff, motifIff, motifAppariement, mentionMeta))
+    info(ETAPES.IDENTIFICATION, string.format(
+      "cible %s : voie transpondeur %s [%s] / voie radar %s [%s] -> concordance %s",
+      piste.nom,
+      identification.transpondeur.statut, identification.transpondeur.motif,
+      identification.radar.statut, identification.radar.motif,
+      identification.concordance))
+  end
+
+  -- Une discordance n'est signalee qu'une fois par piste : elle ne change pas
+  -- d'un balayage a l'autre, et la repeter noierait le journal.
+  if identification.alerte and piste.alerteIdentification ~= identification.alerte then
+    piste.alerteIdentification = identification.alerte
+    etat.compteurs.discordances = etat.compteurs.discordances + 1
+    avert(ETAPES.DISCORDANCE_IFF, string.format("cible %s : %s",
+      piste.nom, identification.alerte))
+    alerterControleur("discordance d'identification",
+      string.format("%s - %s", piste.nom, identification.alerte))
   end
 
   ------------------------------------------------------------ resolution zone

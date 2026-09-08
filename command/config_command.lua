@@ -114,6 +114,43 @@ return {
   -- 3 fois la periode d'emission du transpondeur cote vehicule.
   validiteTranspondeur = 15,
 
+  --------------------------------------- DEUXIEME VOIE D'IDENTIFICATION ------
+
+  --[[
+    Le systeme identifie par DEUX voies independantes :
+      1. le TRANSPONDEUR : quel code porte l'appareil ;
+      2. le RADAR : ce qu'est l'appareil, et a qui il appartient - nom de
+         contraption, proprietaire et equipe rendus par Create Radars.
+
+    Leur interet vient de leur independance : un transpondeur se capture avec
+    l'engin qui le porte, le proprietaire d'une contraption non. Un code allie
+    porte par un engin identifie hostile signale un transpondeur capture -
+    exactement ce qu'une voie unique laisserait passer.
+
+    LA DOCTRINE NE BOUGE PAS : sans code valide, la cible reste INCONNUE. La
+    voie radar ne delivre aucun laissez-passer ; elle peut seulement en retirer
+    un. Elle signale aussi le cas inverse - un appareil que le radar reconnait
+    comme allie mais dont le transpondeur est muet - pour qu'un controleur
+    puisse le declarer allie a la main avant qu'il ne soit engage.
+  ]]
+  identificationRadarActive = true,
+
+  -- Que faire quand les deux voies se contredisent ?
+  --   true (defaut) : le code est ecarte, la cible redevient INCONNUE, et le
+  --                   controleur est alerte. C'est le reglage sur.
+  --   false         : le code est conserve, la discordance est seulement
+  --                   journalisee et signalee.
+  discordanceDeclasse = true,
+
+  -- Listes d'identification par nom, sans aucune dependance exterieure.
+  -- Comparaison par egalite exacte, puis par sous-chaine insensible a la
+  -- casse : l'entree "RAID" couvre "RAID-01", "RAID-02", etc.
+  -- Sont examines : le nom du contact, son proprietaire et son equipe.
+  -- La liste HOSTILE l'emporte sur la liste ALLIEE en cas de double
+  -- appartenance : le doute ne profite pas a la cible.
+  nomsHostiles = nil,   -- exemple : { "RAID", "Pirate", "Kriegsmarine" }
+  nomsAllies   = nil,   -- exemple : { "FR-", "Escadrille" }
+
   -- Distance maximale, en blocs, entre la position annoncee par un
   -- transpondeur et un echo radar pour les associer l'un a l'autre.
   -- Trop grand : un ennemi profite du code d'un allie proche. Trop petit :

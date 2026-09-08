@@ -38,7 +38,7 @@ Le système compte **quatre types de machines**, chacune avec son rôle :
 
 | Fichier | Où l'installer |
 |---|---|
-| `radar/radar.lua` + `radar/config_radar.lua` + `command/scanner.lua` | chaque station radar |
+| `radar/radar.lua` + `radar/config_radar.lua` + `command/scanner.lua` + `radar/diagnostic.lua` | chaque station radar |
 | `lanceur/lanceur.lua` + `lanceur/config_lanceur.lua` | chaque plateforme de défense |
 | `command/transpondeur.lua` | chaque véhicule ami |
 
@@ -118,6 +118,7 @@ mkdir radar
 wget <depot>/radar/radar.lua          radar/radar.lua
 wget <depot>/radar/config_radar.lua   radar/config_radar.lua
 wget <depot>/command/scanner.lua      radar/scanner.lua
+wget <depot>/radar/diagnostic.lua     radar/diagnostic.lua
 wget <depot>/radar/startup.lua        startup.lua
 edit radar/config_radar.lua
 reboot
@@ -125,6 +126,15 @@ reboot
 
 Deux champs par station : `identifiant` (unique) et `position` (F3, ligne
 « Block »).
+
+> **Le radar doit être physiquement relié à l'ordinateur.** Soit il **touche**
+> l'ordinateur par une de ses six faces, soit les deux blocs sont reliés par un
+> **modem filaire** : un modem collé à l'ordinateur, un modem collé au radar, du
+> câble entre les deux, et les **deux modems activés d'un clic droit** (ils
+> deviennent rouges). Un modem sans fil ou Ender **ne transporte pas** un
+> périphérique — il ne transporte que des messages.
+>
+> En cas de doute, lancez `diagnostic` avant toute chose (voir §13).
 
 ### Chaque plateforme de défense
 
@@ -162,7 +172,51 @@ Le code est mémorisé dans `/transpondeur.cfg` et rejoué au démarrage.
 | 2 | Scramble | interception de vérification, **sans engagement**. Contre une cible au sol c'est un **Scramble AG**, et il exige la validation d'un contrôleur |
 | 3 | Destruction | ordre de tir vers Fire Control |
 
-### 4.2 Les codes transpondeur
+### 4.2 Deux voies d'identification
+
+Le système identifie chaque contact par **deux canaux indépendants** :
+
+| Voie | Question à laquelle elle répond | Ce qui la rend faillible |
+|---|---|---|
+| **Transpondeur** | quel code porte cet appareil ? | il se capture **avec** l'appareil |
+| **Radar** (Create Radars) | qu'est-ce que c'est, et à qui est-il ? | le mod ne renseigne pas toujours ces champs |
+
+Leur intérêt vient précisément de leur indépendance : un transpondeur se capture
+avec l'engin qui le porte, le propriétaire d'une contraption non.
+
+La voie radar exploite, dans cet ordre : les listes `nomsHostiles` / `nomsAllies`
+de la configuration (aucune dépendance extérieure, utilisables dès le premier
+jour), le roster poussé par un pont Open Parties and Claims, puis les champs
+`owner`, `team` et `type` rendus par Create Radars.
+
+**La doctrine ne bouge pas : sans code valide, la cible reste INCONNUE.** La voie
+radar ne délivre aucun laissez-passer. Elle peut seulement en **retirer** un —
+et c'est tout son intérêt défensif.
+
+| Transpondeur | Radar | Résultat | Concordance |
+|---|---|---|---|
+| code allié | allié | **ALLIÉ** | `CONFIRME` |
+| code allié | rien de connu | **ALLIÉ** | `PARTIEL` |
+| code allié | **hostile** | **INCONNU** + alerte | `DISCORDANT` |
+| code général | hostile | **INCONNU** + alerte | `DISCORDANT` |
+| aucun / invalide | allié | **INCONNU** + alerte | `DISCORDANT` |
+| aucun / invalide | hostile | **INCONNU** | `CONFIRME` |
+| aucun / invalide | rien de connu | **INCONNU** | `AUCUNE` |
+
+Les deux lignes `DISCORDANT` sont celles qui justifient tout le dispositif :
+
+- **code valide sur un engin hostile** → transpondeur probablement capturé. Le
+  code est écarté, la cible redevient INCONNUE et est traitée comme telle. Avec
+  une seule voie, elle traversait une zone Alpha en toute impunité.
+  `discordanceDeclasse = false` conserve le code en ne faisant que signaler.
+- **ami reconnu par le radar mais transpondeur muet** → émetteur probablement en
+  panne. La doctrine le laisse INCONNU — c'est la règle — mais le contrôleur est
+  prévenu et peut le **déclarer allié à la main** avant qu'il ne soit engagé.
+
+La déclaration manuelle d'un contrôleur prime sur les deux voies : c'est une
+décision humaine, elle n'est pas soumise au recoupement.
+
+### 4.3 Les codes transpondeur
 
 - **Code allié** — fixe. Libre passage dans toutes les zones et tous les modes,
   **sauf en zone Roméo en temps de guerre**, où il déclenche un scramble de
@@ -173,7 +227,7 @@ Le code est mémorisé dans `/transpondeur.cfg` et rejoué au démarrage.
   rotation abattrait toute la flotte qui n'a pas encore reçu le nouveau code.
 - **Absence de code, code invalide, code périmé** → **INCONNU**, sans appel.
 
-### 4.3 Table d'engagement complète
+### 4.4 Table d'engagement complète
 
 Source unique de vérité : `command/noyau.lua`, table `TABLE_ENGAGEMENT`.
 Les 24 cases sont vérifiées une par une par `tests/test_command.lua`.
@@ -193,21 +247,21 @@ Différence Charlie / Bravo en temps de guerre : le code général déclenche un
 **scramble** en Charlie, une **destruction** en Bravo. La cible inconnue est
 détruite dans les deux cas.
 
-### 4.4 Zone non classifiée
+### 4.5 Zone non classifiée
 
 Un point qui n'appartient à aucune zone Charlie, Bravo, Alpha ou Roméo est
 **hors juridiction** : le système ne fait rien, ni surveillance ni action.
 C'est un comportement voulu, pas un oubli — il apparaît dans le journal
 au niveau DEBUG.
 
-### 4.5 Alerte maximale manuelle
+### 4.6 Alerte maximale manuelle
 
 Déclenchable en un clic depuis l'écran d'accueil, à tout moment. Elle applique
 le régime **Roméo / Guerre** à toutes les zones classifiées, quelle que soit
 leur classe. Elle ne couvre pas les zones non classifiées, sauf si
 `alerteMaxCouvreHorsZone = true`.
 
-### 4.6 Chevauchement de zones
+### 4.7 Chevauchement de zones
 
 **La classe la plus stricte l'emporte toujours** : Roméo > Alpha > Bravo >
 Charlie. Toutes les zones chevauchées sont listées dans le journal, avec la
@@ -649,6 +703,8 @@ Consultable à l'écran (onglet **Journal**) et dans `command/command.log`
 | `demande de scramble AG` | demande, rappel périodique, validation ou refus |
 | `ordre manuel du controleur` | ce qu'un humain a ordonné, et le verdict qu'il court-circuite |
 | `declaration d'allie par un controleur` | déclaration, engagement interrompu, révocation |
+| `identification a deux voies` | statut et motif de chaque voie, concordance |
+| `discordance entre les deux voies` | transpondeur capturé, ou ami à l'émetteur muet |
 
 Les autres étapes couvrent le démarrage, le réseau, la persistance et
 l'interface. La liste complète est en tête de `command/command.lua`, table
@@ -667,6 +723,8 @@ l'interface. La liste complète est en tête de `command/command.lua`, table
 | « balise du lanceur X muette » | l'ordinateur de la plateforme est tombé |
 | « aucune plateforme designable » | toutes hors portée, vides, ou de mauvaise catégorie |
 | Tout est classé INCONNU | code allié non configuré, transpondeurs arrêtés, ou GPS absent |
+| « transpondeur probablement capture » | un code valide est porté par un engin identifié hostile |
+| « emetteur en panne ? » | un ami reconnu par le radar n'a pas de code valide |
 | « piste perdue hors enveloppe fiable » | la cible est probablement sortie de portée, pas détruite |
 | « scramble AG en attente de validation » | normal — un contrôleur doit valider depuis la carte |
 | Le système engage des vaches | `traiterEntitesNeutres = true` — le remettre à `false` |
@@ -679,8 +737,8 @@ l'interface. La liste complète est en tête de `command/command.lua`, table
 ## 12. Tests
 
 ```
-lua5.4 tests/test_command.lua          # 191 vérifications — doctrine, terrain, carte
-lua5.4 tests/test_command_runtime.lua  #  88 vérifications — la chaîne complète
+lua5.4 tests/test_command.lua          # 229 vérifications — doctrine, terrain, carte, IFF
+lua5.4 tests/test_command_runtime.lua  # 100 vérifications — la chaîne complète
 ```
 
 **`test_command.lua` — le noyau de décision**, sans Minecraft : les 24 cases de
@@ -708,6 +766,18 @@ poste de contrôle** : la doctrine demande, l'opérateur ouvre la carte, clique 
 contact, coche la case, transmet — et l'ordre `Appui-1 Scramble AG type
 GroundVehicle` part réellement sur le réseau.
 
+Un test couvre spécifiquement le **transpondeur capturé** : deux appareils
+portent le **même code allié parfaitement valide**, l'un appartenant à un
+propriétaire ami, l'autre à un propriétaire hostile. Le premier passe en
+observation passive, le second est déclassé INCONNU, signalé et engagé. Avec une
+seule voie d'identification, les deux passaient.
+
+La détection radar est testée sur ses cas d'échec réels : périphérique dont le
+type ne contient pas « radar », `getType` rendant plusieurs valeurs, bloc radar
+n'exposant aucune méthode connue, et absence totale de périphérique — chaque cas
+devant produire un message qui dit **ce qui a été vu**, pas seulement ce qui
+manque.
+
 > Ce second banc n'est pas décoratif. Il a mis au jour un défaut que les tests
 > unitaires ne pouvaient pas voir : `rednet.broadcast` ne retourne rien, et le
 > code en déduisait un échec de transmission. Chaque ordre de tir était
@@ -718,7 +788,70 @@ GroundVehicle` part réellement sur le réseau.
 
 ---
 
-## 13. Limites connues
+## 13. « L'ordinateur ne trouve pas le radar »
+
+### D'abord : le diagnostic
+
+```
+diagnostic          affiche le rapport
+diagnostic sauver   l'écrit aussi dans diagnostic.txt
+```
+
+Le rapport donne les trois inconnues du problème, dans l'ordre :
+
+1. **Tous les périphériques visibles**, avec **tous** leurs types et **toutes**
+   leurs méthodes. Si le radar n'apparaît pas ici, le problème est **physique**
+   et aucun réglage logiciel n'y changera rien.
+2. Le résultat de la détection FrenchNet et son motif exact.
+3. Pour chaque méthode de balayage, un **écho brut complet** — tous les champs
+   rendus par le mod, avec leur type — puis la lecture qu'en fait FrenchNet.
+   C'est ce qui permet de vérifier que le système lit les bons champs.
+
+C'est exactement le rapport à joindre à un ticket.
+
+### Comment la détection fonctionne
+
+La détection procède **par méthode, pas par nom de type**. Tout périphérique
+exposant l'une des méthodes de `scanner.METHODES` (`getEntities`,
+`getContraptions`, `getPlayers`, `getTargets`, `scan`, et une quinzaine de
+variantes) est reconnu comme radar, **quel que soit le nom que le mod donne à
+son type**.
+
+C'est délibéré : un radar qui répond est un radar, quel que soit son nom ; un
+bloc nommé « radar » qui ne répond à rien n'en est pas un. La détection par nom
+de type était le défaut d'origine — elle échouait silencieusement dès que le mod
+nommait son périphérique autrement.
+
+### Si votre version expose une méthode inconnue
+
+Le journal la nomme :
+
+```
+[ERREUR] [etape: detection du radar] peripherique 'top' de type
+'createradars:radar' trouve, mais AUCUNE de ses methodes n'est reconnue.
+Methodes reelles : getRange, getDetectedObjects, setEnabled.
+```
+
+Ajoutez la bonne dans `scanner.METHODES` — **un seul endroit**, et la correction
+profite du même coup aux stations et au poste, qui partagent ce fichier.
+
+### Table de résolution
+
+| Ce que dit le journal | Ce qu'il faut faire |
+|---|---|
+| `AUCUN peripherique visible` | problème de câblage : le radar ne touche pas l'ordinateur et n'est pas relié par modem filaire |
+| `peripheriques visibles : left [monitor]…` | le radar n'est pas dans la liste — mauvais bloc, ou modem filaire non activé |
+| `AUCUNE de ses methodes n'est reconnue` | compléter `scanner.METHODES` avec le nom que le journal donne |
+| `position NON RECONNUE` (diagnostic) | le mod rend les coordonnées dans des champs inattendus — voir l'écho brut |
+| radar trouvé mais 0 contact | normal si rien ne vole à portée ; faites passer quelque chose et relancez |
+
+Le journal liste **de toute façon** tous les périphériques et leurs méthodes à
+chaque démarrage (niveau `DEBUG` quand tout va bien, `ERREUR` sinon) : c'est la
+première chose à relire après une mise à jour du mod.
+
+---
+
+## 14. Limites connues
 
 - **Le terrain n'est pas calculé depuis la seed, il est observé.** C'est un
   choix imposé par la plateforme (voir §6) et non un raccourci : au démarrage le
@@ -736,10 +869,16 @@ GroundVehicle` part réellement sur le réseau.
   intercepteur très rapide au-delà de `vitesseProjectile` sera requalifié
   projectile — donc traité comme cible aérienne, ce qui reste correct, mais son
   symbole changera sur la carte.
-- **L'API de Create Radars n'est pas figée.** L'adaptateur essaie six noms de
-  méthode connus et journalise celui qui répond ; si votre version en expose un
-  autre, `scanner.METHODES` est le seul endroit à modifier — et la correction
-  profite du même coup aux stations et au poste, qui partagent le fichier.
+- **L'API de Create Radars n'est pas figée.** La détection procède par méthode
+  et non par nom de type, ce qui la rend insensible au nommage du mod ; elle
+  reconnaît une vingtaine de noms de méthode. Si votre version en expose un
+  autre, `scanner.METHODES` est le seul endroit à modifier — et `diagnostic`
+  vous donne le nom exact à y mettre.
+- **La voie radar dépend de champs facultatifs.** Si votre version de Create
+  Radars ne renseigne ni `owner` ni `team`, la seconde voie ne s'appuiera que
+  sur le nom du contact et sur les listes `nomsHostiles` / `nomsAllies`. Ces
+  listes suffisent à elles seules — elles ne dépendent d'aucun mod — mais elles
+  se maintiennent à la main.
 - **Un transpondeur allié capturé donne le code allié.** Le code général
   rotatif limite la fenêtre d'exploitation ; le code allié fixe, non. Le faire
   tourner impose un redémarrage des postes.

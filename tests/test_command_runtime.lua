@@ -171,7 +171,8 @@ do
   verifier("le poste tourne sans se terminer", motif == "LIMITE_TEMPS", tostring(motif))
   verifier("mode GUERRE restaure depuis etat.dat", (contient(s, "mode GUERRE")))
   verifier("zone Alpha chargee", (contient(s, "1 zone(s) active(s)")))
-  verifier("radar detecte", (contient(s, "radar 'top' detecte")))
+  verifier("radar local detecte par ses methodes, pas par son nom de type",
+    (contient(s, "radar detecte sur 'top'")) and (contient(s, "par ses methodes")))
 
   -- Etape 1 : detection
   verifier("[1] detection journalisee",
@@ -180,7 +181,9 @@ do
   verifier("[2] classification : cible aerienne",
     (contient(s, "cible Raider-7 classee AERIENNE")))
   verifier("[2] classification : IFF inconnu, aucun transpondeur",
-    (contient(s, "IFF INCONNU [aucun code transpondeur recu")))
+    (contient(s, "transpondeur : aucun code transpondeur recu")))
+  verifier("[2] les deux voies d'identification sont journalisees",
+    (contient(s, "voie transpondeur INCONNU")) and (contient(s, "voie radar")))
   -- Etape 3 : decision d'escalade
   verifier("[3] decision : palier 3 destruction avec scramble direct",
     (contient(s, "palier 3 - destruction avec scramble direct")))
@@ -228,7 +231,9 @@ do
   local s = etat.sorties
 
   verifier("code transpondeur recu", (contient(s, "[etape: reception d'un code transpondeur]")))
-  verifier("IFF allie reconnu", (contient(s, "IFF ALLIE [code allie valide")))
+  verifier("IFF allie reconnu", (contient(s, "transpondeur : code allie valide")))
+  verifier("identification par transpondeur seul, faute de donnees radar",
+    (contient(s, "concordance PARTIEL")))
   verifier("appariement par nom declare", (contient(s, "appariement par nom declare")))
   verifier("palier 1 : observation passive, libre passage",
     (contient(s, "palier 1 - observation passive")))
@@ -721,6 +726,72 @@ do
     table.concat(liste, " | "))
   verifier("un seul ordre est parti, celui du controleur", #liste == 1,
     table.concat(liste, " | "))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 16 : transpondeur capture, les deux voies se contredisent ==")
+do
+  -- Le scenario qui justifie la seconde voie d'identification : un engin
+  -- porte un code allie PARFAITEMENT VALIDE, mais Create Radars indique un
+  -- proprietaire hostile. Avec une seule voie, il traversait la zone Alpha
+  -- en toute impunite.
+  preparer(ZONE_ALPHA, ETAT_GUERRE,
+    SANS_RADAR_LOCAL .. ' nomsHostiles = { "RAID" }, nomsAllies = { "FR-" },')
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t < 4 then return {} end
+        return {
+          -- Nom anodin, proprietaire hostile : c'est la metadonnee radar qui
+          -- trahit l'engin, pas son nom.
+          { id = "ID:INFILTRE", nom = "Vol-7", nature = "VEHICULE",
+            x = 100, y = 150, z = 0, meta = { proprietaire = "RAID-Chef" } },
+          -- Temoin : meme code allie, mais proprietaire ami. Doit passer.
+          { id = "ID:AMI", nom = "FR-Rafale1", nature = "VEHICULE",
+            x = 120, y = 150, z = 40, meta = { proprietaire = "FR-Pilote" } },
+        }
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Est", { x = 150, y = 70, z = 0 }, 20, 900))
+
+  -- Les deux appareils emettent le MEME code allie, parfaitement valide.
+  for _, cible in ipairs({ "Vol-7", "FR-Rafale1" }) do
+    craftos.programmerRednet(30, "frenchnet_transpondeur", 4, function()
+      return { protocole = "FRENCHNET_TRANSPONDEUR", identifiant = cible, nom = cible,
+               code = "FN-ALLIE-0000" }
+    end)
+  end
+
+  craftos.executer(BANC .. "/command/command.lua", 22)
+  local s = etat.sorties
+
+  verifier("la voie radar identifie l'infiltre par son proprietaire",
+    (contient(s, "proprietaire 'RAID-Chef' figure sur la liste hostile")))
+  verifier("les deux voies sont journalisees pour l'infiltre",
+    (contient(s, "voie transpondeur ALLIE")) and (contient(s, "voie radar HOSTILE")))
+  verifier("la discordance declasse le code : cible INCONNU",
+    (contient(s, "DISCORDANCE des deux voies -> declasse INCONNU")))
+  verifier("le controleur est alerte d'un transpondeur capture",
+    (contient(s, "transpondeur probablement capture")))
+  verifier("alerte controleur levee",
+    (contient(s, "ALERTE CONTROLEUR - discordance d'identification")))
+  verifier("l'infiltre est engage au lieu de passer",
+    (contient(s, "cible Vol-7")) and (contient(s, "palier 3")))
+  verifier("un ordre de tir est bien parti", #ordres(etat) > 0,
+    table.concat(ordres(etat), " | "))
+
+  -- Le temoin ne doit surtout pas etre pris dans la meme rafale.
+  verifier("l'allie authentique est confirme par les deux voies",
+    (contient(s, "cible FR-Rafale1")) and (contient(s, "concordance CONFIRME")))
+  verifier("l'allie authentique reste en observation passive",
+    (contient(s, "cible FR-Rafale1 (AERIENNE) : palier 1")))
+  verifier("aucune discordance signalee sur l'allie authentique",
+    compter(s, "ALERTE CONTROLEUR - discordance d'identification") == 1,
+    "#" .. compter(s, "ALERTE CONTROLEUR - discordance d'identification"))
 end
 
 --------------------------------------------------------------------------------

@@ -785,6 +785,174 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 21 : detection du radar par ses methodes ==")
+do
+  local scanner = dofile(RACINE .. "/command/scanner.lua")
+
+  -- Le cas qui bloquait : un peripherique radar dont le TYPE ne contient pas
+  -- le mot "radar". La detection par nom de type le manquait entierement.
+  local faux = { getContraptions = function() return {} end,
+                 getEntities = function() return {} end }
+  local per = {
+    getNames = function() return { "left", "top" } end,
+    getType = function(n)
+      if n == "top" then return "createradars:antenna_controller", "peripheral" end
+      return "monitor"
+    end,
+    isPresent = function() return true end,
+    wrap = function(n)
+      if n == "top" then return faux end
+      return { setTextScale = function() end }
+    end,
+  }
+  local radar, nom, methodes, motif = scanner.detecter(per)
+  verifier("radar dont le type ne contient pas 'radar' : detecte quand meme",
+    radar ~= nil, tostring(motif))
+  egal("le bon peripherique est retenu", nom, "top")
+  verifier("les deux methodes de balayage sont reconnues", #methodes == 2, "#" .. #methodes)
+  verifier("le motif nomme les methodes trouvees",
+    motif:find("getContraptions", 1, true) ~= nil, motif)
+
+  -- getType rend PLUSIEURS valeurs : n'en lire qu'une fait manquer le bon type.
+  local types = scanner.typesDe(per, "top")
+  verifier("tous les types sont collectes, pas seulement le premier",
+    #types == 2 and types[2] == "peripheral", table.concat(types, ", "))
+
+  -- Aucun radar : le message doit dire ce qui EST visible, sinon il n'aide
+  -- personne a debloquer la situation.
+  local perSansRadar = {
+    getNames = function() return { "left" } end,
+    getType = function() return "monitor" end,
+    isPresent = function() return true end,
+    wrap = function() return { setTextScale = function() end } end,
+  }
+  local absent, _, _, motifAbsent = scanner.detecter(perSansRadar)
+  verifier("echec : aucun radar rendu", absent == nil)
+  verifier("le message d'echec enumere les peripheriques vus",
+    motifAbsent:find("left", 1, true) ~= nil and motifAbsent:find("monitor", 1, true) ~= nil,
+    motifAbsent)
+
+  -- Aucun peripherique du tout : c'est un probleme de cablage, il faut le dire.
+  local perVide = {
+    getNames = function() return {} end, getType = function() end,
+    isPresent = function() return false end, wrap = function() end,
+  }
+  local _, _, _, motifVide = scanner.detecter(perVide)
+  verifier("aucun peripherique : le message parle de cablage",
+    motifVide:find("modem filaire", 1, true) ~= nil, motifVide)
+
+  -- Un bloc qui se dit radar mais ne repond a rien : nommer ses vraies
+  -- methodes est la seule information utile.
+  local perMuet = {
+    getNames = function() return { "top" } end,
+    getType = function() return "createradars:radar" end,
+    isPresent = function() return true end,
+    wrap = function() return { getRange = function() end, setEnabled = function() end } end,
+  }
+  local _, _, _, motifMuet = scanner.detecter(perMuet)
+  verifier("bloc radar sans methode connue : ses methodes reelles sont nommees",
+    motifMuet:find("getRange", 1, true) ~= nil, motifMuet)
+
+  -- Metadonnees d'identification lues dans l'echo.
+  local meta = scanner.metaEcho({ owner = "FR-Pilote", team = "France", type = "airship" })
+  egal("proprietaire lu", meta and meta.proprietaire, "FR-Pilote")
+  egal("equipe lue", meta and meta.equipe, "France")
+  verifier("echo sans metadonnee : rien plutot qu'une table vide",
+    scanner.metaEcho({ x = 1, y = 2, z = 3 }) == nil)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 22 : identification a deux voies ==")
+do
+  local codes = { codeAllie = "ALLIE-X", codeGeneral = "GEN-2" }
+  local cfg = {
+    validiteTranspondeur = 15,
+    nomsHostiles = { "RAID", "Pirate" },
+    nomsAllies   = { "FR-" },
+  }
+  local roster = { ["Marin"] = { faction = "MARINE", hostilite = "ALLIEE" } }
+  local I, C = noyau.IFF, noyau.CONCORDANCE
+
+  local function identifier(nom, code, meta, options)
+    local transpondeur = code and { code = code, recuA = 100 } or nil
+    local conf = options or cfg
+    return noyau.identifier({ nom = nom, meta = meta }, transpondeur, codes, roster, 100, conf, false)
+  end
+
+  -- Voie radar seule
+  egal("nom sur la liste hostile",
+    (noyau.identifierParRadar({ nom = "RAID-01" }, {}, cfg)), "HOSTILE")
+  egal("nom sur la liste alliee",
+    (noyau.identifierParRadar({ nom = "FR-Rafale" }, {}, cfg)), "ALLIE")
+  egal("roster : allie declare",
+    (noyau.identifierParRadar({ nom = "Marin" }, roster, cfg)), "ALLIE")
+  egal("proprietaire hostile trahit un engin au nom anodin",
+    (noyau.identifierParRadar({ nom = "Vol-7", meta = { proprietaire = "RAID-Chef" } }, {}, cfg)),
+    "HOSTILE")
+  egal("equipe hostile aussi",
+    (noyau.identifierParRadar({ nom = "Vol-8", meta = { equipe = "Pirate" } }, {}, cfg)), "HOSTILE")
+  egal("rien de connu",
+    (noyau.identifierParRadar({ nom = "Anonyme" }, {}, cfg)), "INCONNU")
+  egal("voie radar desactivee",
+    (noyau.identifierParRadar({ nom = "RAID-01" }, {}, { identificationRadarActive = false })),
+    "INCONNU")
+
+  -- Concordance : les deux voies disent la meme chose
+  local iff, _, detail = identifier("FR-Rafale1", "ALLIE-X")
+  egal("allie confirme par les deux voies : IFF", iff, I.ALLIE)
+  egal("allie confirme par les deux voies : concordance", detail.concordance, C.CONFIRME)
+  verifier("aucune alerte sur une identification concordante", detail.alerte == nil)
+
+  -- LE cas qui justifie tout le dispositif : transpondeur capture
+  iff, _, detail = identifier("RAID-01", "ALLIE-X")
+  egal("code allie sur un engin hostile : declasse INCONNU", iff, I.INCONNU)
+  egal("discordance signalee", detail.concordance, C.DISCORDANT)
+  verifier("le controleur est alerte d'un transpondeur probablement capture",
+    detail.alerte ~= nil and detail.alerte:find("capture", 1, true) ~= nil,
+    tostring(detail.alerte))
+
+  -- Meme cas avec le code general
+  iff, _, detail = identifier("Pirate-2", "GEN-2")
+  egal("code general sur un engin hostile : declasse aussi", iff, I.INCONNU)
+
+  -- Le declassement peut etre desactive en connaissance de cause
+  local souple = { validiteTranspondeur = 15, nomsHostiles = { "RAID" },
+                   discordanceDeclasse = false }
+  iff, _, detail = identifier("RAID-01", "ALLIE-X", nil, souple)
+  egal("discordanceDeclasse = false : le code est conserve", iff, I.ALLIE)
+  verifier("mais la discordance reste signalee", detail.alerte ~= nil)
+
+  -- Transpondeur seul, radar muet : la doctrine passe quand meme
+  iff, _, detail = identifier("Anonyme-3", "ALLIE-X")
+  egal("code allie sans element radar : reste ALLIE", iff, I.ALLIE)
+  egal("identification partielle", detail.concordance, C.PARTIEL)
+
+  -- LA regle cardinale : sans code valide, rien ne passe
+  iff, _, detail = identifier("FR-Rafale2", nil)
+  egal("allie reconnu par le radar mais sans code : reste INCONNU", iff, I.INCONNU)
+  verifier("le controleur est prevenu qu'un ami est peut-etre muet",
+    detail.alerte ~= nil and detail.alerte:find("emetteur en panne", 1, true) ~= nil,
+    tostring(detail.alerte))
+
+  iff, _, detail = identifier("RAID-02", nil)
+  egal("hostile sans code : INCONNU", iff, I.INCONNU)
+  egal("hostilite confirmee par les deux voies", detail.concordance, C.CONFIRME)
+
+  iff, _, detail = identifier("Neutre-3", nil)
+  egal("inconnu total : INCONNU", iff, I.INCONNU)
+  egal("aucune voie ne s'est prononcee", detail.concordance, C.AUCUNE)
+
+  -- La declaration manuelle prime et n'est pas soumise au recoupement
+  iff = noyau.identifier({ nom = "RAID-01" }, nil, codes, roster, 100, cfg, true)
+  egal("allie declare a la main : prime meme sur une identification hostile", iff, I.ALLIE)
+
+  -- Le detail des deux voies est toujours disponible pour le journal
+  local _, _, d = identifier("RAID-01", "ALLIE-X")
+  verifier("le detail nomme les deux voies",
+    d.transpondeur and d.transpondeur.statut and d.radar and d.radar.motif ~= nil)
+end
+
+--------------------------------------------------------------------------------
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

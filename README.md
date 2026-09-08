@@ -80,12 +80,17 @@ mkdir radar
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/radar.lua radar/radar.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/config_radar.lua radar/config_radar.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/command/scanner.lua radar/scanner.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/diagnostic.lua radar/diagnostic.lua
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/frenchnet-command-defense-xm41dc/radar/startup.lua startup.lua
 edit radar/config_radar.lua
 reboot
 ```
 
 Deux champs par station : `identifiant` (unique) et `position` (F3, « Block »).
+
+> ⚠ **Le radar doit toucher l'ordinateur par une face, ou être relié par un modem *filaire*** (câble + un modem collé à chaque bloc, les deux activés d'un clic droit). Un modem sans fil ou Ender ne transporte **pas** un périphérique.
+>
+> Si l'ordinateur ne trouve pas le radar : `diagnostic` liste tous les périphériques visibles, leurs types, leurs méthodes, et le format brut des échos. La détection FrenchNet se fait **par méthode et non par nom de type** — elle fonctionne quel que soit le nom que le mod donne à son périphérique.
 
 ### Installation — chaque plateforme de défense
 
@@ -111,6 +116,20 @@ transpondeur FN-ALLIE-0000
 ```
 
 **Sans transpondeur, un véhicule est classé INCONNU** — avec toutes les conséquences prévues par la doctrine de zone.
+
+### Deux voies d'identification
+
+| Voie | Question | Faille |
+|---|---|---|
+| **Transpondeur** | quel code porte-t-il ? | il se capture **avec** l'appareil |
+| **Radar** | qu'est-ce que c'est, à qui est-il ? | champs facultatifs selon le mod |
+
+**Sans code valide, la cible reste INCONNUE** — la voie radar ne délivre aucun laissez-passer. Elle peut seulement en **retirer** un :
+
+- code allié valide + propriétaire hostile → **transpondeur capturé** : code écarté, cible déclassée INCONNUE, contrôleur alerté. Avec une seule voie, elle traversait une zone Alpha impunément.
+- ami reconnu par le radar mais transpondeur muet → **émetteur en panne** : la cible reste INCONNUE (c'est la règle), mais le contrôleur est prévenu et peut la déclarer alliée d'un clic.
+
+Les listes `nomsHostiles` / `nomsAllies` fonctionnent sans aucun mod tiers.
 
 ### Doctrine en un coup d'œil
 
@@ -198,8 +217,8 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 ### Vérifier
 
 ```
-lua5.4 tests/test_command.lua           -- 191 vérifications : doctrine, terrain, carte
-lua5.4 tests/test_command_runtime.lua   --  88 vérifications : la chaîne complète, réseau simulé
+lua5.4 tests/test_command.lua           -- 229 vérifications : doctrine, terrain, carte, IFF
+lua5.4 tests/test_command_runtime.lua   -- 100 vérifications : la chaîne complète, réseau simulé
 ```
 
 ---
@@ -231,6 +250,7 @@ Consultable à l'écran (onglet **Journal**) ou dans `balise/balise.log` / `comm
 | `command/interface.lua` | Interface de contrôle et carte tactique |
 | `command/config_command.lua` | Config du poste (à éditer) |
 | `radar/radar.lua` | Station radar déportée |
+| `radar/diagnostic.lua` | Diagnostic du périphérique radar |
 | `lanceur/lanceur.lua` | Balise de lanceur (munitions, tirs) |
 | `command/transpondeur.lua` | Émetteur de code, à poser sur chaque véhicule |
 | `tests/test_command.lua` | Banc d'essai de la doctrine (noyau pur) |

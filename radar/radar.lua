@@ -211,11 +211,32 @@ local function ouvrirReseau()
 end
 
 local function detecterRadar()
-  local r, nom, actives, motif = scanner.detecter(peripheral, cfg.peripheriqueRadar)
+  local r, nom, actives, motif, inventaire = scanner.detecter(peripheral, cfg.peripheriqueRadar)
+
+  -- L'inventaire complet part TOUJOURS dans le journal, meme quand tout va
+  -- bien : c'est la premiere chose qu'on veut relire quand une station cesse
+  -- de voir quoi que ce soit apres une mise a jour du mod.
+  for _, p in ipairs(inventaire or {}) do
+    ecrire(r and "DEBUG" or "ERREUR", ETAPES.DETECTION_RADAR, string.format(
+      "peripherique '%s' types [%s] methodes [%s]",
+      p.nom, table.concat(p.types, ", "),
+      #p.methodes > 0 and table.concat(p.methodes, ", ") or "aucune"))
+  end
+
   if not r then
     erreur(ETAPES.DETECTION_RADAR, motif)
+    erreur(ETAPES.DETECTION_RADAR,
+      "Lancez 'diagnostic' sur cette station : il affiche le nom reel du " ..
+      "peripherique, ses methodes reelles et le format reel des echos.")
+    if #(inventaire or {}) == 0 then
+      erreur(ETAPES.DETECTION_RADAR,
+        "Rappel : le radar doit TOUCHER l'ordinateur par une face, ou etre relie " ..
+        "par un modem FILAIRE (cable + un modem colle a chaque bloc, les deux actives " ..
+        "d'un clic droit). Un modem sans fil ou Ender ne transporte pas un peripherique.")
+    end
     return false
   end
+
   radar, methodes = r, actives
   info(ETAPES.DETECTION_RADAR, motif)
   return true

@@ -403,9 +403,12 @@ local function dessinerContacts()
     local palier = (p.verdict and p.verdict.palier) or 0
     local glyphe = ctx.carte and ctx.carte.glyphe(p) or " "
     ecran.texte(2, y, glyphe .. couper(p.nom, 13), PALETTE.texte, PALETTE.fond)
-    local etiquette = etat.demandesAG[p.id] and "AG!" or (p.categorie or "-"):sub(1, 6)
+    local discordant = p.identification and p.identification.concordance == "DISCORDANT"
+    local etiquette = etat.demandesAG[p.id] and "AG!"
+      or (discordant and "IFF?" or (p.categorie or "-"):sub(1, 6))
     ecran.texte(16, y, couper(etiquette, 7),
-      etat.demandesAG[p.id] and PALETTE.avertissement or PALETTE.attenue, PALETTE.fond)
+      etat.demandesAG[p.id] and PALETTE.avertissement
+      or (discordant and PALETTE.danger or PALETTE.attenue), PALETTE.fond)
     -- Meme code couleurs que la carte : vert allie, bleu general, orange
     -- inconnu, rouge engage. Un operateur ne doit pas avoir deux grilles de
     -- lecture selon l'ecran ou il regarde.
@@ -683,17 +686,28 @@ local function dessinerCarte()
       ecran.texte(x + 3, y + 2, classe:sub(1, 3):lower(), PALETTE.attenue, PALETTE.fond)
       x = x + 7
     end
-    ecran.texte(1, y + 3, "+/- zoom  fleches  C poste  M menace  clic cible  R station  L lanceur",
+    ecran.texte(1, y + 3, "+/- zoom  fleches  C poste  M menace  clic cible  IFF? discordance",
       PALETTE.attenue, PALETTE.fond)
     return
   end
 
   ---------------------------------------------------------- panneau d'ordre
   local distance = math.sqrt((piste.x - poste.x) ^ 2 + (piste.z - poste.z) ^ 2)
-  ecran.texte(1, y, couper(string.format("> %s  %s  %s  %s  %.0fm",
+  local ident = piste.identification
+  -- Les deux voies d'identification sont affichees cote a cote : c'est la
+  -- seule facon de voir d'un coup d'oeil qu'un code valide est porte par un
+  -- engin que le radar n'aime pas.
+  local mentionVoies = ""
+  if ident then
+    mentionVoies = string.format("  T:%s R:%s",
+      (ident.transpondeur.statut or "?"):sub(1, 3),
+      (ident.radar.statut or "?"):sub(1, 3))
+  end
+  ecran.texte(1, y, couper(string.format("> %s  %s  %s  %s  %.0fm%s",
     piste.nom, piste.categorie or "?", piste.iff or "?",
-    piste.classeZone or "hors zone", distance), ecran.largeur),
-    PALETTE.texte, PALETTE.fond)
+    piste.classeZone or "hors zone", distance, mentionVoies), ecran.largeur),
+    (ident and ident.concordance == "DISCORDANT") and PALETTE.danger or PALETTE.texte,
+    PALETTE.fond)
 
   -- Le libelle de la case reflete le verbe reellement transmis : un scramble
   -- sur cible au sol est un « Scramble AG », et le controleur doit le voir
@@ -752,6 +766,11 @@ local function dessinerCarte()
       ctx.actions.refuserDemandeAG(pisteSelectionnee)
       pisteSelectionnee = nil
     end, colors.white, PALETTE.danger, 9)
+  elseif ident and ident.alerte then
+    -- Une discordance entre les deux voies est ce qu'un operateur doit lire
+    -- AVANT de cocher quoi que ce soit.
+    ecran.texte(1, y + 3, couper("! " .. ident.alerte, ecran.largeur),
+      colors.black, PALETTE.danger)
   else
     local mention = piste.allieManuel and "  [deja declare ALLIE a la main]" or ""
     ecran.texte(1, y + 3, couper(string.format("verdict automatique : %s%s",
