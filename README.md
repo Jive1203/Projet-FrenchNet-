@@ -6,6 +6,7 @@ Systèmes embarqués du serveur **AERONAUTICS WARFARE** (Create Aeronautics, Neo
 |---|---|---|
 | **Balises GPS** | Constellation de balises fixes, hôtes GPS pour tout le serveur | [guide](docs/guide-complet.md) |
 | **Autopilote** | Bibliothèque de pilotage autonome pour véhicules aériens | [guide](docs/guide-autopilote.md) |
+| **Navire intercepteur** | Système embarqué de scramble + système d'exploitation de bord | [guide](docs/intercepteur.md) |
 | **Câblage** | Brancher un ordinateur sur un véhicule et le faire bouger | [guide](docs/guide-cablage.md) |
 | **Installation** | Poser les fichiers sur les ordinateurs, et dépannage | [guide](docs/guide-installation.md) |
 
@@ -21,6 +22,7 @@ Dépôt public requis. Sur chaque ordinateur :
 wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/autopilote-lua-module-kfnu2k/installe.lua installe
 installe balise       -- balise GPS fixe
 installe vehicule     -- autopilote d'un véhicule
+installe intercepteur -- navire de scramble (autopilote + interception + OS)
 installe satellite    -- ordinateur de sortie déporté
 ```
 
@@ -157,3 +159,73 @@ lua5.4 tests/test_autopilote.lua    -- 180 vérifications, dont un vol simulé e
 | `autopilote/exemple_mission.lua` | Trois missions types |
 | `tests/banc_vol.lua` | Mini-CraftOS + simulateur de vol |
 | `installe.lua` | Installateur en une commande |
+
+---
+
+## Navire intercepteur de scramble
+
+Système **embarqué**, indépendant du système de défense au sol. Il ne connaît ni
+les zones, ni les classes Charlie / Bravo / Alpha / Roméo, et n'accepte que
+**deux ordres** : `SCRAMBLE` (intercepter la cible désignée) et `FEU`.
+
+Il **appelle** le module d'autopilote ci-dessus — cascade, PID, repli en zone
+morte — et n'écrit aucune loi de vol. Si le module est introuvable, le navire
+refuse de décoller.
+
+### Ce qu'il fait
+
+- **Interception prédictive** — il résout le temps de vol et vise la position
+  *future* de la cible, pas sa position actuelle.
+- **Arc arrière 4 h – 8 h, 300 à 400 blocs** — jamais de face. Hors de l'arc,
+  il contourne par le flanc.
+- **Orbite ou zigzag** une fois en position, avec vitesse asservie sur celle de
+  la cible (ni trop vite, ni trop lentement, sans percuter).
+- **L'ordre de tir prime sur la position** — sous ordre de feu, le navire
+  engage dès qu'il a une solution, même hors de son arc ; il y revient
+  progressivement, par corrections bornées, sans cesser de tirer.
+- **Arsenal configurable** — plusieurs armes, chacune avec sa portée, son
+  utilité (anti-aérien, anti-sol, défensif, polyvalent) et sa balistique. Le
+  navire choisit l'arme adaptée à la distance et à la nature de la cible.
+- **Évasion prioritaire** sur détection de dégât, en break alterné.
+- **Retour base automatique** sur destruction confirmée, confié au système de
+  points de passage de l'autopilote. Le réarmement reste **manuel**.
+- **Journal détaillé et partagé** avec l'autopilote : une mission se relit de
+  bout en bout, vol compris.
+
+### Système d'exploitation de bord
+
+`systeme/os.lua` fait tourner l'interface et le système d'interception **côte à
+côte**, chacun dans sa fenêtre, sur un noyau multitâche : l'équipage règle
+l'armement pendant que le navire poursuit sa cible, sans qu'un ordre du sol ne
+se perde.
+
+Sept pages : **État**, **Mission**, **Armement**, **Autopilote**, **Journal**,
+**Système**, **Console**.
+
+La page **Armement** est celle qui déclare les armes : ajout, portée, utilité,
+balistique, cadence — et elle affiche la **couverture de portée** en signalant
+les trous, l'information qui manque le plus souvent à l'équipage.
+
+### Installation
+
+```
+installe intercepteur
+```
+
+Puis, dans l'ordre : `interface` (régler le véhicule), `cablage` (vérifier les
+moteurs), `systeme/os` → page Armement (déclarer les armes), et enfin
+`edit intercepteur/config_intercepteur.lua` (identifiant et points de retour).
+
+### Tests
+
+```
+lua5.4 tests/test_interception.lua   # 101 — maths d'interception, hors CraftOS
+lua5.4 tests/test_armement.lua       #  49 — arsenal et fichier d'armement
+lua5.4 tests/test_systeme.lua        #  25 — noyau multitâche de l'OS
+lua5.4 tests/test_intercepteur.lua   #  63 — mission complète, VRAI autopilote
+lua5.4 tests/test_autopilote.lua     # 180 — non-régression de l'autopilote
+lua5.4 tests/test_balise.lua         #  49 — non-régression des balises
+```
+
+📖 **[Guide complet](docs/intercepteur.md)** — géométrie de l'arc arrière, règle
+d'engagement, arsenal, critères de dégât, système d'exploitation, déploiement.

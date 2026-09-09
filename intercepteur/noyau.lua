@@ -461,6 +461,28 @@ function M.chargerModule(nom, ...)
   return resultat
 end
 
+--------------------------------------------------------------------------------
+-- 8. TABLEAU DE BORD PARTAGE
+--    Le systeme d'exploitation et le systeme d'interception tournent dans le
+--    meme interpreteur mais chargent chacun leur copie des modules. Cette
+--    table vit dans _G : c'est le seul point de rendez-vous fiable entre eux.
+--    Le systeme d'interception ECRIT dedans, le systeme d'exploitation LIT.
+--    Aucune commande n'y transite : c'est un afficheur, pas un canal d'ordres.
+--------------------------------------------------------------------------------
+
+local CLE_TABLEAU = "__FRENCHNET_TABLEAU_DE_BORD"
+M.tableauDeBord = rawget(_G, CLE_TABLEAU)
+if type(M.tableauDeBord) ~= "table" then
+  M.tableauDeBord = { demarreA = M.maintenant() }
+  rawset(_G, CLE_TABLEAU, M.tableauDeBord)
+end
+
+--- Publie un instantane. Les cles absentes de 'valeurs' sont conservees.
+function M.publier(valeurs)
+  for cle, valeur in pairs(valeurs) do M.tableauDeBord[cle] = valeur end
+  M.tableauDeBord.majA = M.maintenant()
+end
+
 M.REPERTOIRE = REPERTOIRE
 
 return M

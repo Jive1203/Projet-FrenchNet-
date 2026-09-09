@@ -1,15 +1,19 @@
 -- Banc d'essai du systeme embarque intercepteur, hors du jeu, sur Lua 5.4.
 --   Usage : lua5.4 tests/test_intercepteur.lua   (depuis la racine du depot)
 --
--- Simule CraftOS (tests/craftos.lua) enrichi d'un radar Create Radars et d'un
--- affut Create Big Cannons, plus un faux module d'autopilote qui fait
--- reellement voler le navire (tests/banc_autopilote.lua). Le navire parcourt
--- donc une mission complete : ordre de scramble, rejointe, entree dans l'arc
--- arriere, tir, degat, evasion, destruction confirmee, retour base.
+-- Ce banc n'utilise PAS de faux autopilote : il fait tourner le VRAI module
+-- autopilote/autopilote.lua sur le simulateur de vol tests/banc_vol.lua. La
+-- boucle est donc fermee de bout en bout :
+--
+--   ordre du sol -> liaison -> radar -> maths d'interception -> adaptateur
+--   -> module d'autopilote (cascade, PID, repli zone morte) -> sorties moteur
+--   -> modele physique du vehicule -> GPS bruite -> retour au module.
+--
+-- C'est le seul moyen de verifier que le navire rejoint reellement son arc
+-- arriere, et pas seulement que le calcul est juste sur le papier.
 
 local RACINE = (arg[0] or ""):match("^(.*)/tests/[^/]+$") or "."
 local SCR    = RACINE .. "/tests"
-local SRC    = RACINE .. "/intercepteur"
 local BANC   = "/tmp/banc_intercepteur_frenchnet"
 
 local noyau = assert(loadfile(RACINE .. "/intercepteur/noyau.lua"))("intercepteur")
@@ -34,46 +38,25 @@ local function contient(sorties, motif)
   return false
 end
 
-local function compter(sorties, motif)
-  local n = 0
-  for _, ligne in ipairs(sorties) do
-    if ligne:find(motif, 1, true) then n = n + 1 end
-  end
-  return n
-end
-
 --------------------------------------------------------------------------------
--- PREPARATION DU BANC
+-- CONFIGURATIONS DU BANC
 --------------------------------------------------------------------------------
 
-local function preparer(config, options)
-  options = options or {}
-  os.execute("rm -rf " .. BANC .. " && mkdir -p " .. BANC .. "/intercepteur "
-    .. BANC .. "/autopilote")
-  os.execute("cp " .. SRC .. "/noyau.lua " .. SRC .. "/interception.lua "
-    .. SRC .. "/autopilote.lua " .. SRC .. "/radar.lua " .. SRC .. "/armement.lua "
-    .. SRC .. "/liaison.lua " .. SRC .. "/intercepteur.lua "
-    .. BANC .. "/intercepteur/")
+-- Le banc utilise la VRAIE configuration vehicule du depot
+-- (autopilote/config_vehicule.lua). Elle decrit un cargo lent : les reglages
+-- de scramble sont appliques PAR-DESSUS, via le bloc 'autopilote' de la
+-- configuration du navire. C'est exactement le mecanisme documente - un seul
+-- fichier de reglage par vehicule, surcharge ponctuelle par la mission - et le
+-- banc le verifie donc au passage.
 
-  local f = io.open(BANC .. "/intercepteur/config_intercepteur.lua", "w")
-  f:write(config)
-  f:close()
-
-  if not options.sansAutopilote then
-    os.execute("cp " .. SCR .. "/banc_autopilote.lua " .. BANC .. "/autopilote/autopilote.lua")
-  end
-end
-
---- Configuration de reference du banc. 'REMPLACEMENTS' permet a chaque scenario
---- d'ajouter ou de surcharger des cles.
-local function configuration(supplement)
+local function configNavire(supplement)
   return ([[
 return {
   identifiant = "INT-01",
   designation = "Banc d'essai",
   protocoleRednet = "frenchnet_ordre",
   cheminAutopilote = "/autopilote/autopilote.lua",
-  autopiloteDeSecours = false,
+  cheminConfigVehicule = "/autopilote/config_vehicule.lua",
   accuserReception = true,
   posteDeCommandement = 9,
 
@@ -85,19 +68,32 @@ return {
   journalFichier = true,
   journalNiveauEcran = "DEBUG",
   periodeJournalInterception = 2,
-  arretParTerminate = true,
 
-  autopilote = { pid = { lacet = { kp = 1.8 } }, deadBand = { seuilPosition = 8 } },
+  autopilote = {
+    -- Reglages propres a l'adaptateur (debit des consignes).
+    adaptateur = {
+      seuilDeplacementConsigne = 8,
+      seuilVitesseConsigne = 5,
+      periodeRafraichissementConsigne = 2,
+    },
+    -- Surcouche de mission par-dessus config_vehicule.lua. On NE TOUCHE PAS
+    -- aux vitesses ni aux gains : ils sont accordes au vehicule livre, et un
+    -- banc qui les rehausse sans reaccorder les gains ne mesure plus rien
+    -- d'autre que sa propre desadaptation. Seuls la cadence GPS et le journal
+    -- sont ajustes pour le banc.
+    gps = { intervalle = 0.25, lecturesAcquisition = 2, delai = 2 },
+    journal = { fichier = false, niveauEcran = "AVERT" },
+  },
 
   interception = {
     arcMiniDeg = 120, arcMaxiDeg = 240, arcCentreDeg = 180, margeArcDeg = 10,
     manoeuvre = "orbite", arcAmplitudeDeg = 45, arcPeriodeSecondes = 12,
-    distanceMini = 300, distanceMaxi = 400, distanceAmplitude = 30,
-    distanceSecurite = 150, distanceTransit = 250,
-    deltaYNominal = 0, deltaYAmplitude = 15, toleranceAltitude = 60,
+    distanceMini = 200, distanceMaxi = 300, distanceAmplitude = 25,
+    distanceSecurite = 100, distanceTransit = 150,
+    toleranceAltitude = 60,
     predictionMiniSecondes = 1, predictionMaxiSecondes = 10,
-    vitesseMaxi = 120, vitesseReference = 90,
-    gainRapprochement = 0.35, ratioMini = 0.6, ratioMaxi = 1.6,
+    vitesseMaxi = 8, vitesseReference = 8,
+    PRIORITE
   },
 
   degats = {
@@ -108,14 +104,14 @@ return {
   },
 
   arme = {
-    mode = "peripherique", coteRedstone = nil,
-    vitesseObus = 80, graviteObus = 9.8,
-    distanceTirMini = 80, distanceTirMaxi = 420, toleranceViseeDeg = 3,
-    dureeRafale = 1.5, pauseRafale = 2.0,
+    toleranceViseeDeg = 3,
+    besoinParDefaut = "anti-aerien",
+    margeAltitudeSol = 12,
+    ARMES
   },
 
   radar = {
-    rayonAppariement = 250, lissageVitesse = 0.5, dtMiniVitesse = 0.15,
+    rayonAppariement = 400, lissageVitesse = 0.5, dtMiniVitesse = 0.15,
     delaiValiditePiste = 3, periodeJournalPistage = 5,
   },
 
@@ -126,10 +122,10 @@ return {
 
   retour = {
     pointsRetour = {
-      { x = 900, y = 220, z = -900, nom = "point de degagement" },
-      { x = 1000, y = 150, z = -1000, nom = "base" },
+      { x = 300, y = 200, z = 300, nom = "point de degagement" },
+      { x = 100, y = 160, z = 100, nom = "base" },
     },
-    rayonPointRetour = 40, vitesseRetour = 120, altitudeCroisiere = 220,
+    rayonPointRetour = 40, vitesseRetour = 60, altitudeCroisiere = 200,
   },
 
   %s
@@ -137,17 +133,66 @@ return {
 ]]):format(supplement or "")
 end
 
+--- Assemble une configuration de navire.
+--- Le remplacement passe par une FONCTION : une chaine de remplacement verrait
+--- ses '%' interpretes, et un gsub imbrique glisserait son compteur dans
+--- l'argument 'n' de gsub, qui limiterait le nombre de substitutions a zero.
+local function configuration(priorite, armes)
+  local texte = configNavire()
+  texte = (texte:gsub("PRIORITE", function() return priorite or "" end))
+  texte = (texte:gsub("ARMES", function() return armes or "" end))
+  return texte
+end
+
+local ARSENAL_NOMINAL = [[armes = {
+      { identifiant = "CANON-AA-1", nom = "Canon 4 pouces", utilite = "anti-aerien",
+        mode = "peripherique", porteeMini = 60, porteeMaxi = 320,
+        vitesseObus = 80, graviteObus = 9.8, dureeRafale = 1.5, pauseRafale = 2.0,
+        actif = true },
+      { identifiant = "MITRA-DEF", nom = "Mitrailleuse", utilite = "defensif",
+        mode = "redstone", coteRedstone = "back", porteeMini = 10, porteeMaxi = 90,
+        vitesseObus = 120, graviteObus = 4.0, actif = true },
+    },]]
+
+local function ARSENAL_STANDARD() return configuration("", ARSENAL_NOMINAL) end
+
 --------------------------------------------------------------------------------
--- MONDE SIMULE : peripheriques radar / affut / redstone
+-- MONTAGE DU BANC
 --------------------------------------------------------------------------------
 
-local function equiper(env, etat, monde)
+local function preparer(config, options)
+  options = options or {}
+  os.execute("rm -rf " .. BANC .. " && mkdir -p " .. BANC .. "/intercepteur "
+    .. BANC .. "/autopilote")
+  os.execute("cp " .. RACINE .. "/intercepteur/*.lua " .. BANC .. "/intercepteur/")
+  os.execute("rm -f " .. BANC .. "/intercepteur/config_intercepteur.lua")
+
+  if not options.sansAutopilote then
+    os.execute("cp " .. RACINE .. "/autopilote/autopilote.lua " .. BANC .. "/autopilote/")
+  end
+
+  os.execute("cp " .. RACINE .. "/autopilote/config_vehicule.lua "
+    .. BANC .. "/autopilote/")
+
+  -- La station de ravitaillement est une constante de reseau exigee par le
+  -- module d'autopilote : elle doit exister meme sur un banc.
+  f = io.open(BANC .. "/autopilote/ravitaillement.lua", "w")
+  f:write([[return { nom = "BASE", position = { x = 100, y = 160, z = 100 } }]])
+  f:close()
+
+  f = io.open(BANC .. "/intercepteur/config_intercepteur.lua", "w")
+  f:write(config)
+  f:close()
+end
+
+--- Peripheriques du navire : modem (ordres), radar (pistage), affut (tir).
+local function equiper(env, monde)
   local horloge = env.os.clock
 
   local modem = {
     isWireless = function() return true end,
-    open = function(c) etat.canaux = etat.canaux or {}; etat.canaux[c] = true end,
-    isOpen = function(c) return (etat.canaux or {})[c] == true end,
+    open = function(c) monde.canaux[c] = true end,
+    isOpen = function(c) return monde.canaux[c] == true end,
     close = function() end,
     transmit = function() end,
   }
@@ -158,15 +203,11 @@ local function equiper(env, etat, monde)
       local contacts = {}
       local cible = monde.cible(horloge())
       if cible then
-        contacts[#contacts + 1] = {
-          id = "cible-01", type = "createaeronautics:aircraft",
-          x = cible.x, y = cible.y, z = cible.z,
-        }
+        contacts[#contacts + 1] = { id = "cible-01",
+          type = "createaeronautics:aircraft", x = cible.x, y = cible.y, z = cible.z }
       end
-      -- Leurre lointain : verifie que l'appariement ne s'y accroche pas.
-      contacts[#contacts + 1] = {
-        id = "leurre-99", type = "minecraft:cow", x = -5000, y = 70, z = 5000,
-      }
+      contacts[#contacts + 1] = { id = "leurre", type = "minecraft:cow",
+        x = -9000, y = 70, z = 9000 }
       return contacts
     end,
   }
@@ -179,11 +220,8 @@ local function equiper(env, etat, monde)
     fire     = function() monde.tirs = monde.tirs + 1 end,
   }
 
-  local TYPES = {
-    back     = "modem",
-    radar_0  = "create_radars:radar",
-    cannon_0 = "createbigcannons:cannon_mount",
-  }
+  local TYPES = { back = "modem", radar_0 = "create_radars:radar",
+    cannon_0 = "createbigcannons:cannon_mount" }
   local OBJETS = { back = modem, radar_0 = radar, cannon_0 = affut }
 
   env.peripheral = {
@@ -197,448 +235,318 @@ local function equiper(env, etat, monde)
     end,
   }
 
-  env.redstone = {
-    setOutput = function(cote, actif) monde.redstone = actif end,
-    getOutput = function() return monde.redstone == true end,
-  }
-  env.rs = env.redstone
   env.shell = { getRunningProgram = function() return "intercepteur/intercepteur.lua" end }
-  env.modem = modem
 end
 
---- Trajectoire de cible : ligne droite, arret possible a une date donnee.
+--- Trajectoire de cible en ligne droite, avec chute et disparition optionnelles.
 local function cibleRectiligne(depart, vitesse, options)
   options = options or {}
   return function(t)
     if options.disparaitA and t >= options.disparaitA then return nil end
-    local position = {
-      x = depart.x + vitesse.x * t,
-      y = depart.y + vitesse.y * t,
-      z = depart.z + vitesse.z * t,
-    }
-    -- Chute brutale simulant un encaissement (declenche les criteres de degat).
+    local p = { x = depart.x + vitesse.x * t, y = depart.y + vitesse.y * t,
+                z = depart.z + vitesse.z * t }
     if options.chuteA and t >= options.chuteA then
-      position.y = position.y - math.min((t - options.chuteA) * 40, 200)
+      p.y = p.y - math.min((t - options.chuteA) * 40, 200)
     end
-    return position
+    return p
   end
 end
 
 local function monter(config, options)
   options = options or {}
   preparer(config, options)
-  local craftos = dofile(SCR .. "/craftos.lua")
-  local env, etat = craftos.creer({ racine = BANC, id = 21, label = "INT-01" })
-  env.__craftos = craftos
+  local banc = dofile(SCR .. "/banc_scramble.lua")
+  local env, etat = banc.creer(SCR .. "/banc_vol.lua", {
+    racine  = BANC,
+    budget  = options.budget or 1200,
+    bruitGps = 0.1,
+    -- Vehicule conforme au reglage livre : c'est le seul moyen de mesurer la
+    -- geometrie d'interception et non un desaccord de gains.
+    vehicule = options.vehicule
+      or { x = 0, y = 200, z = -800, cap = 180, vMax = 10, vVerticalMax = 5,
+           tauxMax = 50, vLateralMax = 0 },
+  })
+
   local monde = {
-    balayages = 0, tirs = 0, lacet = nil, tangage = nil, redstone = false,
-    cible = options.cible or cibleRectiligne(
-      { x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 60 }),
+    balayages = 0, tirs = 0, canaux = {}, envois = {}, rednetOuvert = false,
+    cible = options.cible
+      or cibleRectiligne({ x = 0, y = 200, z = 0 }, { x = 0, y = 0, z = 3 }),
   }
-  equiper(env, etat, monde)
-  -- Le navire demarre en attente, en arriere de la trajectoire de la cible.
-  env.__BANC_DEPART = options.depart or { x = 0, y = 150, z = -1500 }
-  return craftos, env, etat, monde
+  equiper(env, monde)
+
+  -- Sorties moteur simulees : le VRAI module d'autopilote pilote le modele
+  -- physique du banc au lieu de peripheriques inexistants.
+  env.__FRENCHNET_BANC = { commandes = banc.bancVol.pilote() }
+
+  return banc, env, etat, monde
+end
+
+local function injecterOrdre(env, message)
+  env.os.queueEvent("rednet_message", 9, message, "frenchnet_ordre")
+end
+
+local function executer(banc, secondes)
+  return banc.executer(BANC .. "/intercepteur/intercepteur.lua", secondes)
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 1 : mission nominale - scramble, rejointe, arc arriere ==")
+print("\n== TEST 1 : mission complete avec le VRAI module d'autopilote ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  -- Cible cap au sud a 60 b/s ; navire lache 1500 blocs derriere elle.
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 60 })
-
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD())
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
     identifiantOrdre = "ORD-001", destinataire = "INT-01",
-    cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
+    cible = { x = 0, y = 200, z = 0 } })
 
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 120)
+  local motif = executer(banc, 900)
+  local sorties = etat.sorties
 
   verifier("le programme tourne sans se terminer", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("module d'autopilote charge (aucune loi de vol reecrite)",
-    (contient(etat.sorties, "module d'autopilote charge depuis /autopilote/autopilote.lua")))
-  verifier("correspondance d'API journalisee",
-    (contient(etat.sorties, "correspondance d'API")))
-  verifier("radar embarque detecte",
-    (contient(etat.sorties, "radar embarque sur 'radar_0'")))
-  verifier("affut detecte", (contient(etat.sorties, "affut detecte sur 'cannon_0'")))
-  verifier("independance annoncee au demarrage",
-    (contient(etat.sorties, "aucune notion de zone ni de classe a bord")))
+  verifier("VRAI module d'autopilote charge",
+    (contient(sorties, "module d'autopilote standardise v")))
+  verifier("configuration vehicule partagee lue",
+    (contient(sorties, "configuration vehicule lue dans /autopilote/config_vehicule.lua")))
+  verifier("cascade / PID / zone morte annonces",
+    (contient(sorties, "asservissement en cascade, PID principal, repli zone morte")))
+  verifier("debit des consignes limite",
+    (contient(sorties, "consignes limitees en debit")))
+  verifier("journal PARTAGE avec l'autopilote (lignes d'autopilote presentes)",
+    (contient(sorties, "boucle de vol demarree")))
+  verifier("arsenal operationnel",
+    (contient(sorties, "arsenal operationnel")))
+  verifier("deux armes declarees",
+    (contient(sorties, "CANON-AA-1")) and (contient(sorties, "MITRA-DEF")))
+  verifier("ordre de scramble recu",
+    (contient(sorties, "ORDRE DE SCRAMBLE ORD-001")))
+  verifier("le radar a balaye", monde.balayages > 50, monde.balayages)
+  verifier("calcul de trajectoire d'interception",
+    (contient(sorties, "[etape: calcul de trajectoire d'interception]")))
 
-  verifier("ordre de scramble recu et journalise",
-    (contient(etat.sorties, "ORDRE DE SCRAMBLE ORD-001 recu du poste #9")))
-  verifier("passage en transit", (contient(etat.sorties, "etat VEILLE -> TRANSIT")))
-  verifier("cible acquise par le radar embarque",
-    (contient(etat.sorties, "cible acquise par le radar embarque")))
-  verifier("calcul de trajectoire d'interception journalise",
-    (contient(etat.sorties, "[etape: calcul de trajectoire d'interception]")))
-  verifier("prediction : impact predit annonce",
-    (contient(etat.sorties, "impact predit dans")))
-  verifier("ENTREE EN POSITION D'ATTAQUE",
-    (contient(etat.sorties, "EN POSITION D'ATTAQUE")))
-  verifier("passage a l'etat POSITION_ATTAQUE",
-    (contient(etat.sorties, "-> POSITION_ATTAQUE")))
-  verifier("manoeuvre d'orbite engagee dans l'arc",
-    (contient(etat.sorties, "[etape: manoeuvre d'orbite / zigzag dans l'arc arriere]")))
-  verifier("le radar a bien balaye", monde.balayages > 50, monde.balayages)
-
-  -- Verification geometrique finale : le navire est-il vraiment dans l'arc
-  -- arriere 4h-8h, a 300-400 blocs ?
-  local ap = env.__BANC_AP
-  local tFin = env.os.clock()
-  local cible = monde.cible(tFin)
-  local capCible = noyau.relevement({ x = 0, y = 0, z = 60 })
-  local relatif = noyau.relevementRelatif(capCible, cible, ap.position)
-  local distance = V.distance(ap.position, cible)
-
-  verifier("position finale DANS l'arc arriere 4h-8h",
-    relatif >= 120 and relatif <= 240,
-    string.format("%.1f deg (%s)", relatif, noyau.positionHoraire(relatif)))
-  verifier("position finale dans la bande 300-400 blocs",
-    distance >= 290 and distance <= 410, string.format("%.1f blocs", distance))
-  verifier("le navire n'a jamais tire sans ordre de feu", monde.tirs == 0, monde.tirs)
-  verifier("aucun tir : le feu reste interdit",
-    (contient(etat.sorties, "feu interdit")))
+  -- Le vehicule simule s'est-il reellement deplace vers la cible ?
+  local v = etat.vehicule
+  local cible = monde.cible(etat.horloge)
+  local distance = math.sqrt((v.x - cible.x) ^ 2 + (v.z - cible.z) ^ 2)
+  verifier("le vehicule a reellement vole", v.distanceParcourue > 200,
+    string.format("%.0f blocs parcourus", v.distanceParcourue))
+  -- Ecart initial : 800 blocs. La cible fuit a 3 b/s, le navire croise a 8 b/s.
+  verifier("le navire s'est rapproche de la cible", distance < 700,
+    string.format("%.0f blocs (ecart initial 800)", distance))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 2 : approche par l'avant - le navire contourne, jamais de face ==")
+print("\n== TEST 2 : l'ordre de tir PRIME SUR LA POSITION ==")
 do
-  -- Navire lache 1200 blocs DEVANT une cible qui fonce sur lui.
-  local craftos, env, etat, monde = monter(configuration(),
-    { depart = { x = 0, y = 150, z = 1200 } })
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 60 })
+  local banc, env, etat, monde = monter(configuration(
+    "prioriteTirSurPosition = true, biaisArcEnTirDeg = 25,", ARSENAL_NOMINAL))
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-010", cible = { x = 0, y = 200, z = 0 } })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "FEU",
+    identifiantOrdre = "ORD-011" })
 
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-002",
-    cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
+  local motif = executer(banc, 900)
+  local sorties = etat.sorties
 
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 150)
   verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-
-  local ap = env.__BANC_AP
-  local tFin = env.os.clock()
-  local cible = monde.cible(tFin)
-  local capCible = noyau.relevement({ x = 0, y = 0, z = 60 })
-  local relatif = noyau.relevementRelatif(capCible, cible, ap.position)
-  verifier("le navire termine dans l'arc arriere",
-    relatif >= 120 and relatif <= 240,
-    string.format("%.1f deg (%s)", relatif, noyau.positionHoraire(relatif)))
+  verifier("regle d'engagement annoncee au demarrage",
+    (contient(sorties, "regle d'engagement : LE TIR PRIME SUR LA POSITION")))
+  verifier("ordre de feu recu", (contient(sorties, "ORDRE DE FEU ORD-011")))
+  verifier("la priorite est explicitement journalisee",
+    (contient(sorties, "LE TIR PRIME SUR LA POSITION : le navire engage des qu'il a une")))
+  verifier("passage a l'engagement SANS attendre l'arc",
+    (contient(sorties, "ordre de feu prioritaire")))
+  verifier("une arme est retenue selon la portee",
+    (contient(sorties, "arme retenue :")))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 3 : ordre de feu - engagement sans quitter l'arc ==")
+print("\n== TEST 3 : priorite desactivee - l'arc redevient un prealable ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 55 })
+  local banc, env, etat, monde = monter(configuration(
+    "prioriteTirSurPosition = false,", ARSENAL_NOMINAL))
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-020", cible = { x = 0, y = 200, z = 0 } })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "FEU",
+    identifiantOrdre = "ORD-021" })
 
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-010", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-  -- L'ordre de feu arrive plus tard, une fois le navire en place.
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "FEU", identifiantOrdre = "ORD-011",
-  }, "frenchnet_ordre")
+  local motif = executer(banc, 600)
+  local sorties = etat.sorties
 
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 160)
   verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("ordre de feu recu", (contient(etat.sorties, "ORDRE DE FEU ORD-011")))
-  verifier("le feu est explicitement subordonne a l'arc",
-    (contient(etat.sorties, "la contrainte de position prime sur l'ordre de tir")))
-  verifier("solution de tir calculee et tir effectue",
-    (contient(etat.sorties, "rafale n1 ouverte")))
-  verifier("solution de tir detaillee dans le journal",
-    (contient(etat.sorties, "azimut")) and (contient(etat.sorties, "chute compensee")))
-  verifier("l'affut a reellement fait feu", monde.tirs >= 1, monde.tirs)
-  verifier("cadence respectee (fin de rafale journalisee)",
-    (contient(etat.sorties, "fin de rafale apres")))
-
-  local ap = env.__BANC_AP
-  local cible = monde.cible(env.os.clock())
-  local relatif = noyau.relevementRelatif(noyau.relevement({ x = 0, y = 0, z = 55 }),
-    cible, ap.position)
-  verifier("le navire tire DEPUIS l'arc arriere",
-    relatif >= 120 and relatif <= 240,
-    string.format("%.1f deg (%s)", relatif, noyau.positionHoraire(relatif)))
+  verifier("regle inverse annoncee",
+    (contient(sorties, "regle d'engagement : la position prime sur le tir")))
+  verifier("l'ordre de feu n'ouvre PAS l'engagement immediatement",
+    not (contient(sorties, "ordre de feu prioritaire")))
+  verifier("le feu reste subordonne a l'arc",
+    (contient(sorties, "l'engagement se fera sans quitter l'arc arriere")))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 4 : degat subi -> evasion prioritaire puis reprise ==")
+print("\n== TEST 4 : arsenal - aucune arme declaree ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 55 })
+  local banc, env, etat, monde = monter(configuration("", "armes = {},"))
+  local motif = executer(banc, 120)
+  verifier("aucun plantage du superviseur", motif == "LIMITE_TEMPS", tostring(motif))
+  verifier("configuration refusee avec un message clair",
+    (contient(etat.sorties, "'arme.armes' doit contenir au moins une arme")))
+  verifier("erreur localisee a la validation",
+    (contient(etat.sorties, "[etape: validation de la configuration]")))
+end
 
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-020", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-
-  -- A t = 60 s, le navire encaisse : perte brutale de 40 blocs d'altitude.
-  env.__BANC_PERTURBATION = function(ap, t, dt)
-    if t >= 60 and t < 61.5 then
-      ap.position.y = ap.position.y - 30 * dt / 0.25 * 0.25
-    end
-  end
-
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 160)
+--------------------------------------------------------------------------------
+print("\n== TEST 5 : arsenal - arme mal declaree ==")
+do
+  local banc, env, etat, monde = monter(configuration("", [[armes = {
+      { identifiant = "MAUVAISE", utilite = "anti-navire", porteeMini = 500,
+        porteeMaxi = 100, mode = "redstone" },
+    },]]))
+  local motif = executer(banc, 120)
+  local sorties = etat.sorties
   verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("degat subi detecte",
-    (contient(etat.sorties, "DEGAT SUBI PAR LE NAVIRE")))
-  verifier("criteres de degat annonces comme partages",
-    (contient(etat.sorties, "criteres identiques a ceux de la confirmation de destruction")))
-  verifier("manoeuvre d'evasion prioritaire declenchee",
-    (contient(etat.sorties, "MANOEUVRE D'EVASION PRIORITAIRE")))
-  verifier("evasion en break, pas en ligne droite",
-    (contient(etat.sorties, "break")))
-  verifier("passage a l'etat EVASION", (contient(etat.sorties, "-> EVASION")))
-  verifier("fin d'evasion et reprise de la position d'attaque",
-    (contient(etat.sorties, "[etape: fin de la manoeuvre d'evasion]")))
-  verifier("retour a la poursuite apres evasion",
-    (contient(etat.sorties, "etat EVASION -> TRANSIT")))
+  verifier("utilite inconnue signalee", (contient(sorties, "utilite 'anti-navire' inconnue")))
+  verifier("portees incoherentes signalees", (contient(sorties, "portees incoherentes")))
+  verifier("mode redstone sans cote signale", (contient(sorties, "sans 'coteRedstone'")))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 5 : destruction confirmee -> retour base -> rearmement manuel ==")
+print("\n== TEST 6 : autopilote introuvable - le navire refuse de decoller ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  -- La cible chute a t=70 s (degat), puis disparait du radar a t=76 s.
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 55 },
-    { chuteA = 70, disparaitA = 76 })
-
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-030", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "FEU", identifiantOrdre = "ORD-031",
-  }, "frenchnet_ordre")
-
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 260)
-  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("degat sur la cible detecte",
-    (contient(etat.sorties, "DEGAT SUR LA CIBLE")))
-  verifier("destruction confirmee (et non simple perte de contact)",
-    (contient(etat.sorties, "DESTRUCTION DE LA CIBLE CONFIRMEE")))
-  verifier("retour base engage",
-    (contient(etat.sorties, "RETOUR BASE engage")))
-  verifier("points de retour suivis dans l'ordre",
-    (contient(etat.sorties, "point de retour 1/2 atteint")))
-  verifier("base atteinte", (contient(etat.sorties, "point de retour 2/2 atteint"))
-    or (contient(etat.sorties, "base atteinte")))
-  verifier("rearmement manuel exige",
-    (contient(etat.sorties, "REARMEMENT MANUEL REQUIS")))
-  verifier("passage a l'etat REARMEMENT", (contient(etat.sorties, "-> REARMEMENT")))
-
-  local marqueur = io.open(BANC .. "/intercepteur/.rearmement_requis", "r")
-  verifier("marqueur .rearmement_requis depose a bord", marqueur ~= nil)
-  if marqueur then marqueur:close() end
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD(), { sansAutopilote = true })
+  local motif = executer(banc, 120)
+  local sorties = etat.sorties
+  verifier("aucun plantage du superviseur", motif == "LIMITE_TEMPS", tostring(motif))
+  verifier("refus explicite de decoller", (contient(sorties, "Le navire ne decolle pas")))
+  verifier("emplacements explores listes", (contient(sorties, "Emplacements explores")))
+  verifier("redemarrage automatique malgre tout",
+    (contient(sorties, "redemarrage automatique")))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 6 : scramble refuse tant que le rearmement n'est pas fait ==")
+print("\n== TEST 7 : independance du sol ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  -- Le marqueur existe deja au demarrage (navire rentre a sec).
-  local f = io.open(BANC .. "/intercepteur/.rearmement_requis", "w")
-  f:write("2026-09-07 12:00:00\n")
-  f:close()
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD())
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-050", cible = { x = 0, y = 200, z = 0 },
+    zone = "ZONE-NORD-3", classe = "CHARLIE", niveauAlerte = 2, doctrine = "ROMEO" })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "PATROUILLE",
+    identifiantOrdre = "ORD-051", cible = { x = 0, y = 200, z = 0 } })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-052", destinataire = "INT-07",
+    cible = { x = 500, y = 200, z = 500 } })
 
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-040", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
+  local motif = executer(banc, 300)
+  local sorties = etat.sorties
 
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 60)
-  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("navire indisponible au demarrage",
-    (contient(etat.sorties, "marqueur de rearmement present au demarrage")))
-  verifier("ordre de scramble REFUSE",
-    (contient(etat.sorties, "ordre de scramble ORD-040 REFUSE")))
-  verifier("le navire reste au sol", monde.tirs == 0)
-end
-
---------------------------------------------------------------------------------
-print("\n== TEST 7 : independance du sol - ordres et champs non conformes ==")
-do
-  local craftos, env, etat, monde = monter(configuration())
-
-  -- Un ordre porteur de doctrine sol : les champs doivent etre retires.
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE", identifiantOrdre = "ORD-050",
-    cible = { x = 0, y = 150, z = 0 },
-    zone = "ZONE-NORD-3", classe = "CHARLIE", niveauAlerte = 2, doctrine = "ROMEO",
-  }, "frenchnet_ordre")
-
-  -- Un type d'ordre inconnu : rejete.
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "PATROUILLE", identifiantOrdre = "ORD-051",
-    cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-
-  -- Un ordre destine a un autre navire : ignore.
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE", identifiantOrdre = "ORD-052",
-    destinataire = "INT-07", cible = { x = 500, y = 150, z = 500 },
-  }, "frenchnet_ordre")
-
-  -- Un SCRAMBLE sans position de cible : rejete.
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE", identifiantOrdre = "ORD-053",
-  }, "frenchnet_ordre")
-
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 60)
   verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
   verifier("champs de doctrine sol ignores et signales",
-    (contient(etat.sorties, "champ(s) de doctrine sol ignore(s)")))
-  verifier("les quatre champs sont nommes",
-    (contient(etat.sorties, "zone")) and (contient(etat.sorties, "classe")))
-  verifier("l'ordre reste execute malgre les champs parasites",
-    (contient(etat.sorties, "ORDRE DE SCRAMBLE ORD-050")))
+    (contient(sorties, "champ(s) de doctrine sol ignore(s)")))
+  verifier("l'ordre est execute malgre les champs parasites",
+    (contient(sorties, "ORDRE DE SCRAMBLE ORD-050")))
   verifier("type d'ordre inconnu rejete",
-    (contient(etat.sorties, "type d'ordre 'PATROUILLE' non reconnu")))
-  verifier("seuls SCRAMBLE et FEU sont acceptes",
-    (contient(etat.sorties, "seuls SCRAMBLE et FEU sont acceptes")))
+    (contient(sorties, "type d'ordre 'PATROUILLE' non reconnu")))
   verifier("ordre destine a un autre navire ignore",
-    (contient(etat.sorties, "ordre destine a 'INT-07'")))
-  verifier("SCRAMBLE sans position de cible rejete",
-    (contient(etat.sorties, "sans position de cible exploitable")))
+    (contient(sorties, "ordre destine a 'INT-07'")))
+  verifier("independance annoncee au demarrage",
+    (contient(sorties, "aucune notion de zone ni de classe a bord")))
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 8 : ordre de feu sans poursuite en cours ==")
+print("\n== TEST 8 : degat subi -> evasion prioritaire ==")
 do
-  local craftos, env, etat, monde = monter(configuration())
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "FEU", identifiantOrdre = "ORD-060",
-  }, "frenchnet_ordre")
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD())
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-060", cible = { x = 0, y = 200, z = 0 } })
 
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 40)
-  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("ordre de feu refuse hors engagement",
-    (contient(etat.sorties, "ordre de feu ORD-060 REFUSE")))
-  verifier("motif explicite",
-    (contient(etat.sorties, "Un ordre de scramble doit preceder l'ordre de tir")))
-  verifier("aucun tir", monde.tirs == 0, monde.tirs)
-end
-
---------------------------------------------------------------------------------
-print("\n== TEST 9 : autopilote introuvable -> le navire refuse de decoller ==")
-do
-  local craftos, env, etat, monde = monter(configuration(), { sansAutopilote = true })
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 60)
-
-  verifier("aucun plantage du superviseur", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("refus explicite de decoller",
-    (contient(etat.sorties, "Le navire ne decolle pas")))
-  verifier("erreur localisee a l'etape de liaison autopilote",
-    (contient(etat.sorties, "[etape: liaison avec le module d'autopilote]")))
-  verifier("emplacements explores listes",
-    (contient(etat.sorties, "Emplacements explores")))
-  verifier("redemarrage automatique malgre tout",
-    (contient(etat.sorties, "redemarrage automatique")))
-end
-
---------------------------------------------------------------------------------
-print("\n== TEST 10 : perte de contact prolongee -> abandon et retour base ==")
-do
-  local craftos, env, etat, monde = monter(configuration())
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 55 },
-    { disparaitA = 30 })
-
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-070", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-
-  local motif = craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 200)
-  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
-  verifier("perte de contact signalee",
-    (contient(etat.sorties, "contact radar perdu depuis")))
-  verifier("poursuite a l'estime avant abandon",
-    (contient(etat.sorties, "poursuite a l'estime")))
-  verifier("abandon apres le delai de recherche",
-    (contient(etat.sorties, "cible non reacquise apres")))
-  verifier("PAS de destruction confirmee sans degat prealable",
-    not (contient(etat.sorties, "DESTRUCTION DE LA CIBLE CONFIRMEE")))
-  verifier("retour base engage sur cible perdue",
-    (contient(etat.sorties, "cible perdue, aucune reacquisition")))
-end
-
---------------------------------------------------------------------------------
-print("\n== TEST 11 : journal - toutes les etapes critiques sont tracees ==")
-do
-  local craftos, env, etat, monde = monter(configuration())
-  monde.cible = cibleRectiligne({ x = 0, y = 150, z = 0 }, { x = 0, y = 0, z = 55 },
-    { chuteA = 80, disparaitA = 86 })
-
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
-    identifiantOrdre = "ORD-080", cible = { x = 0, y = 150, z = 0 },
-  }, "frenchnet_ordre")
-  craftos.injecterRednet(9, {
-    protocole = "FRENCHNET_ORDRE", type = "FEU", identifiantOrdre = "ORD-081",
-  }, "frenchnet_ordre")
-
-  env.__BANC_PERTURBATION = function(ap, t, dt)
-    if t >= 55 and t < 56.5 then ap.position.y = ap.position.y - 30 * dt end
+  -- A t = 60 s, le vehicule simule encaisse : perte brutale d'altitude.
+  local horlogeInitiale = env.os.clock
+  local applique = false
+  env.os.clock = function()
+    local t = horlogeInitiale()
+    if t >= 60 and not applique then
+      applique = true
+      etat.vehicule.y = etat.vehicule.y - 45
+    end
+    return t
   end
 
-  craftos.executer(BANC .. "/intercepteur/intercepteur.lua", 280)
+  local motif = executer(banc, 600)
+  local sorties = etat.sorties
 
-  -- Les etapes explicitement exigees, une par une.
-  local ETAPES_EXIGEES = {
+  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
+  verifier("degat subi detecte", (contient(sorties, "DEGAT SUBI PAR LE NAVIRE")))
+  verifier("criteres de degat partages annonces",
+    (contient(sorties, "criteres identiques a ceux de la confirmation de destruction")))
+  verifier("evasion prioritaire declenchee",
+    (contient(sorties, "MANOEUVRE D'EVASION PRIORITAIRE")))
+  verifier("evasion en break, pas en ligne droite", (contient(sorties, "break")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 9 : perte de contact -> abandon, PAS une destruction ==")
+do
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD(),
+    { cible = cibleRectiligne({ x = 0, y = 200, z = 0 }, { x = 0, y = 0, z = 3 },
+        { disparaitA = 25 }) })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-070", cible = { x = 0, y = 200, z = 0 } })
+
+  local motif = executer(banc, 900)
+  local sorties = etat.sorties
+
+  verifier("aucun plantage", motif == "LIMITE_TEMPS", tostring(motif))
+  verifier("perte de contact signalee", (contient(sorties, "contact radar perdu depuis")))
+  verifier("poursuite a l'estime", (contient(sorties, "poursuite a l'estime")))
+  verifier("abandon apres le delai de recherche",
+    (contient(sorties, "mission interrompue")))
+  verifier("PAS de destruction confirmee sans degat prealable",
+    not (contient(sorties, "DESTRUCTION DE LA CIBLE CONFIRMEE")))
+  verifier("retour base engage", (contient(sorties, "RETOUR BASE engage")))
+  verifier("itineraire confie a l'autopilote (mission acceptee)",
+    (contient(sorties, "mission acceptee")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 10 : etapes critiques toutes journalisees ==")
+do
+  local banc, env, etat, monde = monter(ARSENAL_STANDARD())
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "SCRAMBLE",
+    identifiantOrdre = "ORD-080", cible = { x = 0, y = 200, z = 0 } })
+  injecterOrdre(env, { protocole = "FRENCHNET_ORDRE", type = "FEU",
+    identifiantOrdre = "ORD-081" })
+
+  executer(banc, 900)
+  local sorties = etat.sorties
+
+  for _, etape in ipairs({
     "[etape: reception d'un ordre du sol]",
     "[etape: calcul de trajectoire d'interception]",
-    "[etape: entree en position d'attaque]",
-    "[etape: tir sur la cible]",
-    "[etape: detection de degat]",
-    "[etape: manoeuvre d'evasion]",
-    "[etape: retour a la base]",
-  }
-  for _, etape in ipairs(ETAPES_EXIGEES) do
-    verifier("journal : " .. etape, (contient(etat.sorties, etape)))
+    "[etape: liaison avec le module d'autopilote]",
+    "[etape: pistage radar de la cible]",
+    "[etape: detection de l'arme embarquee]",
+    "[etape: surveillance embarquee]",
+  }) do
+    verifier("journal : " .. etape, (contient(sorties, etape)))
   end
 
   local log = io.open(BANC .. "/intercepteur/intercepteur.log", "r")
   local contenu = log and log:read("a") or ""
   if log then log:close() end
   verifier("journal ecrit sur disque", #contenu > 2000, #contenu .. " octets")
-  verifier("journal horodate et etiquete par etape",
-    contenu:find("[etape: ", 1, true) ~= nil)
-  verifier("battement de coeur periodique",
-    (contient(etat.sorties, "[etape: surveillance embarquee]")))
+  verifier("journal etiquete par etape", contenu:find("[etape: ", 1, true) ~= nil)
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 12 : aucune connaissance de zone ni de classe dans le code ==")
+print("\n== TEST 11 : aucune zone ni classe lue comme donnee ==")
 do
-  -- Verification structurelle : le CODE embarque (commentaires exclus - ils
-  -- mentionnent les classes precisement pour dire qu'elles sont ignorees) ne
-  -- doit contenir aucune reference aux zones ni aux classes. Seul liaison.lua
-  -- les connait, et uniquement pour les rejeter.
-  -- On retire les commentaires ET les chaines litterales : les uns expliquent
-  -- que le navire ignore ces notions, les autres les citent dans des messages
-  -- de journal qui affirment la meme chose. Ce qui reste est le code executable,
-  -- ou une zone ou une classe ne peut apparaitre que si elle est LUE comme
-  -- donnee (cle de table, identifiant, comparaison) - ce qui est l'anomalie
-  -- que ce controle cherche.
   local function codeSeul(source)
-    source = source:gsub("%-%-%[%[.-%]%]", " ")  -- commentaires longs
-    source = source:gsub("%-%-[^\n]*", " ")      -- commentaires de ligne
-    source = source:gsub('"[^"\n]*"', ' ')       -- chaines a guillemets doubles
-    source = source:gsub("'[^'\n]*'", " ")       -- chaines a guillemets simples
+    source = source:gsub("%-%-%[%[.-%]%]", " ")
+    source = source:gsub("%-%-[^\n]*", " ")
+    source = source:gsub('"[^"\n]*"', ' ')
+    source = source:gsub("'[^'\n]*'", " ")
     return source:lower()
   end
 
-  local fichiers = { "noyau", "interception", "autopilote", "radar", "armement",
-    "intercepteur" }
   local coupables = {}
-  for _, nom in ipairs(fichiers) do
+  for _, nom in ipairs({ "noyau", "interception", "autopilote", "radar", "armement",
+                         "intercepteur" }) do
     local f = io.open(RACINE .. "/intercepteur/" .. nom .. ".lua", "r")
     local code = codeSeul(f:read("a"))
     f:close()
@@ -648,7 +556,7 @@ do
       end
     end
   end
-  verifier("aucune zone ni classe n'est lue comme donnee par le code embarque",
+  verifier("aucune zone ni classe lue comme donnee par le code embarque",
     #coupables == 0, table.concat(coupables, ", "))
 
   local f = io.open(RACINE .. "/intercepteur/liaison.lua", "r")

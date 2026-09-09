@@ -3,23 +3,33 @@
   --------------------------------------------------------------------------
   CE MODULE NE CONTIENT AUCUNE LOI DE PILOTAGE.
 
-  Il ne fait que trois choses :
-    1. charger le module d'autopilote STANDARDISE deja construit (sections 6
-       et 7 de la documentation vehicule) ;
-    2. normaliser son API, car les noms de fonctions peuvent varier d'une
-       revision a l'autre, et journaliser la correspondance retenue ;
-    3. lui transmettre le bloc 'autopilote' du fichier de configuration
-       vehicule - le MEME fichier que celui du navire, comme prevu.
+  Il relie le systeme d'interception au module d'autopilote standardise
+  (autopilote/autopilote.lua) : asservissement en cascade, PID en controle
+  principal, repli automatique en zone morte. Tout cela reste chez lui.
 
-  L'asservissement en cascade, le PID en controle principal et le repli
-  automatique en mode dead-band restent integralement dans le module
-  d'autopilote. Le systeme d'interception se contente de lui fournir un point
-  de consigne et une vitesse a tenir, et de lire en retour la telemetrie.
+  Ce que le systeme d'interception lui envoie, et rien d'autre :
+      un point de consigne, une vitesse maximale, parfois un itineraire.
 
-  REFUS DELIBERE : si le module d'autopilote est introuvable, le navire NE
-  DECOLLE PAS. Voler avec un controleur de substitution serait plus dangereux
-  que de rester au sol. Le repli 'autopiloteDeSecours' existe uniquement pour
-  les bancs d'essai et doit rester a false en production.
+  Ce qu'il lui demande en retour :
+      sa position, sa vitesse, et le mode de pilotage actif de chaque axe.
+
+  TROIS PRECAUTIONS IMPORTANTES
+
+  1. LIMITATION DU DEBIT DES CONSIGNES. ap.allerA() n'est pas une commande
+     bon marche : elle recalcule l'itineraire, journalise une ligne "mission
+     acceptee" et, si la persistance est active, ecrit sur le disque. La
+     boucle de controle tourne a 4 Hz : la rappeler a chaque cycle noierait
+     le journal et martyriserait le disque. Les consignes ne sont donc
+     reemises que lorsque le point a bouge de plus de 'seuilDeplacement'
+     blocs, ou apres 'periodeRafraichissement' secondes.
+
+  2. TRANSIT HAUTE ALTITUDE DESACTIVE. Par defaut l'autopilote monte a
+     l'altitude de croisiere avant un long transit. En interception c'est
+     exactement ce qu'il ne faut pas : la cible n'attendra pas.
+
+  3. REPRISE DE MISSION DESACTIVEE. Un intercepteur qui redemarre apres un
+     rechargement de chunk ne doit PAS reprendre une interception perimee
+     sur une cible qui n'existe plus.
 
   Chargement : local noyau = ...
 --------------------------------------------------------------------------------]]
@@ -27,139 +37,364 @@
 local noyau = ...
 local E = noyau.ETAPES
 local journal = noyau.journal
+local V = noyau.vec
 
 local M = {}
 
 --------------------------------------------------------------------------------
--- 1. CONTRAT D'INTERFACE
---    Chaque entree decrit une capacite attendue du module d'autopilote, la
---    liste des noms de fonctions acceptes, et son caractere obligatoire.
---    Ajouter un nom ici suffit a s'adapter a une revision differente : aucune
---    autre ligne du systeme d'interception n'est a modifier.
+-- 1. EMPLACEMENTS
 --------------------------------------------------------------------------------
 
-M.CONTRAT = {
-  { role = "demarrer",       obligatoire = false,
-    candidats = { "demarrer", "initialiser", "init", "start", "begin" },
-    description = "initialisation de l'autopilote avec la configuration vehicule" },
+local CHEMINS_MODULE = {
+  "/autopilote/autopilote.lua",
+  "/autopilote/api.lua",
+  "/autopilote.lua",
+  "/lib/autopilote.lua",
+}
 
+local CHEMIN_CONFIG_VEHICULE = "/autopilote/config_vehicule.lua"
+
+--------------------------------------------------------------------------------
+-- 2. CONTRAT DE REPLI
+--    Utilise uniquement si le module charge n'expose PAS nouveau(), c'est-a-dire
+--    s'il ne s'agit pas du module standardise FrenchNet. Chaque entree decrit
+--    une capacite et les noms de fonction acceptes.
+--------------------------------------------------------------------------------
+
+M.CONTRAT_PLAT = {
+  { role = "demarrer",       obligatoire = false,
+    candidats = { "demarrer", "initialiser", "init", "start" } },
   { role = "definirPoint",   obligatoire = true,
     candidats = { "definirPoint", "definirConsigne", "allerA", "viser",
-                  "setTarget", "setSetpoint", "goTo", "definirCible" },
-    description = "point de consigne (x, y, z) suivi par l'asservissement en cascade" },
-
+                  "setTarget", "setSetpoint", "goTo", "definirCible" } },
   { role = "definirVitesse", obligatoire = false,
-    candidats = { "definirVitesse", "reglerVitesse", "setSpeed", "setVitesse",
-                  "definirVitesseCible" },
-    description = "vitesse a tenir (b/s), transmise a la boucle externe" },
-
-  { role = "definirCap",     obligatoire = false,
-    candidats = { "definirCap", "reglerCap", "setYaw", "setHeading", "definirLacet" },
-    description = "cap impose (deg), utilise pour presenter l'arme a la cible" },
-
+    candidats = { "definirVitesse", "reglerVitesse", "setSpeed", "setVitesse" } },
   { role = "position",       obligatoire = true,
-    candidats = { "position", "obtenirPosition", "getPosition", "getPos", "pos" },
-    description = "position courante du navire" },
-
+    candidats = { "position", "obtenirPosition", "getPosition", "getPos", "pos" } },
   { role = "vitesse",        obligatoire = false,
-    candidats = { "vitesse", "obtenirVitesse", "getVelocity", "getVitesse", "vel" },
-    description = "vecteur vitesse courant du navire" },
-
+    candidats = { "vitesse", "obtenirVitesse", "getVelocity", "getVitesse", "vel" } },
   { role = "mode",           obligatoire = false,
-    candidats = { "mode", "obtenirMode", "getMode", "modeActif" },
-    description = "mode de controle actif : PID ou dead-band" },
-
+    candidats = { "mode", "obtenirMode", "getMode", "modeActif" } },
   { role = "stationnaire",   obligatoire = false,
-    candidats = { "stationnaire", "maintenir", "hold", "station", "faireDuSurPlace" },
-    description = "maintien de position sur place" },
-
+    candidats = { "stationnaire", "maintenirPosition", "maintenir", "hold" } },
   { role = "arreter",        obligatoire = false,
-    candidats = { "arreter", "stopper", "stop", "halt", "couper" },
-    description = "arret propre de l'autopilote" },
-
+    candidats = { "arreter", "stopper", "stop", "halt" } },
   { role = "actualiser",     obligatoire = false,
-    candidats = { "actualiser", "cycle", "tick", "update", "pas" },
-    description = "cycle de calcul, si l'autopilote n'a pas sa propre boucle" },
+    candidats = { "actualiser", "pas", "cycle", "tick", "update" } },
+  { role = "boucle",         obligatoire = false,
+    candidats = { "executer", "boucleDeVol", "run", "loop" } },
 }
 
 --------------------------------------------------------------------------------
--- 2. CHARGEMENT DU MODULE EXTERNE
+-- 3. CHARGEMENT
 --------------------------------------------------------------------------------
 
-local function cheminsCandidats(config)
-  local liste = {}
+local function chargerModule(config)
+  local essais = {}
+  local candidats = {}
   if type(config.cheminAutopilote) == "string" and config.cheminAutopilote ~= "" then
-    liste[#liste + 1] = config.cheminAutopilote
+    candidats[1] = config.cheminAutopilote
   end
-  -- Emplacements usuels d'un module partage entre plusieurs vehicules.
-  liste[#liste + 1] = "/autopilote/autopilote.lua"
-  liste[#liste + 1] = "/autopilote/api.lua"
-  liste[#liste + 1] = "/autopilote.lua"
-  liste[#liste + 1] = fs.combine(noyau.REPERTOIRE, "autopilote_vehicule.lua")
-  liste[#liste + 1] = "/lib/autopilote.lua"
-  return liste
+  for _, chemin in ipairs(CHEMINS_MODULE) do candidats[#candidats + 1] = chemin end
+
+  for _, chemin in ipairs(candidats) do
+    if fs.exists(chemin) then
+      local ok, resultat = pcall(function()
+        local fichier = fs.open(chemin, "r")
+        local source = fichier.readAll()
+        fichier.close()
+        local morceau, err = load(source, "@" .. chemin, "t", _G)
+        if not morceau then error(tostring(err), 0) end
+        local table_ = morceau(config.autopilote or {})
+        if type(table_) ~= "table" then
+          error("le module doit renvoyer une table", 0)
+        end
+        return table_
+      end)
+      if ok then return resultat, chemin end
+      essais[#essais + 1] = chemin .. " (" .. tostring(resultat) .. ")"
+    else
+      essais[#essais + 1] = chemin .. " (absent)"
+    end
+  end
+  return nil, nil, essais
 end
 
-local function chargerFichier(chemin, config)
-  local fichier = fs.open(chemin, "r")
-  if not fichier then
-    error("lecture impossible : " .. chemin, 0)
+--- Fusion recursive : les valeurs de 'surcouche' ecrasent celles de 'base',
+-- table par table, sans detruire les branches non mentionnees.
+local function fusionnerProfond(base, surcouche)
+  local resultat = {}
+  for cle, valeur in pairs(base) do
+    if type(valeur) == "table" then
+      resultat[cle] = fusionnerProfond(valeur, {})
+    else
+      resultat[cle] = valeur
+    end
   end
-  local source = fichier.readAll()
-  fichier.close()
-
-  local morceau, err = load(source, "@" .. chemin, "t", _G)
-  if not morceau then
-    error("module d'autopilote illisible (" .. chemin .. ") : " .. tostring(err), 0)
-  end
-  -- On transmet la configuration en argument de chunk ET via demarrer() : les
-  -- deux conventions existent, l'une ou l'autre sera honoree.
-  local resultat = morceau(config)
-  if type(resultat) ~= "table" then
-    error("le module d'autopilote (" .. chemin .. ") doit renvoyer une table", 0)
+  for cle, valeur in pairs(surcouche or {}) do
+    if type(valeur) == "table" and type(resultat[cle]) == "table" then
+      resultat[cle] = fusionnerProfond(resultat[cle], valeur)
+    else
+      resultat[cle] = valeur
+    end
   end
   return resultat
 end
 
 --------------------------------------------------------------------------------
--- 3. AUTOPILOTE DE SECOURS (BANCS D'ESSAI UNIQUEMENT)
---    Ce n'est PAS un controleur de vol. Il se contente de memoriser les
---    consignes recues et de rapporter une position, afin que la machine a
---    etats du navire puisse etre testee hors du jeu. Toute utilisation en
---    production est journalisee en CRITIQUE a chaque demarrage.
+-- 4. FACADE SUR LE MODULE STANDARDISE FRENCHNET (chemin nominal)
 --------------------------------------------------------------------------------
 
-local function autopiloteDeSecours()
-  local etat = {
-    point = { x = 0, y = 0, z = 0 },
-    vitesse = 0,
-    cap = 0,
-    position = { x = 0, y = 0, z = 0 },
-    vecteurVitesse = { x = 0, y = 0, z = 0 },
+local function lierStandard(moduleAp, chemin, config)
+  local reglages = config.autopilote or {}
+
+  ------------------------------------------------------------------ configuration
+  -- UN SEUL FICHIER DE CONFIGURATION PAR VEHICULE : celui de l'autopilote.
+  -- Le bloc 'autopilote' de la configuration du navire ne fait que le
+  -- surcharger ponctuellement, il ne le remplace pas.
+  local cheminVehicule = config.cheminConfigVehicule
+    or moduleAp.CHEMIN_CONFIG_DEFAUT or CHEMIN_CONFIG_VEHICULE
+
+  local base = {}
+  if type(moduleAp.chargerConfiguration) == "function" and fs.exists(cheminVehicule) then
+    local ok, chargee = pcall(moduleAp.chargerConfiguration, cheminVehicule)
+    if ok and type(chargee) == "table" then
+      base = chargee
+      journal.info(E.LIAISON_AUTOPILOTE,
+        "configuration vehicule lue dans " .. cheminVehicule)
+    else
+      error("configuration vehicule illisible (" .. cheminVehicule .. ") : "
+        .. tostring(chargee), 0)
+    end
+  else
+    error("configuration vehicule introuvable : " .. cheminVehicule
+      .. ". C'est le fichier de reglage de l'autopilote, et donc du navire.", 0)
+  end
+
+  -- Les reglages propres a l'ADAPTATEUR (debit des consignes) ne concernent
+  -- pas l'autopilote : on les met de cote au lieu de polluer sa configuration.
+  local surcouche = {}
+  for cle, valeur in pairs(reglages) do
+    if cle ~= "adaptateur" then surcouche[cle] = valeur end
+  end
+  local reglagesAdaptateur = reglages.adaptateur or reglages
+
+  local configVehicule = fusionnerProfond(base, surcouche)
+  configVehicule.adaptateur = nil
+  configVehicule.seuilDeplacementConsigne = nil
+  configVehicule.seuilVitesseConsigne = nil
+  configVehicule.periodeRafraichissementConsigne = nil
+
+  -- Reprise de mission : desactivee sauf demande explicite. Un intercepteur
+  -- qui redemarre ne doit pas repartir sur une interception perimee.
+  configVehicule.mission = configVehicule.mission or {}
+  if reglages.mission == nil or reglages.mission.reprendreApresRedemarrage == nil then
+    configVehicule.mission.reprendreApresRedemarrage = false
+  end
+
+  ------------------------------------------------------------------- instance
+  -- Point d'injection reserve aux BANCS D'ESSAI. Un banc hors du jeu y depose
+  -- un pilote de sorties simule, ce qui permet de rejouer une mission complete
+  -- avec le VRAI module d'autopilote au lieu d'un substitut. A bord, cette
+  -- table n'existe pas et rien n'est injecte : le module utilise ses propres
+  -- sorties moteur.
+  local banc = rawget(_G, "__FRENCHNET_BANC")
+  if type(banc) == "table" and banc.commandes then
+    journal.avert(E.LIAISON_AUTOPILOTE,
+      "sorties moteur SIMULEES (banc d'essai) : le vehicule n'est pas reellement pilote")
+  end
+
+  local ap = moduleAp.nouveau({
+    configuration = configVehicule,
+    -- Journal PARTAGE : les lignes de l'autopilote atterrissent dans le meme
+    -- fichier que celles du systeme d'interception, au meme format. C'est ce
+    -- qui permet de relire une mission de bout en bout, vol compris.
+    journal   = journal,
+    commandes = type(banc) == "table" and banc.commandes or nil,
+    cap       = type(banc) == "table" and banc.cap or nil,
+  })
+  ap.initialiser()
+
+  journal.info(E.LIAISON_AUTOPILOTE, string.format(
+    "module d'autopilote standardise v%s charge depuis %s | vehicule '%s' | "
+    .. "asservissement en cascade, PID principal, repli zone morte",
+    tostring(ap.VERSION), chemin, tostring(configVehicule.identifiant)))
+
+  ------------------------------------------------------------------- reglages
+  local seuil = reglagesAdaptateur.seuilDeplacementConsigne or 8
+  local periode = reglagesAdaptateur.periodeRafraichissementConsigne or 2
+  local seuilVitesse = reglagesAdaptateur.seuilVitesseConsigne or 5
+
+  journal.info(E.LIAISON_AUTOPILOTE, string.format(
+    "consignes limitees en debit : reemission au-dela de %.0f bloc(s) de "
+    .. "deplacement, de %.0f b/s d'ecart de vitesse, ou toutes les %.1fs",
+    seuil, seuilVitesse, periode))
+
+  ---------------------------------------------------------------------- facade
+  local facade = {
+    module        = moduleAp,
+    instance      = ap,
+    chemin        = chemin,
+    standard      = true,
+    secours       = false,
+    etatCache     = nil,
+    dernierPoint  = nil,
+    derniereVitesse = nil,
+    derniereEmission = -math.huge,
+    consignesEmises = 0,
+    modePrecedent = nil,
   }
-  return {
-    __secours = true,
-    __etat = etat,
-    demarrer = function() return true end,
-    definirPoint = function(x, y, z) etat.point = { x = x, y = y, z = z } end,
-    definirVitesse = function(v) etat.vitesse = v end,
-    definirCap = function(c) etat.cap = c end,
-    position = function() return etat.position.x, etat.position.y, etat.position.z end,
-    vitesse = function()
-      return etat.vecteurVitesse.x, etat.vecteurVitesse.y, etat.vecteurVitesse.z
-    end,
-    mode = function() return "SECOURS" end,
-    stationnaire = function() etat.vitesse = 0 end,
-    arreter = function() etat.vitesse = 0 end,
-  }
+
+  --- Rafraichit l'instantane de l'autopilote. Appele une fois par cycle de
+  -- controle : ap.etat() recopie en profondeur, l'appeler plusieurs fois par
+  -- cycle serait du gaspillage pur.
+  function facade.rafraichir()
+    local ok, instantane = noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.etat)
+    if ok and type(instantane) == "table" then
+      facade.etatCache = instantane
+      return instantane
+    end
+    return nil
+  end
+
+  function facade.position()
+    local e = facade.etatCache
+    return (e and e.position) and { x = e.position.x, y = e.position.y, z = e.position.z } or nil
+  end
+
+  function facade.vitesse()
+    local e = facade.etatCache
+    return (e and e.vitesse) and { x = e.vitesse.x, y = e.vitesse.y, z = e.vitesse.z } or nil
+  end
+
+  --- Mode de pilotage reellement actif, axe par axe. Le basculement PID ->
+  -- zone morte est decide par l'autopilote seul ; on se contente de le tracer,
+  -- car c'est le meilleur indice pour expliquer une trajectoire degradee.
+  function facade.mode()
+    local e = facade.etatCache
+    if not e then return nil end
+
+    local degrades = {}
+    for axe, mode in pairs(e.modesAxes or {}) do
+      if mode ~= "pid" then degrades[#degrades + 1] = axe .. ":" .. tostring(mode) end
+    end
+    table.sort(degrades)
+    local texte = (#degrades == 0) and "PID"
+      or ("ZONE_MORTE sur " .. table.concat(degrades, ", "))
+
+    if texte ~= facade.modePrecedent then
+      if facade.modePrecedent ~= nil then
+        journal.avert(E.MODE_AUTOPILOTE, string.format(
+          "mode de pilotage : '%s' -> '%s'", facade.modePrecedent, texte))
+      else
+        journal.info(E.MODE_AUTOPILOTE, "mode de pilotage initial : " .. texte)
+      end
+      facade.modePrecedent = texte
+    end
+    return texte
+  end
+
+  --- Etat de vol de l'autopilote (ARRET / ACQUISITION / TRANSIT / MAINTIEN /
+  -- SECOURS). Utilise par l'ecran d'etat du systeme d'exploitation.
+  function facade.modeVol()
+    local e = facade.etatCache
+    return e and e.mode or nil
+  end
+
+  function facade.instantane() return facade.etatCache end
+
+  --- Consigne de vol. C'est LA commande du systeme d'interception.
+  -- @return true si la consigne a effectivement ete transmise
+  function facade.definirPoint(point, motif, vitesse)
+    local maintenant = noyau.maintenant()
+
+    -- Limitation du debit : voir la precaution 1 en tete de fichier.
+    if facade.dernierPoint then
+      local deplacement = V.distance(point, facade.dernierPoint)
+      local ecartVitesse = math.abs((vitesse or 0) - (facade.derniereVitesse or 0))
+      if deplacement < seuil and ecartVitesse < seuilVitesse
+         and (maintenant - facade.derniereEmission) < periode then
+        return false
+      end
+    end
+
+    local ok = noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.allerA,
+      { x = point.x, y = point.y, z = point.z, type = "survol" },
+      {
+        vitesseMax = vitesse,
+        -- Precaution 2 : pas de montee en croisiere avant l'interception.
+        transitHaute = false,
+      })
+
+    if ok then
+      facade.dernierPoint = { x = point.x, y = point.y, z = point.z }
+      facade.derniereVitesse = vitesse
+      facade.derniereEmission = maintenant
+      facade.consignesEmises = facade.consignesEmises + 1
+      journal.limite("consigne_point", 3, "DEBUG", E.COMMANDE_AUTOPILOTE,
+        string.format("consigne %s a %.1f b/s%s", V.format(point), vitesse or -1,
+          motif and (" | " .. motif) or ""))
+    end
+    return ok
+  end
+
+  --- Itineraire complet confie a l'autopilote : c'est SON systeme de points de
+  -- passage qui est utilise, pas une reimplementation. Sert au retour base.
+  -- @param options { vitesse, altitudeCroisiere, surEtape, surArrivee }
+  function facade.suivreItineraire(points, options)
+    options = options or {}
+    local itineraire = {}
+    for i, p in ipairs(points) do
+      itineraire[i] = { x = p.x, y = p.y, z = p.z, nom = p.nom, type = p.type or "survol" }
+    end
+    facade.dernierPoint = nil
+    facade.derniereEmission = noyau.maintenant()
+    return noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.suivreItineraire, itineraire, {
+      vitesseMax        = options.vitesse,
+      altitudeCroisiere = options.altitudeCroisiere,
+      transitHaute      = true, -- retour au calme : la croisiere reprend son sens
+      surEtape          = options.surEtape,
+      surArrivee        = options.surArrivee,
+    })
+  end
+
+  function facade.estArrive()
+    local ok, arrive = noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.estArrive)
+    return ok and arrive or false
+  end
+
+  function facade.stationnaire(point, cap)
+    facade.dernierPoint = nil
+    return noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.maintenirPosition, point, cap)
+  end
+
+  --- Cap impose : sert a presenter l'arme a la cible sans quitter la trajectoire.
+  function facade.definirCap(capDeg)
+    if type(ap.forcerCap) ~= "function" then return false end
+    return noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.forcerCap, capDeg)
+  end
+
+  function facade.arreter(motif)
+    return noyau.proteger(E.COMMANDE_AUTOPILOTE, ap.arreter, motif)
+  end
+
+  --- Boucle de vol de l'autopilote. A lancer en tache PARALLELE du systeme
+  -- d'interception : c'est elle qui pilote reellement le vehicule.
+  function facade.boucleDeVol()
+    return ap.executer()
+  end
+
+  function facade.stopperBoucle()
+    if type(ap.stopper) == "function" then pcall(ap.stopper) end
+  end
+
+  return facade
 end
 
 --------------------------------------------------------------------------------
--- 4. NORMALISATION
+-- 5. FACADE DE REPLI (module non standard exposant des fonctions plates)
 --------------------------------------------------------------------------------
 
---- Lit un triplet de coordonnees quelle que soit la forme rendue par
--- l'autopilote : trois valeurs, une table {x,y,z} ou une table {[1],[2],[3]}.
 local function lireVecteur(...)
   local a, b, c = ...
   if type(a) == "table" then
@@ -173,136 +408,41 @@ local function lireVecteur(...)
   return nil
 end
 
---------------------------------------------------------------------------------
--- 5. LIAISON
---------------------------------------------------------------------------------
-
---- Etablit la liaison avec le module d'autopilote et renvoie une facade
--- normalisee. Leve une erreur explicite si le module est introuvable.
--- @param config configuration complete du vehicule
--- @return facade
-function M.lier(config)
-  local module, cheminRetenu, essais = nil, nil, {}
-
-  for _, chemin in ipairs(cheminsCandidats(config)) do
-    if fs.exists(chemin) then
-      local ok, resultat = pcall(chargerFichier, chemin, config.autopilote or {})
-      if ok then
-        module, cheminRetenu = resultat, chemin
-        break
-      end
-      essais[#essais + 1] = chemin .. " (" .. tostring(resultat) .. ")"
-    else
-      essais[#essais + 1] = chemin .. " (absent)"
-    end
-  end
-
-  if not module then
-    if config.autopiloteDeSecours then
-      journal.critique(E.LIAISON_AUTOPILOTE,
-        "AUTOPILOTE DE SECOURS ACTIF : aucune loi de pilotage reelle n'est "
-        .. "chargee. Ce mode est reserve aux bancs d'essai. Emplacements "
-        .. "explores : " .. table.concat(essais, " | "))
-      module, cheminRetenu = autopiloteDeSecours(), "(secours interne)"
-    else
-      error("module d'autopilote standardise introuvable. Le navire ne decolle pas. "
-        .. "Renseignez 'cheminAutopilote' dans config_intercepteur.lua. "
-        .. "Emplacements explores : " .. table.concat(essais, " | "), 0)
-    end
-  end
-
-  ------------------------------------------------------------------ resolution
+local function lierPlat(moduleAp, chemin, config)
   local lien, correspondances, manquants = {}, {}, {}
-  for _, entree in ipairs(M.CONTRAT) do
-    local fn, nom = noyau.resoudreMethode(module, entree.candidats)
+  for _, entree in ipairs(M.CONTRAT_PLAT) do
+    local fn, nom = noyau.resoudreMethode(moduleAp, entree.candidats)
     if fn then
       lien[entree.role] = fn
       correspondances[#correspondances + 1] = entree.role .. " -> " .. nom .. "()"
     elseif entree.obligatoire then
-      manquants[#manquants + 1] = entree.role .. " (" .. entree.description
-        .. " ; noms acceptes : " .. table.concat(entree.candidats, ", ") .. ")"
+      manquants[#manquants + 1] = entree.role .. " (noms acceptes : "
+        .. table.concat(entree.candidats, ", ") .. ")"
     end
   end
 
   if #manquants > 0 then
-    error("le module d'autopilote charge depuis " .. tostring(cheminRetenu)
-      .. " n'expose pas les capacites obligatoires suivantes : "
-      .. table.concat(manquants, " | "), 0)
+    error("le module charge depuis " .. tostring(chemin) .. " n'expose ni nouveau() "
+      .. "(module standardise FrenchNet) ni les capacites minimales d'un module "
+      .. "plat : " .. table.concat(manquants, " | "), 0)
   end
 
-  journal.info(E.LIAISON_AUTOPILOTE, "module d'autopilote charge depuis "
-    .. tostring(cheminRetenu))
-  -- La correspondance retenue est journalisee : en cas de comportement de vol
-  -- anormal, elle dit immediatement quelle fonction a reellement ete appelee.
+  journal.avert(E.LIAISON_AUTOPILOTE, "module d'autopilote NON STANDARD charge depuis "
+    .. tostring(chemin) .. " : liaison en mode plat")
   journal.info(E.LIAISON_AUTOPILOTE, "correspondance d'API : "
     .. table.concat(correspondances, ", "))
 
-  ---------------------------------------------------------------------- facade
   local facade = {
-    module     = module,
-    chemin     = cheminRetenu,
-    secours    = module.__secours == true,
-    modePrecedent = nil,
-    dernierPoint  = nil,
-    derniereVitesse = nil,
+    module = moduleAp, chemin = chemin, standard = false, secours = false,
+    dernierPoint = nil, modePrecedent = nil, consignesEmises = 0,
   }
 
-  --- Initialisation. Le bloc 'autopilote' du fichier de configuration vehicule
-  -- lui est transmis tel quel : un seul fichier de configuration par vehicule,
-  -- partage entre l'autopilote et le systeme d'interception.
-  function facade.demarrer()
-    if not lien.demarrer then return false end
-    return noyau.proteger(E.LIAISON_AUTOPILOTE, lien.demarrer, config.autopilote or {})
-  end
+  if lien.demarrer then noyau.proteger(E.LIAISON_AUTOPILOTE, lien.demarrer, config.autopilote or {}) end
 
-  --- Point de consigne. C'est LA commande de vol du systeme d'interception :
-  -- tout le reste (cascade, PID, dead-band) appartient a l'autopilote.
-  function facade.definirPoint(point, motif)
-    facade.dernierPoint = point
-    local ok = noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.definirPoint,
-      point.x, point.y, point.z)
-    if ok then
-      journal.limite("consigne_point", 2, "DEBUG", E.COMMANDE_AUTOPILOTE,
-        string.format("consigne %s%s", noyau.vec.format(point),
-          motif and (" | " .. motif) or ""))
-    end
-    return ok
-  end
+  function facade.rafraichir() return nil end
+  function facade.instantane() return nil end
+  function facade.modeVol() return nil end
 
-  function facade.definirVitesse(v)
-    if not lien.definirVitesse then return false end
-    facade.derniereVitesse = v
-    return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.definirVitesse, v)
-  end
-
-  function facade.definirCap(capDeg)
-    if not lien.definirCap then return false end
-    return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.definirCap, capDeg)
-  end
-
-  function facade.stationnaire()
-    if lien.stationnaire then
-      return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.stationnaire)
-    end
-    -- Repli : consigne sur la position courante, vitesse nulle.
-    local p = facade.position()
-    if p then facade.definirPoint(p, "maintien de position") end
-    facade.definirVitesse(0)
-    return true
-  end
-
-  function facade.arreter()
-    if not lien.arreter then return false end
-    return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.arreter)
-  end
-
-  function facade.actualiser()
-    if not lien.actualiser then return false end
-    return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.actualiser)
-  end
-
-  --- Position courante du navire. nil si l'autopilote ne repond pas : la
-  -- machine a etats sait traiter ce cas (elle gele les commandes).
   function facade.position()
     local ok, a, b, c = noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.position)
     if not ok then return nil end
@@ -316,28 +456,98 @@ function M.lier(config)
     return lireVecteur(a, b, c)
   end
 
-  --- Mode de controle actif. Le basculement PID -> dead-band est decide par
-  -- l'autopilote lui-meme ; on se contente de le tracer, car c'est un signal
-  -- precieux pour expliquer une trajectoire degradee apres coup.
   function facade.mode()
     if not lien.mode then return nil end
     local ok, valeur = noyau.proteger(E.MODE_AUTOPILOTE, lien.mode)
     if not ok then return nil end
     local texte = tostring(valeur)
     if texte ~= facade.modePrecedent then
-      if facade.modePrecedent ~= nil then
-        journal.avert(E.MODE_AUTOPILOTE, string.format(
-          "l'autopilote est passe du mode '%s' au mode '%s'",
-          facade.modePrecedent, texte))
-      else
-        journal.info(E.MODE_AUTOPILOTE, "mode de controle initial : " .. texte)
-      end
+      journal.info(E.MODE_AUTOPILOTE, "mode de pilotage : " .. texte)
       facade.modePrecedent = texte
     end
     return texte
   end
 
+  function facade.definirPoint(point, motif, vitesse)
+    facade.dernierPoint = { x = point.x, y = point.y, z = point.z }
+    facade.consignesEmises = facade.consignesEmises + 1
+    local ok = noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.definirPoint,
+      point.x, point.y, point.z)
+    if ok and lien.definirVitesse and vitesse then
+      noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.definirVitesse, vitesse)
+    end
+    if ok then
+      journal.limite("consigne_point", 3, "DEBUG", E.COMMANDE_AUTOPILOTE,
+        string.format("consigne %s%s", V.format(point), motif and (" | " .. motif) or ""))
+    end
+    return ok
+  end
+
+  --- Pas d'itineraire natif : on rejoue les points un par un.
+  function facade.suivreItineraire(points, options)
+    options = options or {}
+    facade.itineraire = points
+    facade.indexItineraire = 1
+    facade.surEtape = options.surEtape
+    facade.surArrivee = options.surArrivee
+    return facade.definirPoint(points[1], "itineraire", options.vitesse)
+  end
+
+  function facade.estArrive() return false end
+
+  function facade.stationnaire(point)
+    if lien.stationnaire then
+      return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.stationnaire, point)
+    end
+    local p = point or facade.position()
+    if p then facade.definirPoint(p, "maintien de position", 0) end
+    return true
+  end
+
+  function facade.definirCap() return false end
+  function facade.arreter(motif)
+    if not lien.arreter then return false end
+    return noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.arreter, motif)
+  end
+
+  function facade.boucleDeVol()
+    if lien.boucle then return lien.boucle() end
+    -- Aucune boucle propre : on cadence nous-memes.
+    while true do
+      if lien.actualiser then noyau.proteger(E.COMMANDE_AUTOPILOTE, lien.actualiser) end
+      sleep(0.05)
+    end
+  end
+
+  function facade.stopperBoucle() end
+
   return facade
+end
+
+--------------------------------------------------------------------------------
+-- 6. LIAISON
+--------------------------------------------------------------------------------
+
+--- Etablit la liaison avec le module d'autopilote.
+-- Leve une erreur explicite si le module est introuvable : voler avec un
+-- controleur de substitution serait plus dangereux que de rester au sol.
+function M.lier(config)
+  local moduleAp, chemin, essais = chargerModule(config)
+
+  if not moduleAp then
+    error("module d'autopilote introuvable. Le navire ne decolle pas. "
+      .. "Installez autopilote/autopilote.lua ou renseignez 'cheminAutopilote' "
+      .. "dans config_intercepteur.lua. Emplacements explores : "
+      .. table.concat(essais or {}, " | "), 0)
+  end
+
+  -- Module standardise FrenchNet : c'est le chemin nominal.
+  if type(moduleAp.nouveau) == "function" then
+    return lierStandard(moduleAp, chemin, config)
+  end
+
+  -- Sinon on tente une liaison generique, en le signalant clairement.
+  return lierPlat(moduleAp, chemin, config)
 end
 
 return M

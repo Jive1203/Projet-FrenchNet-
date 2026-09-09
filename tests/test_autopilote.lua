@@ -985,8 +985,17 @@ end
 print("\n== TEST 22 : installateur ==")
 do
   local RACINE_INSTALL = "/tmp/banc_installateur_frenchnet"
-  local BASE = "https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/"
-    .. "claude/autopilote-lua-module-kfnu2k/"
+
+  -- La branche est LUE dans installe.lua plutot que recopiee ici : une
+  -- constante dupliquee finit toujours par diverger, et ce banc se mettrait
+  -- alors a echouer pour une raison qui n'a rien a voir avec l'installateur.
+  local BASE = (function()
+    local source = io.open(RACINE .. "/installe.lua", "r"):read("a")
+    local depot = source:match('local DEPOT%s*=%s*"([^"]+)"')
+    local branche = source:match('local BRANCHE%s*=%s*"([^"]+)"')
+    assert(depot and branche, "DEPOT / BRANCHE introuvables dans installe.lua")
+    return "https://raw.githubusercontent.com/" .. depot .. "/" .. branche .. "/"
+  end)()
 
   --- Prepare un banc neuf, avec ou sans HTTP, dans un dossier vierge.
   local function bancInstall(sousDossier, options)

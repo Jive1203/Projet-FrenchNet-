@@ -303,6 +303,8 @@ end
 --    t                 horloge (secondes) pour l'oscillation
 --    phase             phase de calage de la manoeuvre
 --    enPosition        le navire est-il deja en position d'attaque ?
+--    modeEngagement    "position" (defaut) ou "tir"
+--    distanceTirVisee  distance optimale de l'arme retenue, en mode "tir"
 -- @param params  bloc 'interception' de la configuration vehicule
 -- @return consigne table
 function M.calculerConsigne(etat, params)
@@ -334,6 +336,22 @@ function M.calculerConsigne(etat, params)
     manoeuvreActive = true
   end
 
+  -- 6d bis. ENGAGEMENT : LE TIR PRIME SUR LA POSITION.
+  -- Sous ordre de feu, la place dans l'arc n'est plus un prealable. Une
+  -- reprise d'arc franche ferait perdre la solution de tir en cours ; on
+  -- borne donc la correction laterale a 'biaisArcEnTirDeg' par consigne. Le
+  -- navire regagne son arc peu a peu, sans jamais cesser de tirer, et la
+  -- distance visee devient celle de l'arme retenue, pas celle de l'arc.
+  local biaisArc = nil
+  if etat.modeEngagement == "tir" and params.prioriteTirSurPosition then
+    local souhaite = M.choisirRelevementArc(relevementActuel, params)
+    local biais = params.biaisArcEnTirDeg or 25
+    biaisArc = noyau.borner(noyau.ecartAngulaire(souhaite, relevementActuel), -biais, biais)
+    relevementVise = noyau.normaliserAngle(relevementActuel + biaisArc)
+    if etat.distanceTirVisee then distanceVisee = etat.distanceTirVisee end
+    manoeuvreActive = false
+  end
+
   -- 6e. Point de consigne : arc arriere autour de la position PREDITE.
   --     C'est ici que se joue la priorite demandee : le navire vise sa place
   --     dans l'arc, jamais la cible elle-meme.
@@ -359,6 +377,8 @@ function M.calculerConsigne(etat, params)
     distanceVisee     = distanceVisee,
     dejaDansArc       = dejaDansArc,
     manoeuvreActive   = manoeuvreActive,
+    biaisArc          = biaisArc,
+    modeEngagement    = etat.modeEngagement or "position",
   }
 end
 
@@ -504,26 +524,42 @@ function M.solutionTir(pArme, pCible, vCible, params)
   }
 end
 
---- Le tir est-il autorise ? Toutes les conditions doivent etre reunies, y
--- compris le maintien dans l'arc arriere : l'ordre de tir ne dispense jamais
--- de la contrainte de position.
+--- Le tir est-il autorise ?
+--
+-- REGLE D'ENGAGEMENT : l'ordre de tir PRIME SUR LA POSITION.
+-- Seules comptent les conditions qui rendent le coup possible - portee de
+-- l'arme et qualite du pointage. La place dans l'arc arriere reste une
+-- consigne de trajectoire, pas un prealable au tir : un navire qui a la
+-- cible dans sa portee et une solution valable ouvre le feu, meme s'il est
+-- encore en train de regagner son arc.
+--
+-- Le comportement inverse (arc bloquant) reste disponible en passant
+-- 'prioriteTirSurPosition = false' dans la configuration.
+--
 -- @return autorise (booleen), motifRefus (chaine ou nil)
 function M.tirAutorise(contexte, params)
-  if not contexte.dansArc then
-    return false, "hors de l'arc arriere (" .. (contexte.positionHoraire or "?") .. ")"
+  local porteeMini = contexte.porteeMini or params.distanceTirMini or 80
+  local porteeMaxi = contexte.porteeMaxi or params.distanceTirMaxi or 420
+
+  if contexte.distance > porteeMaxi then
+    return false, string.format("cible a %.0f blocs, au-dela de la portee de l'arme (%.0f)",
+      contexte.distance, porteeMaxi)
   end
-  if contexte.distance > (params.distanceTirMaxi or 420) then
-    return false, string.format("cible a %.0f blocs, au-dela de la portee utile (%.0f)",
-      contexte.distance, params.distanceTirMaxi or 420)
-  end
-  if contexte.distance < (params.distanceTirMini or 80) then
-    return false, string.format("cible a %.0f blocs, trop pres pour tirer (%.0f)",
-      contexte.distance, params.distanceTirMini or 80)
+  if contexte.distance < porteeMini then
+    return false, string.format("cible a %.0f blocs, sous la portee mini de l'arme (%.0f)",
+      contexte.distance, porteeMini)
   end
   if contexte.erreurVisee and contexte.erreurVisee > (params.toleranceViseeDeg or 3) then
     return false, string.format("erreur de visee %.1f deg (tolerance %.1f)",
       contexte.erreurVisee, params.toleranceViseeDeg or 3)
   end
+
+  -- Arc bloquant uniquement si la priorite au tir a ete explicitement retiree.
+  if params.prioriteTirSurPosition == false and not contexte.dansArc then
+    return false, "hors de l'arc arriere (" .. (contexte.positionHoraire or "?")
+      .. ") et priorite au tir desactivee"
+  end
+
   return true, nil
 end
 

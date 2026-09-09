@@ -11,7 +11,8 @@
       installe balise      -- balise GPS fixe
       installe vehicule    -- autopilote d'un vehicule aerien
       installe satellite   -- ordinateur de sortie deporte
-      installe tout        -- les trois jeux de fichiers
+      installe intercepteur -- navire intercepteur (autopilote + interception + OS)
+      installe tout        -- tous les jeux de fichiers
 
   Options :
       -f                   -- ecrase aussi les fichiers de configuration
@@ -23,7 +24,7 @@
 --------------------------------------------------------------------------------]]
 
 local DEPOT    = "Jive1203/Projet-FrenchNet-"
-local BRANCHE  = "claude/autopilote-lua-module-kfnu2k"
+local BRANCHE  = "claude/interceptor-ship-onboard-system-uca5no"
 local BASE     = "https://raw.githubusercontent.com/"
 
 -- Chaque entree : { chemin dans le depot, chemin sur l'ordinateur, config ? }
@@ -57,6 +58,42 @@ local JEUX = {
     suite = {
       "interface        -- reglage du vehicule a l'ecran",
       "cablage          -- verification du cablage, pilotage manuel",
+    },
+  },
+
+  intercepteur = {
+    titre = "NAVIRE INTERCEPTEUR DE SCRAMBLE",
+    fichiers = {
+      -- Le navire APPELLE l'autopilote : il lui faut donc le module complet
+      -- et le fichier de reglage du vehicule, qui reste le seul de son espece.
+      { "autopilote/autopilote.lua",             "/autopilote/autopilote.lua" },
+      { "autopilote/config_vehicule.lua",        "/autopilote/config_vehicule.lua", config = true },
+      { "autopilote/ravitaillement.lua",         "/autopilote/ravitaillement.lua", config = true },
+      { "autopilote/interface.lua",              "/autopilote/interface.lua" },
+      { "autopilote/cablage.lua",                "/autopilote/cablage.lua" },
+
+      -- Systeme d'interception.
+      { "intercepteur/intercepteur.lua",         "/intercepteur/intercepteur.lua" },
+      { "intercepteur/config_intercepteur.lua",  "/intercepteur/config_intercepteur.lua", config = true },
+      { "intercepteur/noyau.lua",                "/intercepteur/noyau.lua" },
+      { "intercepteur/interception.lua",         "/intercepteur/interception.lua" },
+      { "intercepteur/autopilote.lua",           "/intercepteur/autopilote.lua" },
+      { "intercepteur/radar.lua",                "/intercepteur/radar.lua" },
+      { "intercepteur/armement.lua",             "/intercepteur/armement.lua" },
+      { "intercepteur/liaison.lua",              "/intercepteur/liaison.lua" },
+
+      -- Systeme d'exploitation de bord.
+      { "systeme/os.lua",                        "/systeme/os.lua" },
+      { "systeme/ui.lua",                        "/systeme/ui.lua" },
+      { "systeme/noyau_taches.lua",              "/systeme/noyau_taches.lua" },
+      { "systeme/arsenal_fichier.lua",           "/systeme/arsenal_fichier.lua" },
+      { "systeme/startup.lua",                   "/startup.lua" },
+    },
+    suite = {
+      "interface        -- reglage du vehicule (gabarit, moteurs, gains PID)",
+      "cablage          -- verification du cablage, pilotage manuel",
+      "systeme/os       -- systeme de bord : page Armement pour declarer les armes",
+      "edit intercepteur/config_intercepteur.lua   -- identifiant et points de retour",
     },
   },
 
@@ -213,12 +250,13 @@ print("branche : " .. BRANCHE)
 print("")
 
 if not cible then
-  print("Usage : installe <balise|vehicule|satellite|tout> [-f] [-b branche]")
+  print("Usage : installe <balise|vehicule|intercepteur|satellite|tout> [-f] [-b branche]")
   print("")
   print("  balise     balise GPS fixe (1 ordinateur + 1 modem Ender)")
   print("  vehicule   autopilote (1 ordinateur + 1 modem Ender)")
+  print("  intercepteur navire de scramble (autopilote + interception + OS)")
   print("  satellite  sortie deportee (1 ordinateur + 1 modem courte portee)")
-  print("  tout       les trois")
+  print("  tout       tous les jeux")
   print("")
   print("  -f         ecrase aussi les fichiers de configuration")
   return
@@ -226,7 +264,8 @@ end
 
 if not verifierHttp() then return end
 
-local jeux = (cible == "tout") and { "balise", "vehicule", "satellite" } or { cible }
+local jeux = (cible == "tout")
+  and { "balise", "vehicule", "intercepteur", "satellite" } or { cible }
 if not JEUX[jeux[1]] and cible ~= "tout" then
   ecrire(colors.red, "Jeu de fichiers inconnu : " .. tostring(cible))
   return

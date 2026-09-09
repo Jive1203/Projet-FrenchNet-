@@ -421,7 +421,7 @@ do
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 11 : autorisation de tir ==")
+print("\n== TEST 11 : autorisation de tir (conditions de faisabilite) ==")
 do
   local params = { distanceTirMaxi = 420, distanceTirMini = 80, toleranceViseeDeg = 3 }
 
@@ -431,18 +431,121 @@ do
 
   local motif
   ok, motif = interception.tirAutorise(
-    { dansArc = false, distance = 350, erreurVisee = 1, positionHoraire = "1h00" }, params)
-  verifier("hors de l'arc : tir refuse meme sur ordre de feu", ok == false, motif)
-  verifier("  ... motif mentionnant l'arc",
-    motif and motif:find("arc arriere", 1, true) ~= nil, motif)
-
-  ok, motif = interception.tirAutorise(
     { dansArc = true, distance = 900, erreurVisee = 1 }, params)
   verifier("hors de portee : tir refuse", ok == false, motif)
 
   ok, motif = interception.tirAutorise(
+    { dansArc = true, distance = 30, erreurVisee = 1 }, params)
+  verifier("sous la portee mini : tir refuse", ok == false, motif)
+
+  ok, motif = interception.tirAutorise(
     { dansArc = true, distance = 350, erreurVisee = 12 }, params)
   verifier("visee insuffisante : tir refuse", ok == false, motif)
+
+  -- Les portees par defaut servent de repli quand aucune arme n'est fournie.
+  ok = interception.tirAutorise({ dansArc = true, distance = 200, erreurVisee = 0 }, params)
+  verifier("portees par defaut utilisees a defaut d'arme", ok)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 11 bis : L'ORDRE DE TIR PRIME SUR LA POSITION ==")
+do
+  -- Regle par defaut : hors de l'arc, le tir reste autorise.
+  local params = { toleranceViseeDeg = 3, prioriteTirSurPosition = true }
+  local contexte = { dansArc = false, distance = 350, erreurVisee = 1,
+    positionHoraire = "1h00", porteeMini = 80, porteeMaxi = 420 }
+
+  local ok, motif = interception.tirAutorise(contexte, params)
+  verifier("hors de l'arc, le tir reste AUTORISE quand il est prioritaire", ok, motif)
+
+  -- Les conditions qui rendent le coup impossible restent bloquantes.
+  contexte.distance = 900
+  ok, motif = interception.tirAutorise(contexte, params)
+  verifier("au-dela de la portee de l'arme : toujours refuse", ok == false, motif)
+  verifier("  ... motif parlant de l'ARME, pas de l'arc",
+    motif and motif:find("portee de l'arme", 1, true) ~= nil, motif)
+
+  contexte.distance = 350
+  contexte.erreurVisee = 20
+  ok, motif = interception.tirAutorise(contexte, params)
+  verifier("visee insuffisante : toujours refuse", ok == false, motif)
+
+  -- Les portees viennent de l'ARME retenue, pas d'un reglage global.
+  contexte.erreurVisee = 1
+  contexte.porteeMini, contexte.porteeMaxi = 10, 90
+  contexte.distance = 350
+  ok, motif = interception.tirAutorise(contexte, params)
+  verifier("la portee prise en compte est celle de l'arme", ok == false, motif)
+
+  -- Regle inverse : l'arc redevient un prealable.
+  local paramsInverse = { toleranceViseeDeg = 3, prioriteTirSurPosition = false }
+  ok, motif = interception.tirAutorise(
+    { dansArc = false, distance = 350, erreurVisee = 1, positionHoraire = "1h00",
+      porteeMini = 80, porteeMaxi = 420 }, paramsInverse)
+  verifier("priorite retiree : hors de l'arc, le tir est refuse", ok == false, motif)
+  verifier("  ... motif mentionnant l'arc et la priorite",
+    motif and motif:find("priorite au tir desactivee", 1, true) ~= nil, motif)
+  ok = interception.tirAutorise(
+    { dansArc = true, distance = 350, erreurVisee = 1,
+      porteeMini = 80, porteeMaxi = 420 }, paramsInverse)
+  verifier("priorite retiree : dans l'arc, le tir est autorise", ok)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 11 ter : trajectoire en mode tir - biais d'arc borne ==")
+do
+  local params = {
+    arcMiniDeg = 120, arcMaxiDeg = 240, arcCentreDeg = 180, margeArcDeg = 10,
+    arcAmplitudeDeg = 45, arcPeriodeSecondes = 12, distanceMini = 300,
+    distanceMaxi = 400, distanceSecurite = 150, distanceTransit = 250,
+    predictionMiniSecondes = 1, predictionMaxiSecondes = 10,
+    vitesseMaxi = 120, vitesseReference = 90, gainRapprochement = 0.35,
+    ratioMini = 0.6, ratioMaxi = 1.6,
+    prioriteTirSurPosition = true, biaisArcEnTirDeg = 25,
+  }
+
+  local vCible = V.creer(0, 0, 70)
+  local pCible = V.creer(0, 150, 0)
+  local cap    = noyau.relevement(vCible)
+  -- Navire a 2 heures : tres loin de son arc, mais en train de tirer.
+  local pSoi = interception.pointArc(pCible, cap, 60, 350, 0)
+
+  local etat = {
+    pSoi = pSoi, vSoi = vCible, pCible = pCible, vCible = vCible, capCible = cap,
+    t = 0, phase = 0, enPosition = true,
+  }
+
+  -- En mode "position", la consigne vise franchement la borne de l'arc.
+  etat.modeEngagement = "position"
+  local position = interception.calculerConsigne(etat, params)
+
+  -- En mode "tir", la correction laterale est bornee : on ne casse pas la
+  -- solution de tir en cours pour aller reprendre sa place.
+  etat.modeEngagement = "tir"
+  etat.distanceTirVisee = 250
+  local tir = interception.calculerConsigne(etat, params)
+
+  verifier("mode tir signale dans la consigne", tir.modeEngagement == "tir",
+    tir.modeEngagement)
+  verifier("le biais d'arc est borne a 25 deg",
+    tir.biaisArc ~= nil and math.abs(tir.biaisArc) <= 25 + 1e-9,
+    tostring(tir.biaisArc))
+  verifier("la correction en mode tir est plus douce qu'en mode position",
+    math.abs(noyau.ecartAngulaire(tir.relevementVise, tir.relevementActuel))
+      < math.abs(noyau.ecartAngulaire(position.relevementVise, position.relevementActuel)),
+    string.format("tir %.1f deg contre position %.1f deg",
+      noyau.ecartAngulaire(tir.relevementVise, tir.relevementActuel),
+      noyau.ecartAngulaire(position.relevementVise, position.relevementActuel)))
+  verifier("la distance visee devient celle de l'arme, pas celle de l'arc",
+    proche(tir.distanceVisee, 250), tir.distanceVisee)
+  verifier("le navire regagne quand meme son arc (biais du bon cote)",
+    tir.biaisArc > 0, tir.biaisArc)
+
+  -- Sans priorite, le mode tir n'altere pas la trajectoire.
+  params.prioriteTirSurPosition = false
+  local sansPriorite = interception.calculerConsigne(etat, params)
+  verifier("priorite retiree : la trajectoire reste celle de l'arc",
+    sansPriorite.biaisArc == nil)
 end
 
 --------------------------------------------------------------------------------

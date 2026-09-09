@@ -114,7 +114,7 @@ local DEFAUTS = {
   expediteursAutorises  = nil,
 
   cheminAutopilote      = nil,
-  autopiloteDeSecours   = false,
+  cheminConfigVehicule  = nil,     -- fichier de reglage du vehicule (autopilote)
 
   periodeControle       = 0.25,
   periodeRadar          = 0.5,
@@ -148,6 +148,9 @@ local DEFAUTS_INTERCEPTION = {
   vitesseMaxi = 120, vitesseMini = 0, vitesseReference = 60,
   gainRapprochement = 0.35, ratioMini = 0.6, ratioMaxi = 1.6,
   vitesseMiniPourCap = 2,
+  -- REGLE D'ENGAGEMENT : sous ordre de feu, le tir prime sur la position.
+  prioriteTirSurPosition = true,
+  biaisArcEnTirDeg = 25,
 }
 
 local DEFAUTS_DEGATS = {
@@ -159,11 +162,12 @@ local DEFAUTS_DEGATS = {
 }
 
 local DEFAUTS_ARME = {
-  mode = "peripherique", coteArme = nil, coteRedstone = nil,
-  vitesseObus = 80, graviteObus = 9.8, iterationsTir = 4,
-  distanceTirMini = 80, distanceTirMaxi = 420, toleranceViseeDeg = 3,
-  dureeRafale = 1.5, pauseRafale = 2.0,
-  tangageMini = -60, tangageMaxi = 60,
+  -- Reglages communs a tout l'arsenal. Les portees, la balistique et la
+  -- cadence sont declarees ARME PAR ARME dans 'arme.armes'.
+  toleranceViseeDeg = 3,
+  prioriteTirSurPosition = true,
+  besoinParDefaut = "anti-aerien",
+  armes = nil,   -- OBLIGATOIRE : liste des armes embarquees
 }
 
 local DEFAUTS_RADAR = {
@@ -233,6 +237,30 @@ local function validerConfiguration(config)
   if i.predictionMaxiSecondes <= 0 then
     table.insert(anomalies, "'interception.predictionMaxiSecondes' doit etre > 0 : "
       .. "sans prediction, le navire se contenterait de suivre la cible")
+  end
+
+  if config.interception.prioriteTirSurPosition == nil then
+    config.interception.prioriteTirSurPosition = config.arme.prioriteTirSurPosition
+  end
+  config.interception.toleranceViseeDeg = config.arme.toleranceViseeDeg
+
+  if type(config.arme.armes) ~= "table" or #config.arme.armes == 0 then
+    table.insert(anomalies, "'arme.armes' doit contenir au moins une arme "
+      .. "{ identifiant, utilite, porteeMini, porteeMaxi, ... }. Utilisez la page "
+      .. "Armement du systeme d'exploitation pour la renseigner.")
+  else
+    for indice, declaration in ipairs(config.arme.armes) do
+      local complete = {}
+      for cle, valeur in pairs(declaration) do complete[cle] = valeur end
+      complete.utilite     = complete.utilite or "polyvalent"
+      complete.mode        = complete.mode or "peripherique"
+      complete.porteeMini  = complete.porteeMini or 80
+      complete.porteeMaxi  = complete.porteeMaxi or 420
+      complete.vitesseObus = complete.vitesseObus or 80
+      for _, anomalie in ipairs(armement.verifierArme(complete)) do
+        table.insert(anomalies, "'arme.armes[" .. indice .. "]' : " .. anomalie)
+      end
+    end
   end
 
   local r = config.retour
@@ -317,7 +345,7 @@ local function traiterOrdre(contexte, ordre)
       .. "embarque, la position du sol ne sert que de premier contact",
       reciblage and "RECIBLAGE" or "MISE EN CHASSE", V.format(ordre.cible)))
 
-    armement.cesserLeFeu(contexte.arme, "nouvel ordre de scramble")
+    armement.cesserLeFeu(contexte.arsenal, "nouvel ordre de scramble")
     changerEtat(contexte, ETATS.TRANSIT, E.RECEPTION_ORDRE,
       "ordre " .. ordre.identifiantOrdre)
     liaison.accuser(config, ordre, contexte.etat, "cible prise en compte")
@@ -342,13 +370,20 @@ local function traiterOrdre(contexte, ordre)
     end
 
     contexte.feuAutorise = true
-    journal.info(E.RECEPTION_ORDRE, string.format(
-      "FEU AUTORISE par l'ordre %s | l'engagement se fera sans quitter l'arc "
-      .. "arriere : la contrainte de position prime sur l'ordre de tir",
-      ordre.identifiantOrdre))
 
-    if contexte.etat == ETATS.POSITION_ATTAQUE then
-      changerEtat(contexte, ETATS.TIR, E.RECEPTION_ORDRE, "ordre de feu recu en position")
+    local priorite = config.interception.prioriteTirSurPosition
+    journal.info(E.RECEPTION_ORDRE, string.format(
+      "FEU AUTORISE par l'ordre %s | %s", ordre.identifiantOrdre,
+      priorite
+        and "LE TIR PRIME SUR LA POSITION : le navire engage des qu'il a une "
+            .. "solution, l'arc arriere reste une consigne de trajectoire"
+        or "l'engagement se fera sans quitter l'arc arriere"))
+
+    -- Avec la priorite au tir, l'ordre de feu fait passer a l'engagement
+    -- immediatement, sans attendre d'avoir rejoint l'arc.
+    if priorite or contexte.etat == ETATS.POSITION_ATTAQUE then
+      changerEtat(contexte, ETATS.TIR, E.RECEPTION_ORDRE,
+        priorite and "ordre de feu prioritaire" or "ordre de feu recu en position")
     end
     liaison.accuser(config, ordre, contexte.etat, "feu autorise")
   end
@@ -374,7 +409,7 @@ local function entrerEvasion(contexte, motif)
   contexte.pointEvasion = point
   contexte.finEvasion   = noyau.maintenant() + (config.evasion.dureeSecondes or 6)
 
-  armement.cesserLeFeu(contexte.arme, "manoeuvre d'evasion prioritaire")
+  armement.cesserLeFeu(contexte.arsenal, "manoeuvre d'evasion prioritaire")
 
   journal.avert(E.MANOEUVRE_EVASION, string.format(
     "MANOEUVRE D'EVASION PRIORITAIRE | %s | %s | point de degagement %s | "
@@ -383,9 +418,8 @@ local function entrerEvasion(contexte, motif)
 
   changerEtat(contexte, ETATS.EVASION, E.MANOEUVRE_EVASION, motif)
 
-  contexte.autopilote.definirPoint(point, "evasion")
-  contexte.autopilote.definirVitesse(config.evasion.vitesseEvasion
-    or config.interception.vitesseMaxi)
+  contexte.autopilote.definirPoint(point, "evasion",
+    config.evasion.vitesseEvasion or config.interception.vitesseMaxi)
 
   liaison.rendreCompte(config, "EVASION", motif)
 end
@@ -425,7 +459,8 @@ local function conduireEvasion(contexte)
     journal.debug(E.MANOEUVRE_EVASION, "degagement prolonge : " .. description)
   end
 
-  contexte.autopilote.definirPoint(contexte.pointEvasion, "evasion")
+  contexte.autopilote.definirPoint(contexte.pointEvasion, "evasion",
+    contexte.config.evasion.vitesseEvasion or contexte.config.interception.vitesseMaxi)
 end
 
 --------------------------------------------------------------------------------
@@ -433,60 +468,64 @@ end
 --------------------------------------------------------------------------------
 
 local function entrerRetourBase(contexte, motif)
-  contexte.indicePointRetour = 1
+  local config = contexte.config
   contexte.feuAutorise = false
-  armement.cesserLeFeu(contexte.arme, "fin de mission")
+  contexte.baseAtteinte = false
+  armement.cesserLeFeu(contexte.arsenal, "fin de mission")
 
+  local points = config.retour.pointsRetour
   journal.info(E.RETOUR_BASE, string.format(
-    "RETOUR BASE engage | %s | %d point(s) de retour a suivre, le dernier etant "
-    .. "la base | le rearmement restera une action manuelle",
-    motif, #contexte.config.retour.pointsRetour))
+    "RETOUR BASE engage | %s | %d point(s) de retour, le dernier etant la base | "
+    .. "le rearmement restera une action manuelle", motif, #points))
 
   changerEtat(contexte, ETATS.RETOUR_BASE, E.RETOUR_BASE, motif)
-  liaison.rendreCompte(contexte.config, "RETOUR_BASE", motif)
+  liaison.rendreCompte(config, "RETOUR_BASE", motif)
+
+  -- L'itineraire est confie a l'autopilote : c'est SON systeme de points de
+  -- passage qui est utilise, celui-la meme qui sert aux missions de livraison.
+  -- Le navire ne reimplemente pas la navigation, il la delegue.
+  contexte.autopilote.suivreItineraire(points, {
+    vitesse           = config.retour.vitesseRetour,
+    altitudeCroisiere = config.retour.altitudeCroisiere,
+    surEtape = function(index, point)
+      journal.info(E.POINT_RETOUR, string.format("point de retour %d/%d atteint%s : %s",
+        index, #points, point.nom and (" (" .. point.nom .. ")") or "",
+        V.format(point)))
+    end,
+    surArrivee = function(point)
+      journal.info(E.POINT_RETOUR, string.format("point de retour %d/%d atteint%s : %s",
+        #points, #points, point.nom and (" (" .. point.nom .. ")") or "",
+        V.format(point)))
+      contexte.baseAtteinte = true
+    end,
+  })
 end
 
 local function conduireRetour(contexte)
-  local config = contexte.config
-  local points = config.retour.pointsRetour
-  local indice = contexte.indicePointRetour or 1
-  local point  = points[indice]
-
-  if not point then
-    -- Liste epuisee : le navire est arrive.
-    journal.info(E.RETOUR_BASE, "base atteinte, navire immobilise")
-    contexte.autopilote.stationnaire()
-
-    local ok, fichier = pcall(fs.open, MARQUEUR_REARMEMENT, "w")
-    if ok and fichier then
-      fichier.writeLine(noyau.horodatage())
-      fichier.writeLine("Rearmement manuel requis. Supprimez ce fichier pour "
-        .. "remettre le navire en ligne.")
-      fichier.close()
-    end
-
-    journal.avert(E.REARMEMENT, string.format(
-      "REARMEMENT MANUEL REQUIS | le navire refusera tout ordre de scramble tant "
-      .. "que le fichier %s existera a bord", MARQUEUR_REARMEMENT))
-    changerEtat(contexte, ETATS.REARMEMENT, E.REARMEMENT, "mission terminee")
-    liaison.rendreCompte(config, "REARMEMENT", "navire au sol, rearmement manuel attendu")
+  -- L'autopilote pilote le convoyage ; on n'observe que son aboutissement.
+  if not (contexte.baseAtteinte or contexte.autopilote.estArrive()) then
+    journal.limite("retour", 15, "DEBUG", E.RETOUR_BASE,
+      "convoyage en cours vers la base, conduite par l'autopilote")
     return
   end
 
-  local cible = { x = point.x, y = point.y, z = point.z }
-  if config.retour.altitudeCroisiere and indice < #points then
-    cible.y = config.retour.altitudeCroisiere
+  journal.info(E.RETOUR_BASE, "base atteinte, navire immobilise")
+  contexte.autopilote.stationnaire()
+
+  local ok, fichier = pcall(fs.open, MARQUEUR_REARMEMENT, "w")
+  if ok and fichier then
+    fichier.writeLine(noyau.horodatage())
+    fichier.writeLine("Rearmement manuel requis. Supprimez ce fichier pour "
+      .. "remettre le navire en ligne.")
+    fichier.close()
   end
 
-  contexte.autopilote.definirPoint(cible, "retour base")
-  contexte.autopilote.definirVitesse(config.retour.vitesseRetour)
-
-  if V.distance(contexte.position, cible) <= (config.retour.rayonPointRetour or 30) then
-    journal.info(E.POINT_RETOUR, string.format(
-      "point de retour %d/%d atteint%s : %s", indice, #points,
-      point.nom and (" (" .. point.nom .. ")") or "", V.format(cible)))
-    contexte.indicePointRetour = indice + 1
-  end
+  journal.avert(E.REARMEMENT, string.format(
+    "REARMEMENT MANUEL REQUIS | le navire refusera tout ordre de scramble tant "
+    .. "que le fichier %s existera a bord", MARQUEUR_REARMEMENT))
+  changerEtat(contexte, ETATS.REARMEMENT, E.REARMEMENT, "mission terminee")
+  liaison.rendreCompte(contexte.config, "REARMEMENT",
+    "navire au sol, rearmement manuel attendu")
 end
 
 local function surveillerRearmement(contexte)
@@ -494,7 +533,8 @@ local function surveillerRearmement(contexte)
   if not fs.exists(MARQUEUR_REARMEMENT) then
     journal.info(E.REARMEMENT,
       "marqueur de rearmement retire par l'equipage : navire de nouveau disponible")
-    contexte.arme.coups = 0
+    contexte.arsenal.coups = 0
+    for _, arme in ipairs(contexte.arsenal.armes) do arme.rafales = 0 end
     changerEtat(contexte, ETATS.VEILLE, E.REARMEMENT, "rearmement confirme")
     liaison.rendreCompte(contexte.config, "DISPONIBLE", "rearmement manuel effectue")
     return
@@ -517,6 +557,16 @@ local function positionPresumee(contexte, maintenant)
       maintenant - piste.dernierContact)
   end
   return contexte.positionDesignee
+end
+
+--- Nature du besoin d'armement, deduite de la seule observation du radar.
+-- Le navire ne recoit aucune classification du sol : il decide lui-meme si la
+-- cible est aerienne ou au sol, a partir de son altitude relative au relief.
+local function besoinCible(contexte, pCible)
+  local plancher = (contexte.altitudeSol or 64)
+    + (contexte.config.arme.margeAltitudeSol or 12)
+  if pCible.y <= plancher then return "anti-sol" end
+  return contexte.config.arme.besoinParDefaut or "anti-aerien"
 end
 
 local function conduireInterception(contexte)
@@ -576,9 +626,7 @@ local function conduireInterception(contexte)
       return
     end
 
-    if contexte.etat == ETATS.TIR or contexte.etat == ETATS.POSITION_ATTAQUE then
-      armement.cesserLeFeu(contexte.arme, "contact radar perdu")
-    end
+    armement.cesserLeFeu(contexte.arsenal, "contact radar perdu")
   end
 
   local pCible = positionPresumee(contexte, maintenant)
@@ -589,32 +637,65 @@ local function conduireInterception(contexte)
   local capCible = (piste and piste.cap) or noyau.relevement(
     V.normeHorizontale(vCible) > 1e-3 and vCible or V.creer(0, 0, 1))
 
-  ------------------------------------------------------ 9b. consigne de vol
   local dansArc, details = interception.dansArc(contexte.position, pCible,
     capCible, config.interception)
 
+  ------------------------------------------------- 9b. arme retenue pour ce cycle
+  -- La selection precede le calcul de trajectoire : sous ordre de feu, c'est
+  -- la portee de l'arme choisie qui fixe la distance a tenir, pas la bande de
+  -- l'arc arriere.
+  local enTir = (contexte.etat == ETATS.TIR)
+  local priorite = config.interception.prioriteTirSurPosition
+  local besoin = besoinCible(contexte, pCible)
+  local arme, motifSansArme = nil, nil
+
+  if enTir then
+    arme, motifSansArme = armement.choisir(contexte.arsenal, besoin, details.distance)
+    if arme ~= contexte.armeRetenue then
+      if arme then
+        journal.info(E.SOLUTION_TIR, string.format(
+          "arme retenue : %s (%s, %s, portee %.0f-%.0f) pour une cible a %.0f blocs",
+          arme.identifiant, arme.nom, arme.utilite,
+          arme.porteeMini, arme.porteeMaxi, details.distance))
+      end
+      if contexte.armeRetenue then
+        armement.cesserLeFeu(contexte.arsenal, "changement d'arme", contexte.armeRetenue)
+      end
+      contexte.armeRetenue = arme
+    end
+    if not arme then
+      journal.limite("sans_arme", 8, "AVERT", E.SOLUTION_TIR, motifSansArme)
+    end
+  elseif contexte.armeRetenue then
+    armement.cesserLeFeu(contexte.arsenal, "engagement termine", contexte.armeRetenue)
+    contexte.armeRetenue = nil
+  end
+
+  ------------------------------------------------------ 9c. consigne de vol
   local consigne = interception.calculerConsigne({
     pSoi = contexte.position, vSoi = contexte.vitesse,
     pCible = pCible, vCible = vCible, capCible = capCible,
     t = maintenant, phase = contexte.phaseManoeuvre or 0,
-    enPosition = (contexte.etat == ETATS.POSITION_ATTAQUE or contexte.etat == ETATS.TIR),
+    enPosition = (contexte.etat == ETATS.POSITION_ATTAQUE or enTir),
+    modeEngagement = enTir and "tir" or "position",
+    distanceTirVisee = arme and armement.distanceIdeale(arme) or nil,
   }, config.interception)
 
   journal.limite("calcul_interception", config.periodeJournalInterception or 3,
     "DEBUG", E.CALCUL_INTERCEPTION, string.format(
       "cible %s v=%.1f b/s cap=%.0f | impact predit dans %.1fs en %s%s | "
-      .. "navire a %s (%.0f blocs) | consigne %s a %.1f b/s (%s)",
+      .. "navire a %s (%.0f blocs) | consigne %s a %.1f b/s (%s, engagement %s)",
       V.format(pCible), V.norme(vCible), capCible,
       consigne.tempsInterception, V.format(consigne.pCiblePredite),
       consigne.atteignable and "" or " [CIBLE PLUS RAPIDE : interception non garantie]",
       details.positionHoraire, details.distance,
-      V.format(consigne.point), consigne.vitesse, consigne.regimeVitesse))
+      V.format(consigne.point), consigne.vitesse, consigne.regimeVitesse,
+      consigne.modeEngagement))
 
-  contexte.autopilote.definirPoint(consigne.point, "interception")
-  contexte.autopilote.definirVitesse(consigne.vitesse)
+  contexte.autopilote.definirPoint(consigne.point, "interception", consigne.vitesse)
   contexte.derniereConsigne = consigne
 
-  ------------------------------------------- 9c. entree / sortie de l'arc
+  ------------------------------------------- 9d. entree / sortie de l'arc
   if dansArc and contexte.etat == ETATS.TRANSIT then
     contexte.phaseManoeuvre = interception.calerPhase(details.relevementRelatif,
       config.interception.arcCentreDeg, config.interception.arcAmplitudeDeg)
@@ -628,8 +709,7 @@ local function conduireInterception(contexte)
       contexte.feuAutorise and ETATS.TIR or ETATS.POSITION_ATTAQUE,
       E.ENTREE_POSITION_ATTAQUE, "arc arriere tenu")
 
-  elseif not dansArc and (contexte.etat == ETATS.POSITION_ATTAQUE
-                          or contexte.etat == ETATS.TIR) then
+  elseif not dansArc and (contexte.etat == ETATS.POSITION_ATTAQUE or enTir) then
     local raisons = {}
     if not details.angleOk then
       raisons[#raisons + 1] = "hors arc (" .. details.positionHoraire .. ")"
@@ -640,11 +720,22 @@ local function conduireInterception(contexte)
     if not details.altitudeOk then
       raisons[#raisons + 1] = string.format("ecart vertical %.0f", details.deltaY)
     end
-    journal.avert(E.SORTIE_POSITION_ATTAQUE, "position d'attaque perdue : "
-      .. table.concat(raisons, ", ") .. " | retour en transit pour la reprendre")
-    armement.cesserLeFeu(contexte.arme, "sortie de l'arc arriere")
-    changerEtat(contexte, ETATS.TRANSIT, E.SORTIE_POSITION_ATTAQUE,
-      table.concat(raisons, ", "))
+    local detail = table.concat(raisons, ", ")
+
+    if enTir and priorite then
+      -- LE TIR PRIME SUR LA POSITION : on ne rompt pas l'engagement pour
+      -- aller reprendre sa place. Le navire regagne son arc par petites
+      -- corrections, sans cesser de tirer.
+      journal.limite("arc_perdu_en_tir", 8, "AVERT", E.SORTIE_POSITION_ATTAQUE,
+        string.format("position d'attaque perdue (%s) mais ENGAGEMENT MAINTENU : "
+          .. "le tir prime sur la position, reprise de l'arc par biais borne "
+          .. "de %.0f deg", detail, config.interception.biaisArcEnTirDeg or 25))
+    else
+      journal.avert(E.SORTIE_POSITION_ATTAQUE, "position d'attaque perdue : "
+        .. detail .. " | retour en transit pour la reprendre")
+      armement.cesserLeFeu(contexte.arsenal, "sortie de l'arc arriere")
+      changerEtat(contexte, ETATS.TRANSIT, E.SORTIE_POSITION_ATTAQUE, detail)
+    end
   end
 
   if consigne.manoeuvreActive then
@@ -655,32 +746,36 @@ local function conduireInterception(contexte)
       consigne.vitesse, consigne.regimeVitesse, V.norme(vCible)))
   end
 
-  ---------------------------------------------------------- 9d. armement
-  if contexte.etat == ETATS.TIR and exploitable then
+  ---------------------------------------------------------- 9e. engagement
+  if enTir and exploitable and arme then
     local solution = interception.solutionTir(contexte.position, piste.position,
-      piste.vitesse, config.arme)
-    armement.pointer(contexte.arme, solution)
+      piste.vitesse, arme)
+    armement.pointer(arme, solution)
 
     local autorise, motifRefus = interception.tirAutorise({
       dansArc         = dansArc,
       distance        = details.distance,
       positionHoraire = details.positionHoraire,
-      erreurVisee     = armement.erreurVisee(contexte.arme, solution),
-    }, config.arme)
+      porteeMini      = arme.porteeMini,
+      porteeMaxi      = arme.porteeMaxi,
+      erreurVisee     = armement.erreurVisee(arme, solution),
+    }, config.interception)
 
     if autorise then
-      armement.entretenirRafale(contexte.arme, maintenant, string.format(
-        "cible a %.0f blocs en %s | impact predit %s dans %.2fs | azimut %.0f deg, "
+      armement.entretenirRafale(contexte.arsenal, arme, maintenant, string.format(
+        "cible a %.0f blocs en %s%s | impact predit %s dans %.2fs | azimut %.0f deg, "
         .. "elevation %.1f deg (chute compensee %.1f bloc)",
-        details.distance, details.positionHoraire, V.format(solution.point),
-        solution.tempsVol, solution.azimut, solution.elevation, solution.chute))
+        details.distance, details.positionHoraire,
+        dansArc and "" or " [HORS ARC - tir prioritaire]",
+        V.format(solution.point), solution.tempsVol, solution.azimut,
+        solution.elevation, solution.chute))
     else
-      armement.cesserLeFeu(contexte.arme, motifRefus)
+      armement.cesserLeFeu(contexte.arsenal, motifRefus, arme)
       journal.limite("tir_refuse", 5, "DEBUG", E.TIR, "tir suspendu : " .. motifRefus)
     end
   end
 
-  --------------------------------------------- 9e. degats subis par la cible
+  --------------------------------------------- 9f. degats subis par la cible
   if exploitable then
     local evaluation = interception.evaluerDegats(piste.historique, config.degats)
     if evaluation.degat and not contexte.degatCibleA then
@@ -709,7 +804,7 @@ local function conduireInterception(contexte)
   end
 end
 
---------------------------------------------------------------------------------
+---------------------------------
 -- 10. BOUCLES CONCURRENTES
 --------------------------------------------------------------------------------
 
@@ -755,14 +850,16 @@ local function boucleControle(contexte)
     local maintenant = noyau.maintenant()
 
     ------------------------------------------------------ telemetrie du navire
+    -- Un seul instantane de l'autopilote par cycle : ap.etat() recopie en
+    -- profondeur, le rappeler plusieurs fois serait du gaspillage pur.
+    contexte.autopilote.rafraichir()
     local position = contexte.autopilote.position()
     if position then
       contexte.position = position
       contexte.vitesse  = contexte.autopilote.vitesse() or contexte.vitesse
-      contexte.autopilote.mode() -- trace tout basculement PID <-> dead-band
+      contexte.autopilote.mode() -- trace tout basculement PID <-> zone morte
       interception.ajouterEchantillon(contexte.telemetrie, maintenant, position.y,
         V.norme(contexte.vitesse), config.degats.fenetreSecondes)
-      contexte.autopilote.actualiser()
     else
       journal.limite("position_indisponible", 5, "AVERT", E.TELEMETRIE,
         "l'autopilote ne rend pas de position : commandes gelees, "
@@ -799,6 +896,32 @@ local function boucleControle(contexte)
       end
     end
 
+    ---------------------------------------------- tableau de bord du systeme
+    -- Publie pour l'ecran d'etat du systeme d'exploitation. Lecture seule de
+    -- son cote : aucune commande ne transite par ce canal.
+    noyau.publier({
+      identifiant   = config.identifiant,
+      designation   = config.designation,
+      etat          = contexte.etat,
+      etatDepuis    = contexte.etatDepuis,
+      position      = contexte.position,
+      vitesse       = contexte.vitesse and V.norme(contexte.vitesse) or 0,
+      modeVol       = contexte.autopilote.modeVol(),
+      modePilotage  = contexte.autopilote.modePrecedent,
+      instantaneVol = contexte.autopilote.instantane(),
+      feuAutorise   = contexte.feuAutorise,
+      armeRetenue   = contexte.armeRetenue and contexte.armeRetenue.identifiant or nil,
+      arsenal       = contexte.arsenal,
+      coups         = contexte.arsenal and contexte.arsenal.coups or 0,
+      degatsSubis   = contexte.degatsSubis or 0,
+      piste         = contexte.piste,
+      consigne      = contexte.derniereConsigne,
+      ordre         = contexte.ordreCourant,
+      prioriteTir   = config.interception.prioriteTirSurPosition,
+      consignesEmises = contexte.autopilote.consignesEmises,
+      rearmementRequis = fs.exists(MARQUEUR_REARMEMENT),
+    })
+
     sleep(config.periodeControle)
   end
 end
@@ -812,9 +935,10 @@ local function boucleSurveillance(contexte)
     local piste = contexte.piste
     local maintenant = noyau.maintenant()
     journal.info(E.SURVEILLANCE, string.format(
-      "%s | etat %s depuis %.0fs | position %s | vitesse %.1f b/s | "
-      .. "cible %s | feu %s | rafales %d | degats subis %d | actif depuis %ds",
+      "%s | etat %s depuis %.0fs | vol %s | position %s | vitesse %.1f b/s | "
+      .. "cible %s | feu %s | arme %s | rafales %d | degats subis %d | actif depuis %ds",
       config.identifiant, contexte.etat, maintenant - (contexte.etatDepuis or maintenant),
+      tostring(contexte.autopilote.modeVol() or "?"),
       contexte.position and V.format(contexte.position) or "inconnue",
       V.norme(contexte.vitesse or V.creer(0, 0, 0)),
       (piste and piste.position)
@@ -822,7 +946,8 @@ local function boucleSurveillance(contexte)
           piste:silence(maintenant))
         or "aucune",
       contexte.feuAutorise and "AUTORISE" or "interdit",
-      contexte.arme and contexte.arme.coups or 0,
+      contexte.armeRetenue and contexte.armeRetenue.identifiant or "-",
+      contexte.arsenal and contexte.arsenal.coups or 0,
       contexte.degatsSubis or 0,
       math.floor(maintenant - contexte.demarrageHorloge)))
   end
@@ -851,12 +976,6 @@ local function cycleDeVie(etat)
 
   ------------------------------------------------------------------- autopilote
   local ap = noyau.exigerEtape(E.LIAISON_AUTOPILOTE, autopilote.lier, config)
-  ap.demarrer()
-  if ap.secours then
-    journal.critique(E.LIAISON_AUTOPILOTE,
-      "LE NAVIRE VOLE SANS LOI DE PILOTAGE REELLE (autopilote de secours). "
-      .. "Reglez 'autopiloteDeSecours = false' et renseignez 'cheminAutopilote'.")
-  end
 
   ------------------------------------------------------------------- liaison sol
   local coteModem = noyau.exigerEtape(E.OUVERTURE_REDNET, liaison.ouvrir, config)
@@ -866,16 +985,18 @@ local function cycleDeVie(etat)
     radar.creerContexte, config, interception)
 
   ---------------------------------------------------------------------- armement
-  local contexteArme = noyau.exigerEtape(E.DETECTION_ARME,
-    armement.creerContexte, config.arme)
+  local arsenal = noyau.exigerEtape(E.DETECTION_ARME,
+    armement.creerArsenal, config.arme)
 
   ---------------------------------------------------------------------- contexte
+  ap.rafraichir()
   local position = ap.position()
   local contexte = {
     config            = config,
     autopilote        = ap,
     radar             = contexteRadar,
-    arme              = contexteArme,
+    arsenal           = arsenal,
+    armeRetenue       = nil,
     coteModem         = coteModem,
     etat              = ETATS.VEILLE,
     etatDepuis        = noyau.maintenant(),
@@ -908,15 +1029,22 @@ local function cycleDeVie(etat)
   journal.info(E.BOUCLE_PRINCIPALE, string.format(
     "systeme embarque operationnel | controle a %.2fs, radar a %.2fs | "
     .. "arc arriere %.0f-%.0f deg (%s-%s), distance %.0f-%.0f blocs | "
-    .. "prediction d'interception %.0f-%.0fs",
+    .. "prediction d'interception %.0f-%.0fs | regle d'engagement : %s",
     config.periodeControle, config.periodeRadar,
     config.interception.arcMiniDeg, config.interception.arcMaxiDeg,
     noyau.positionHoraire(config.interception.arcMiniDeg),
     noyau.positionHoraire(config.interception.arcMaxiDeg),
     config.interception.distanceMini, config.interception.distanceMaxi,
-    config.interception.predictionMiniSecondes, config.interception.predictionMaxiSecondes))
+    config.interception.predictionMiniSecondes, config.interception.predictionMaxiSecondes,
+    config.interception.prioriteTirSurPosition
+      and "LE TIR PRIME SUR LA POSITION"
+      or "la position prime sur le tir"))
 
+  -- La boucle de vol de l'autopilote tourne EN PARALLELE du systeme
+  -- d'interception : c'est elle qui pilote reellement le vehicule, le systeme
+  -- d'interception se contente de lui donner des consignes.
   parallel.waitForAny(
+    function() ap.boucleDeVol() end,
     function() boucleLiaison(contexte) end,
     function() boucleRadar(contexte) end,
     function() boucleControle(contexte) end,

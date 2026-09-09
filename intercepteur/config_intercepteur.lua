@@ -1,18 +1,21 @@
 --[[----------------------------------------------------------------------------
   CONFIGURATION D'UN NAVIRE INTERCEPTEUR - FRENCHNET / AERONAUTICS WARFARE
   --------------------------------------------------------------------------
-  UN SEUL FICHIER PAR VEHICULE. Le bloc 'autopilote' ci-dessous est transmis
-  tel quel au module d'autopilote standardise (sections 6 et 7) : il n'y a
-  donc pas deux fichiers de reglage a maintenir pour un meme navire.
+  UN SEUL FICHIER DE REGLAGE PAR VEHICULE : autopilote/config_vehicule.lua.
+  Ce fichier-ci ne le duplique PAS - il le designe (cheminConfigVehicule) et
+  peut le surcharger ponctuellement via le bloc 'autopilote'. Gabarit,
+  moteurs, gains PID et enveloppe de vol restent au meme endroit pour tous les
+  programmes du vehicule.
 
-  Trois champs seulement sont reellement obligatoires :
+  Quatre champs seulement sont reellement obligatoires :
 
       identifiant          -> unique pour chaque navire du serveur
-      cheminAutopilote     -> ou trouver le module d'autopilote standardise
+      cheminConfigVehicule -> le fichier de reglage de l'autopilote
+      arme.armes           -> au moins une arme embarquee
       retour.pointsRetour  -> au moins un point ; le dernier est la base
 
   ATTENTION - HYPOTHESES A VALIDER AVANT LE PREMIER VOL ARME :
-  les seuils du bloc 'degats' et la balistique du bloc 'arme' sont des valeurs
+  les seuils du bloc 'degats' et la balistique de chaque arme sont des valeurs
   de depart plausibles, PAS des mesures faites sur votre serveur. Relevez les
   votres en vol d'essai (le journal en mode DEBUG donne tout ce qu'il faut)
   avant d'engager un navire avec du materiel reel.
@@ -56,47 +59,35 @@ return {
 
   ------------------------------------------------------------- AUTOPILOTE -----
 
-  -- OU TROUVER LE MODULE D'AUTOPILOTE STANDARDISE.
-  -- Le systeme d'interception n'ecrit AUCUNE loi de vol : il appelle ce
-  -- module. Si le fichier est introuvable, le navire refuse de decoller.
+  -- MODULE D'AUTOPILOTE STANDARDISE.
+  -- Le systeme d'interception n'ecrit AUCUNE loi de vol : asservissement en
+  -- cascade, PID principal et repli en zone morte appartiennent a ce module.
+  -- S'il est introuvable, le navire refuse de decoller.
   cheminAutopilote = "/autopilote/autopilote.lua",
 
-  -- Repli SANS loi de pilotage reelle, pour les bancs d'essai uniquement.
-  -- Laisser IMPERATIVEMENT a false en production : un navire arme qui vole
-  -- avec un controleur de substitution est plus dangereux qu'un navire au sol.
-  autopiloteDeSecours = false,
+  -- FICHIER DE REGLAGE DU VEHICULE. C'est le MEME fichier que celui de
+  -- l'autopilote : gabarit, moteurs, gains PID, vitesses, tolerances,
+  -- enveloppe de vol. Il n'y a donc qu'un seul fichier de reglage par
+  -- vehicule, et il n'est PAS duplique ici.
+  --   -> reglez-le avec : autopilote/interface.lua, ou la page Autopilote du
+  --      systeme d'exploitation de bord.
+  cheminConfigVehicule = "/autopilote/config_vehicule.lua",
 
-  -- Bloc transmis TEL QUEL au module d'autopilote. Les noms de cles ci-dessous
-  -- sont ceux du module standardise : adaptez-les aux votres, ce systeme ne
-  -- les lit jamais, il ne fait que les transmettre.
+  -- Surcouche ponctuelle appliquee PAR-DESSUS config_vehicule.lua, uniquement
+  -- pour ce que la mission d'interception impose. Fusion recursive : tout ce
+  -- qui n'est pas mentionne ici garde la valeur du fichier vehicule.
+  -- Laisser vide en temps normal.
   autopilote = {
-    -- Asservissement en cascade : boucle externe (position) et boucle interne
-    -- (attitude / poussee).
-    cascade = {
-      boucleExterne = { periode = 0.25 },
-      boucleInterne = { periode = 0.05 },
-    },
-    -- Controle principal : PID.
-    pid = {
-      lacet    = { kp = 1.8, ki = 0.05, kd = 0.35 },
-      tangage  = { kp = 2.2, ki = 0.08, kd = 0.40 },
-      roulis   = { kp = 1.5, ki = 0.00, kd = 0.25 },
-      poussee  = { kp = 0.9, ki = 0.12, kd = 0.10 },
-      antiEmballement = true,
-    },
-    -- Secours automatique : dead-band. Le basculement est decide par
-    -- l'autopilote lui-meme ; le systeme d'interception se contente de le
-    -- journaliser (etape "changement de mode de l'autopilote").
-    deadBand = {
-      seuilPosition = 8,
-      seuilAngle    = 4,
-      pousseeFixe   = 0.65,
-    },
-    -- Enveloppe de vol du vehicule.
-    vitesseMaxi      = 120,
-    accelerationMaxi = 18,
-    altitudePlancher = 80,
-    altitudePlafond  = 300,
+    -- Limitation du debit des consignes. La boucle de controle tourne a 4 Hz,
+    -- mais chaque consigne transmise a l'autopilote recalcule un itineraire et
+    -- journalise une ligne : on ne la reemet donc que si le point a bouge
+    -- notablement, ou apres un delai.
+    seuilDeplacementConsigne       = 8,   -- blocs
+    seuilVitesseConsigne           = 5,   -- b/s
+    periodeRafraichissementConsigne = 2,  -- secondes
+
+    -- Exemple de surcouche : resserrer une tolerance uniquement en scramble.
+    -- tolerances = { horizontale = 6 },
   },
 
   -------------------------------------------------------------- CADENCES ------
@@ -193,36 +184,72 @@ return {
     refractaireSecondes = 8,
   },
 
-  ------------------------------------------------------------------ ARME ------
+  --------------------------------------------------------------- ARSENAL ------
+  -- Le navire porte une LISTE d'armes. A chaque engagement, le systeme choisit
+  -- celle dont la portee et l'utilite conviennent a la cible.
+  --
+  -- La page Armement du systeme d'exploitation de bord edite cette liste sans
+  -- quitter le jeu : ajout, suppression, portee, utilite, balistique.
 
   arme = {
-    -- "peripherique" : affut pilotable expose par CC: Tweaked (nominal)
-    -- "redstone"     : mise a feu par signal redstone
-    -- "mixte"        : pointage par peripherique, mise a feu par redstone
-    mode = "peripherique",
-
-    coteArme     = nil,      -- nil = detection automatique de l'affut
-    coteRedstone = "back",   -- utilise en mode "redstone" ou "mixte"
-
-    -- BALISTIQUE. HYPOTHESE a mesurer sur votre serveur : la vitesse initiale
-    -- depend de la charge propulsive et du calibre montes.
-    vitesseObus   = 80,      -- blocs/seconde
-    graviteObus   = 9.8,     -- blocs/seconde carree
-    iterationsTir = 4,       -- convergence du point d'impact
-
-    -- CONDITIONS DE TIR. Toutes doivent etre reunies, y compris la tenue de
-    -- l'arc arriere : l'ordre de feu ne dispense jamais de la position.
-    distanceTirMini   = 80,
-    distanceTirMaxi   = 420,
+    -- Tolerance de pointage commune, en degres.
     toleranceViseeDeg = 3,
 
-    -- CADENCE. Une rafale continue chauffe l'arme sans gain de precision.
-    dureeRafale = 1.5,
-    pauseRafale = 2.0,
+    -- REGLE D'ENGAGEMENT.
+    --   true  : L'ORDRE DE TIR PRIME SUR LA POSITION. Le navire ouvre le feu
+    --           des qu'il a une solution valable, meme s'il n'a pas encore
+    --           rejoint son arc arriere. L'arc reste une consigne de
+    --           trajectoire, rattrapee progressivement pendant le tir.
+    --   false : comportement inverse, l'arc est un prealable au tir.
+    prioriteTirSurPosition = true,
 
-    -- Debattement de l'affut.
-    tangageMini = -60,
-    tangageMaxi = 60,
+    -- Besoin d'armement par defaut quand la cible est en vol.
+    besoinParDefaut = "anti-aerien",
+    -- Une cible sous (relief + cette marge) est traitee comme une cible au sol.
+    margeAltitudeSol = 12,
+
+    -- LES ARMES. Au moins une est obligatoire.
+    --   utilite : "anti-aerien" | "anti-sol" | "defensif" | "polyvalent"
+    --             une arme polyvalente repond a tous les besoins ; une arme
+    --             specialisee n'est choisie que pour le sien, et passe avant
+    --             la polyvalente a portee equivalente.
+    --   mode    : "peripherique" (affut pilotable) | "redstone" | "mixte"
+    --   portees : fenetre d'emploi en blocs. Le navire cherche a tenir le
+    --             CENTRE de cette fenetre sous ordre de feu.
+    armes = {
+      {
+        identifiant  = "CANON-AA-1",
+        nom          = "Canon automatique 4 pouces",
+        utilite      = "anti-aerien",
+        mode         = "peripherique",
+        coteArme     = nil,        -- nil = premier affut libre detecte
+        porteeMini   = 80,
+        porteeMaxi   = 420,
+        vitesseObus  = 80,         -- HYPOTHESE : a mesurer sur votre serveur
+        graviteObus  = 9.8,        -- HYPOTHESE : a mesurer sur votre serveur
+        dureeRafale  = 1.5,
+        pauseRafale  = 2.0,
+        tangageMini  = -60,
+        tangageMaxi  = 60,
+        actif        = true,
+        note         = "arme principale d'interception",
+      },
+      {
+        identifiant  = "MITRAILLEUSE-DEF",
+        nom          = "Mitrailleuse de defense rapprochee",
+        utilite      = "defensif",
+        mode         = "redstone",
+        coteRedstone = "back",
+        porteeMini   = 10,
+        porteeMaxi   = 120,
+        vitesseObus  = 120,
+        graviteObus  = 4.0,
+        dureeRafale  = 0.8,
+        pauseRafale  = 0.6,
+        actif        = false,      -- passez a true une fois l'arme montee
+        note         = "riposte a courte portee",
+      },
+    },
   },
 
   ----------------------------------------------------------------- RADAR ------
@@ -301,7 +328,9 @@ return {
   journalTailleMax = 98304,
 
   -- Verbosite ECRAN uniquement : "DEBUG" | "INFO" | "AVERT" | "ERREUR".
-  -- Le fichier journal enregistre TOUJOURS tout.
+  -- Le fichier journal enregistre TOUJOURS tout, y compris les lignes de
+  -- l'autopilote : le journal est PARTAGE, une mission se relit de bout en
+  -- bout, vol compris.
   -- "DEBUG" trace chaque calcul de trajectoire d'interception : indispensable
   -- pendant les vols de reglage, verbeux en operation.
   journalNiveauEcran = "INFO",
