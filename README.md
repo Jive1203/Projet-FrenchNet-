@@ -4,6 +4,9 @@
 |---|---|---|
 | **Balises GPS** | Constellation GPS fixe pour tout le serveur | [docs/guide-complet.md](docs/guide-complet.md) |
 | **FrenchNet Command** | Défense aérienne autonome, identification ami-ennemi | [docs/frenchnet-command.md](docs/frenchnet-command.md) |
+| **Doomsday Ship** | Système embarqué du ballon (phase 1) | [docs/doomsday-ship.md](docs/doomsday-ship.md) |
+
+> 📋 **[docs/api_notes.md](docs/api_notes.md)** — audit des API réellement présentes dans ce dépôt. À lire avant toute intégration : quatre des modules souvent supposés existants (autopilote, Fire Control, ADS, solveur balistique) **n'y sont pas**.
 
 ---
 
@@ -246,6 +249,7 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 lua5.4 tests/test_command.lua           -- 246 vérifications : doctrine, terrain, carte, IFF
 lua5.4 tests/test_command_runtime.lua   -- 128 vérifications : la chaîne complète, réseau simulé
 lua5.4 tests/bench.lua                  -- banc de mesure des chemins chauds
+lua5.4 tests/test_vaisseau.lua          --  67 vérifications : système embarqué du ballon
 ```
 
 ---
