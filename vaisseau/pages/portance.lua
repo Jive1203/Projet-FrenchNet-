@@ -1,113 +1,72 @@
 --[[----------------------------------------------------------------------------
   PAGE PORTANCE / ENVELOPPE
-  --------------------------------------------------------------------------
-  Page absente de la demande initiale, ajoutee parce qu'un ballon qui perd sa
+  Absente de la demande initiale, ajoutee parce qu'un ballon qui perd sa
   portance ne le signale nulle part ailleurs : la page propulsion montrerait un
   moteur en parfait etat pendant toute la descente.
 
-  L'alarme de perte de portance est DISTINCTE des alarmes moteur, volontairement.
-  Une alarme unique « avarie » obligerait l'equipage a diagnostiquer avant
-  d'agir, et les gestes ne sont pas les memes : couper la poussee ne remonte pas
-  un ballon, larguer du ballast si.
+  Ses alarmes sont DISTINCTES des alarmes moteur, volontairement : une alarme
+  unique « avarie » obligerait a diagnostiquer avant d'agir, et couper la
+  poussee ne remonte pas un ballon, larguer du ballast si.
 --------------------------------------------------------------------------------]]
 
-local widgets = dofile("/vaisseau/widgets.lua")
+local W = dofile("/vaisseau/widgets.lua")
 
 local page = { titre = "PORTANCE", periode = 1 }
 
 function page.dessiner(fenetre, ctx)
   local largeur, hauteur = fenetre.getSize()
   local hal, cfg = ctx.hal, ctx.config
-  local seuils = (cfg.seuils and cfg.seuils.portance) or {}
+  local s = (cfg.seuils and cfg.seuils.portance) or {}
 
-  widgets.effacer(fenetre)
-  widgets.entete(fenetre, "PORTANCE / ENVELOPPE")
+  W.effacer(fenetre)
+  W.entete(fenetre, "PORTANCE / ENVELOPPE")
+
+  -- sensInverse : sur une enveloppe, c'est la valeur BASSE qui est grave.
+  local seuilsGaz = {
+    attention = s.pressionAttention or 70, alarme = s.pressionAlarme or 50,
+    critique = s.pressionCritique or 30, sensInverse = true,
+  }
 
   local y = 3
-
-  ---------------------------------------------------------------- enveloppe
-  local pression = hal:lire("portance.pression")
-  local _, motifPression = hal:lire("portance.pression")
-  widgets.texte(fenetre, 2, y, "Pression enveloppe", widgets.PALETTE.attenue)
-  local seuilsPression = {
-    attention = seuils.pressionAttention or 70,
-    alarme    = seuils.pressionAlarme or 50,
-    critique  = seuils.pressionCritique or 30,
-    sensInverse = true,
-  }
-  if pression then
-    widgets.texte(fenetre, largeur - 5, y, string.format("%3.0f%%", pression),
-      widgets.couleurSeuils(pression, seuilsPression))
-  else
-    widgets.texte(fenetre, largeur - 7, y, "INDISPO", widgets.PALETTE.indispo)
-  end
-  widgets.jauge(fenetre, 2, y + 1, largeur - 2, pression, seuilsPression)
-  y = y + 3
+  local pression, motifPression = hal:lire("portance.pression")
+  y = y + W.bandeau(fenetre, y, "Pression enveloppe", pression, seuilsGaz)
   if not pression and motifPression and hauteur > 12 then
-    widgets.texte(fenetre, 3, y, tostring(motifPression):sub(1, largeur - 4),
-      widgets.PALETTE.indispo)
+    W.texte(fenetre, 3, y, tostring(motifPression):sub(1, largeur - 4), W.PALETTE.indispo)
     y = y + 1
   end
 
-  ---------------------------------------------------------------- cellules
-  local gaz = hal:lire("portance.gaz")
-  widgets.texte(fenetre, 2, y, "Cellules de gaz", widgets.PALETTE.attenue)
-  if gaz then
-    widgets.texte(fenetre, largeur - 5, y, string.format("%3.0f%%", gaz),
-      widgets.couleurSeuils(gaz, seuilsPression))
-  else
-    widgets.texte(fenetre, largeur - 7, y, "INDISPO", widgets.PALETTE.indispo)
-  end
-  widgets.jauge(fenetre, 2, y + 1, largeur - 2, gaz, seuilsPression)
-  y = y + 3
+  y = y + W.bandeau(fenetre, y, "Cellules de gaz", hal:lire("portance.gaz"), seuilsGaz)
 
-  ---------------------------------------------------------------- ballast
+  -- Ballast sans seuils : plein ou vide, aucun des deux n'est une avarie.
   local ballast = hal:lire("portance.ballast")
-  widgets.texte(fenetre, 2, y, "Ballast", widgets.PALETTE.attenue)
-  if ballast then
-    widgets.texte(fenetre, largeur - 5, y, string.format("%3.0f%%", ballast),
-      widgets.PALETTE.texte)
-  else
-    widgets.texte(fenetre, largeur - 7, y, "INDISPO", widgets.PALETTE.indispo)
-  end
-  widgets.jauge(fenetre, 2, y + 1, largeur - 2, ballast)
-  y = y + 3
+  y = y + W.bandeau(fenetre, y, "Ballast", ballast)
 
-  ---------------------------------------------------------------- vol
-  y = y + widgets.mesure(fenetre, y, "Altitude", hal:lire("vol.altitude"), "b")
+  y = y + W.mesure(fenetre, y, "Altitude", hal:lire("vol.altitude"), "b")
 
   local vario = hal:lire("vol.vitesseVerticale")
-  local seuilsVario = {
-    attention = seuils.varioAttention or -3,
-    alarme    = seuils.varioAlarme or -6,
-    critique  = seuils.varioCritique or -10,
-    sensInverse = true,
-  }
-  widgets.texte(fenetre, 2, y, "Variometre", widgets.PALETTE.attenue)
+  W.texte(fenetre, 2, y, "Variometre", W.PALETTE.attenue)
   if vario then
+    -- Signe force : « 2.0 b/s » sans signe se lit monter alors qu'on descend.
     local texte = string.format("%+.1f b/s", vario)
-    widgets.texte(fenetre, math.max(2, largeur - #texte), y, texte,
-      widgets.couleurSeuils(vario, seuilsVario))
+    W.texte(fenetre, math.max(2, largeur - #texte), y, texte, W.couleurSeuils(vario, {
+      attention = s.varioAttention or -3, alarme = s.varioAlarme or -6,
+      critique = s.varioCritique or -10, sensInverse = true }))
   else
-    widgets.texte(fenetre, largeur - 7, y, "INDISPO", widgets.PALETTE.indispo)
+    W.texte(fenetre, largeur - 7, y, "INDISPO", W.PALETTE.indispo)
   end
   y = y + 1
 
-  ---------------------------------------------------------------- largage
   if y < hauteur then
-    local disponible = ballast ~= nil and ballast > 0
-    widgets.texte(fenetre, 2, hauteur,
-      disponible and "clic : larguer du ballast" or "largage indisponible",
-      disponible and widgets.PALETTE.attention or widgets.PALETTE.indispo)
+    local possible = ballast ~= nil and ballast > 0
+    W.texte(fenetre, 2, hauteur,
+      possible and "clic : larguer du ballast" or "largage indisponible",
+      possible and W.PALETTE.attention or W.PALETTE.indispo)
   end
 end
 
---[[
-  Largage manuel. Il passe par la couture d'integration : aucun module de
-  ballast n'etant present dans le depot, l'ordre est REFUSE avec son motif
-  plutot qu'accepte en silence. Un equipage qui croit avoir largue et qui n'a
-  rien largue continue de descendre en pensant remonter.
-]]
+-- Largage manuel via la couture d'integration : aucun module de ballast n'etant
+-- present, l'ordre est REFUSE avec son motif plutot qu'accepte en silence. Un
+-- equipage qui croit avoir largue continue de descendre en pensant remonter.
 function page.clic(ctx)
   if not ctx.liaisons then return end
   local ok, motif = ctx.liaisons:appeler("autopilote", "largerBallast")

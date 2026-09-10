@@ -369,6 +369,17 @@ print("\n== TEST 5 : liaisons, un module absent ne ment jamais ==")
 do
   local liaisonsModule = dofile(RACINE .. "/vaisseau/liaisons.lua")
 
+  -- Une vraie zone, pour que le fond de carte soit reellement rasterise : sans
+  -- elle le test ne prouverait que la branche « pas de zones connues ».
+  local noyauEssai = dofile(RACINE .. "/command/noyau.lua")
+  local zonesEssai = {
+    { nom = "ALPHA-1", classe = "ALPHA", forme = "rectangle",
+      points = noyauEssai.ordonnerCoins({ { x = 0, z = -200 }, { x = 300, z = -200 },
+                                          { x = 300, z = 100 }, { x = 0, z = 100 } }) },
+    { nom = "ROMEO-1", classe = "ROMEO", forme = "cercle",
+      centre = { x = 120, z = -60 }, rayon = 80 },
+  }
+
   -- Aucun module exterieur present : c'est l'etat REEL du depot aujourd'hui.
   local avertissements = {}
   local liaisons = liaisonsModule.nouveau({}, function(niveau, etape, message)
@@ -468,6 +479,151 @@ do
 end
 
 --------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+print("\n== TEST 7 : les trois pages dessinent sans mentir ==")
+do
+  --[[
+    Les pages n'etaient couvertes par rien. Or ce sont elles qui traduisent un
+    nil du HAL en quelque chose que l'equipage lit : une page qui explose sur
+    une mesure absente laisse l'ecran fige sur des chiffres perimes, ce qui est
+    pire que pas d'ecran du tout.
+
+    Les pages font 'dofile("/vaisseau/widgets.lua")' - chemin absolu CC. On
+    detourne dofile et loadfile vers le depot le temps du test.
+  ]]
+  local vraiDofile, vraiLoadfile = dofile, loadfile
+  local function resoudre(chemin)
+    -- carte.lua et noyau.lua vivent dans command/ : c'est bien le meme fichier
+    -- qu'on copie a bord, donc c'est lui qu'il faut eprouver.
+    local nom = tostring(chemin):match("([^/]+)$")
+    if chemin == "/vaisseau/carte.lua" then return RACINE .. "/command/carte.lua" end
+    if chemin == "/vaisseau/noyau.lua" then return RACINE .. "/command/noyau.lua" end
+    if tostring(chemin):sub(1, 10) == "/vaisseau/" then
+      return RACINE .. "/vaisseau/" .. nom
+    end
+    return chemin
+  end
+  dofile = function(chemin) return vraiDofile(resoudre(chemin)) end
+  loadfile = function(chemin) return vraiLoadfile(resoudre(chemin)) end
+
+  local pages = {}
+  for _, nom in ipairs({ "propulsion", "portance", "navigation" }) do
+    pages[nom] = vraiDofile(RACINE .. "/vaisseau/pages/" .. nom .. ".lua")
+  end
+
+  local function fenetre(l, h)
+    local f = fausseFenetre()
+    f.largeur, f.hauteur = l, h
+    return f
+  end
+
+  -- HAL sans AUCUN peripherique : toutes les mesures rendent nil + motif.
+  local halModule = dofile(RACINE .. "/vaisseau/hal.lua")
+  local halMuet = halModule.nouveau({}, fauxPeripheriques({}), function() end)
+  halMuet:decouvrir()
+
+  local halPlein = halModule.nouveau({}, fauxPeripheriques({
+    ["back"] = { types = { "machin" }, methodes = {
+      getStress = function() return 700 end,
+      getStressCapacity = function() return 800 end,
+      getSpeed = function() return 96 end,
+      getPressure = function() return 25 end,
+      getBallast = function() return 40 end,
+      getAltitude = function() return 180 end,
+      getVerticalSpeed = function() return -8 end,
+    } } }), function() end)
+  halPlein:decouvrir()
+
+  local liaisonsModule = dofile(RACINE .. "/vaisseau/liaisons.lua")
+
+  local function contexte(hal)
+    local lien = liaisonsModule.nouveau({}, function() end, function() return nil end)
+    lien:charger()
+    return { config = {}, hal = hal, liaisons = lien, journal = function() end,
+             etat = { mode = "VEILLE" }, position = { x = 120, y = 180, z = -60 },
+             waypoints = {}, zones = zonesEssai, propulsion = {} }
+  end
+
+  --[[
+    Le point qui compte : capteurs muets ET capteurs bavards, sur une fenetre
+    large et sur une fenetre etroite. Les quatre combinaisons doivent dessiner
+    sans erreur, parce qu'aucune d'elles n'est improbable a bord.
+  ]]
+  for _, nom in ipairs({ "propulsion", "portance", "navigation" }) do
+    local page = pages[nom]
+    verifier(nom .. " : le module se charge", type(page) == "table")
+    for _, cas in ipairs({ { "capteurs muets", halMuet }, { "capteurs actifs", halPlein } }) do
+      for _, taille in ipairs({ { 51, 19 }, { 18, 8 } }) do
+        local ctx = contexte(cas[2])
+        if page.init then pcall(page.init, ctx) end
+        local ok, err = pcall(page.dessiner, fenetre(taille[1], taille[2]), ctx)
+        verifier(string.format("%s : dessine en %dx%d avec %s",
+          nom, taille[1], taille[2], cas[1]), ok, tostring(err))
+      end
+    end
+  end
+
+  -- La page navigation a bien trouve la carte : sinon le test ci-dessus
+  -- passerait en n'eprouvant que la branche « carte.lua absent ».
+  do
+    local ctx = contexte(halPlein)
+    pages.navigation.init(ctx)
+    verifier("navigation : la vue de carte est construite (carte.lua trouve)",
+      ctx.navigation.vue ~= nil)
+  end
+
+  --[[
+    L'ACQUIT DE CARBURANT NUCLEAIRE N'EST PAS UNE MESURE. Il relance un
+    minuteur tenu par le systeme ; si un clic ne le relancait pas, la page
+    afficherait « non initialise » pour toujours et l'equipage cesserait de la
+    regarder.
+  ]]
+  local ctxProp = contexte(halPlein)
+  ctxProp.enregistre = false
+  ctxProp.enregistrerEtat = function() ctxProp.enregistre = true end
+  pages.propulsion.clic(ctxProp, 5, 5)
+  verifier("propulsion : le clic date le renouvellement",
+    type(ctxProp.propulsion.renouvelleA) == "number")
+  verifier("propulsion : et l'etat est enregistre", ctxProp.enregistre)
+
+  --[[
+    LARGAGE DE BALLAST SANS MODULE. C'est le coeur de la regle : un equipage
+    qui croit avoir largue et qui n'a rien largue continue de descendre en
+    pensant remonter. Le clic doit journaliser un REFUS, jamais un succes.
+  ]]
+  local dit = {}
+  local ctxPort = contexte(halPlein)
+  ctxPort.journal = function(_, _, message) dit[#dit + 1] = message end
+  pages.portance.clic(ctxPort)
+  verifier("portance : le largage sans module est refuse, pas simule",
+    #dit == 1 and dit[1]:find("IMPOSSIBLE", 1, true) ~= nil,
+    table.concat(dit, " | "))
+
+  -- Meme regle pour la route : « transmise » sans destinataire serait le pire
+  -- des mensonges sur une page de navigation.
+  local ctxNav = contexte(halPlein)
+  pages.navigation.init(ctxNav)
+  local okVide, motifVide = pages.navigation.envoyerRoute(ctxNav)
+  verifier("navigation : pas de waypoint, pas de route",
+    okVide == false and motifVide:find("aucun waypoint", 1, true) ~= nil, tostring(motifVide))
+
+  ctxNav.waypoints = { { nom = "ALPHA", x = 100, z = 200 } }
+  local okRoute, motifRoute = pages.navigation.envoyerRoute(ctxNav)
+  verifier("navigation : autopilote absent -> route NON transmise",
+    okRoute == false and type(motifRoute) == "string" and
+    motifRoute:find("absent", 1, true) ~= nil, tostring(motifRoute))
+
+  -- Le clic fait defiler la selection : seul geste possible sans clavier.
+  ctxNav.waypoints[2] = { nom = "BRAVO", x = 0, z = 0 }
+  pages.navigation.clic(ctxNav)
+  egal("navigation : premier clic selectionne le waypoint 1", ctxNav.navigation.actif, 1)
+  pages.navigation.clic(ctxNav)
+  pages.navigation.clic(ctxNav)
+  egal("navigation : la selection boucle", ctxNav.navigation.actif, 1)
+
+  dofile, loadfile = vraiDofile, vraiLoadfile
+end
+
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

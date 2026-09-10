@@ -1,21 +1,16 @@
 --[[----------------------------------------------------------------------------
   DOOMSDAY SHIP - DIAGNOSTIC DE BORD
-  --------------------------------------------------------------------------
       diagnostic          affiche le rapport
       diagnostic sauver   l'ecrit aussi dans diagnostic.txt
 
   A LANCER AVANT TOUT REGLAGE. Le catalogue de mesures du HAL contient des noms
-  de methode PLAUSIBLES, pas certains : je ne connais pas l'API de Create
-  Aeronautics. Ce rapport est ce qui transforme ces suppositions en certitudes.
+  de methode PLAUSIBLES, pas certains : l'API de Create Aeronautics n'est pas
+  connue. Ce rapport transforme ces suppositions en certitudes, et il est
+  exactement ce qu'il faut coller dans un ticket.
 
-  Il donne, dans cet ordre :
-    1. les peripheriques reels, leurs types, leurs methodes ;
-    2. les mesures que le HAL a su lier tout seul, et celles qu'il n'a pas su ;
-    3. un ECHANTILLON de valeur pour chaque methode sans argument, ce qui
-       permet de voir immediatement laquelle donne quoi ;
-    4. l'etat des modules exterieurs - autopilote, Fire Control, ADS.
-
-  Ce rapport est exactement ce qu'il faut coller dans un ticket.
+  1. peripheriques reels, types, methodes ; 2. mesures liees et manquantes ;
+  3. ECHANTILLON de chaque methode sans argument - c'est ce tableau qui dit
+  laquelle donne quoi ; 4. modules exterieurs ; 5. reseau.
 --------------------------------------------------------------------------------]]
 
 local function repertoire()
@@ -29,8 +24,7 @@ local function repertoire()
   return "vaisseau"
 end
 
-local REPERTOIRE = repertoire()
-local lignes = {}
+local REPERTOIRE, lignes = repertoire(), {}
 
 local function ligne(texte)
   texte = tostring(texte or "")
@@ -50,6 +44,22 @@ local function module(nom)
   return ok and m or nil
 end
 
+-- Rend une valeur quelconque lisible sur une ligne, table comprise.
+local function rendre(ok, valeur)
+  if not ok then return "erreur : " .. tostring(valeur):sub(1, 40) end
+  if type(valeur) ~= "table" then
+    return tostring(valeur) .. " (" .. type(valeur) .. ")"
+  end
+  local champs = {}
+  for cle, v in pairs(valeur) do
+    if type(v) ~= "table" and type(v) ~= "function" then
+      champs[#champs + 1] = tostring(cle) .. "=" .. tostring(v)
+    end
+    if #champs >= 4 then break end
+  end
+  return "table { " .. table.concat(champs, ", ") .. " }"
+end
+
 term.clear() term.setCursorPos(1, 1)
 ligne("DIAGNOSTIC DE BORD - DOOMSDAY SHIP")
 ligne("ordinateur #" .. os.getComputerID()
@@ -59,7 +69,6 @@ local halModule      = module("hal.lua")
 local liaisonsModule = module("liaisons.lua")
 local cfg = module("config_vaisseau.lua") or {}
 
---------------------------------------------------------------------------------
 titre("1. PERIPHERIQUES DU BALLON")
 
 if not halModule then
@@ -69,6 +78,8 @@ else
   local inventaire = hal:dresserInventaire()
 
   if #inventaire == 0 then
+    -- Zero peripherique est presque toujours un cablage, pas un reglage :
+    -- c'est la panne qui a deja coute le plus de temps sur ce depot.
     ligne("AUCUN peripherique visible.")
     ligne("")
     ligne("C'est un probleme PHYSIQUE, pas un reglage :")
@@ -83,16 +94,12 @@ else
       ligne("")
       ligne("  " .. p.nom)
       ligne("    types    : " .. (#p.types > 0 and table.concat(p.types, ", ") or "?"))
-      ligne("    methodes : " .. (#p.methodes > 0 and table.concat(p.methodes, ", ")
-        or "aucune"))
+      ligne("    methodes : " .. (#p.methodes > 0 and table.concat(p.methodes, ", ") or "aucune"))
     end
   end
 
-  --------------------------------------------------------------------------------
   titre("2. MESURES")
-
-  local liees, manquantes = hal:decouvrir()
-  ligne(string.format("%d liee(s), %d manquante(s)", liees, manquantes))
+  ligne(("%d liee(s), %d manquante(s)"):format(hal:decouvrir()))
 
   local cles = {}
   for cle in pairs(halModule.MESURES) do cles[#cles + 1] = cle end
@@ -102,13 +109,12 @@ else
   ligne("LIEES :")
   local aucune = true
   for _, cle in ipairs(cles) do
-    local liaison = hal.liaisons[cle]
-    if liaison then
+    local l = hal.liaisons[cle]
+    if l then
       aucune = false
       local valeur, motif = hal:lire(cle)
-      ligne(string.format("  %-26s %s.%s() = %s",
-        cle, liaison.peripherique, liaison.methode,
-        valeur and string.format("%.2f", valeur) or ("nil (" .. tostring(motif) .. ")")))
+      ligne(("  %-26s %s.%s() = %s"):format(cle, l.peripherique, l.methode,
+        valeur and ("%.2f"):format(valeur) or ("nil (" .. tostring(motif) .. ")")))
     end
   end
   if aucune then ligne("  aucune") end
@@ -119,12 +125,11 @@ else
   for _, cle in ipairs(cles) do
     if hal.manquantes[cle] then
       aucune = false
-      ligne(string.format("  %-26s %s", cle, hal.manquantes[cle]))
+      ligne(("  %-26s %s"):format(cle, hal.manquantes[cle]))
     end
   end
   if aucune then ligne("  aucune") end
 
-  --------------------------------------------------------------------------------
   titre("3. ECHANTILLON DE CHAQUE METHODE")
   ligne("Appel sans argument. C'est ce tableau qui dit quelle methode donne")
   ligne("quelle grandeur - et donc quoi mettre dans 'mesures' de la config.")
@@ -134,29 +139,13 @@ else
       ligne("")
       ligne("  " .. p.nom)
       for _, methode in ipairs(p.methodes) do
-        local ok, valeur = pcall(peripheral.call, p.nom, methode)
-        local rendu
-        if not ok then
-          rendu = "erreur : " .. tostring(valeur):sub(1, 40)
-        elseif type(valeur) == "table" then
-          local champs = {}
-          for cle, v in pairs(valeur) do
-            if type(v) ~= "table" and type(v) ~= "function" then
-              champs[#champs + 1] = tostring(cle) .. "=" .. tostring(v)
-            end
-            if #champs >= 4 then break end
-          end
-          rendu = "table { " .. table.concat(champs, ", ") .. " }"
-        else
-          rendu = tostring(valeur) .. " (" .. type(valeur) .. ")"
-        end
-        ligne(string.format("    %-24s -> %s", methode .. "()", rendu))
+        ligne(("    %-24s -> %s"):format(methode .. "()",
+          rendre(pcall(peripheral.call, p.nom, methode))))
       end
     end
   end
 end
 
---------------------------------------------------------------------------------
 titre("4. MODULES EXTERIEURS")
 
 if not liaisonsModule then
@@ -165,7 +154,7 @@ else
   local liaisons = liaisonsModule.nouveau(cfg, function() end)
   liaisons:charger()
   for _, l in ipairs(liaisons:rapport()) do
-    ligne(string.format("  %-12s %-8s %s", l.module, l.statut, l.detail))
+    ligne(("  %-12s %-8s %s"):format(l.module, l.statut, l.detail))
   end
   ligne("")
   ligne("Un module ABSENT n'est pas une panne : c'est un module qui n'existe")
@@ -173,7 +162,6 @@ else
   ligne("au lieu de simuler une integration. Voir docs/api_notes.md.")
 end
 
---------------------------------------------------------------------------------
 titre("5. RESEAU")
 ligne("HTTP sortant : " .. (http and "DISPONIBLE" or "DESACTIVE sur ce serveur"))
 if not http then
@@ -183,23 +171,23 @@ local modem = false
 for _, nom in ipairs(peripheral.getNames()) do
   if peripheral.getType(nom) == "modem" then modem = true end
 end
-ligne("Modem : " .. (modem and "present" or
-  "ABSENT - le ballon sera invisible de FrenchNet et classe INCONNU"))
-ligne("GPS : " .. ((gps.locate(2, false)) and "position acquise" or
-  "AUCUNE position - constellation de balises hors de portee"))
+ligne("Modem : " .. (modem and "present"
+  or "ABSENT - le ballon sera invisible de FrenchNet et classe INCONNU"))
+ligne("GPS : " .. ((gps.locate(2, false)) and "position acquise"
+  or "AUCUNE position - constellation de balises hors de portee"))
 
---------------------------------------------------------------------------------
 titre("FIN")
 ligne("Relevez les coordonnees du ballon avec F3 si le GPS est absent.")
 
 local argument = ({ ... })[1]
 if argument == "sauver" or argument == "save" then
-  local f = fs.open(fs.combine(REPERTOIRE, "diagnostic.txt"), "w")
+  local chemin = fs.combine(REPERTOIRE, "diagnostic.txt")
+  local f = fs.open(chemin, "w")
   if f then
     f.write(table.concat(lignes, "\n"))
     f.close()
     print("")
-    print("Rapport ecrit dans " .. fs.combine(REPERTOIRE, "diagnostic.txt"))
+    print("Rapport ecrit dans " .. chemin)
   end
 else
   print("")

@@ -1,124 +1,97 @@
 --[[----------------------------------------------------------------------------
   PAGE PROPULSION / ENERGIE
-  --------------------------------------------------------------------------
-  Toutes les valeurs viennent du HAL. Une mesure que le HAL n'a pas su lier
-  s'affiche INDISPO avec son motif - jamais un zero, qui se lirait « moteur a
-  l'arret » et enverrait l'equipage chercher une panne inexistante.
+  Tout vient du HAL. Une mesure non liee s'affiche INDISPO avec son motif,
+  jamais un zero : « 0 rpm » se lirait « moteur a l'arret » et enverrait
+  l'equipage chercher une panne inexistante.
 
-  Le compte a rebours du carburant nucleaire n'est PAS lu du mod : aucune API
-  connue ne l'expose. Il est tenu par le systeme lui-meme, a partir de la duree
-  declaree en configuration et de la date du dernier renouvellement, que
-  l'equipage valide d'un clic. C'est declare comme tel a l'ecran : une
-  echeance tenue a la main doit se savoir tenue a la main.
+  Le compte a rebours du carburant nucleaire n'est PAS lu du mod (aucune API
+  connue ne l'expose) : il est tenu par le systeme, a partir de la duree
+  configuree et d'un acquittement de l'equipage. Le libelle dit « declare »
+  et non « mesure » - un equipage qui croit lire un capteur alors qu'il lit un
+  minuteur ne verifiera jamais le reacteur.
 --------------------------------------------------------------------------------]]
 
-local widgets = dofile("/vaisseau/widgets.lua")
+local W = dofile("/vaisseau/widgets.lua")
 
 local page = { titre = "PROPULSION", periode = 1 }
 
-function page.init(ctx)
-  ctx.propulsion = ctx.propulsion or {}
+function page.init(ctx) ctx.propulsion = ctx.propulsion or {} end
+
+-- Mesure + son motif d'indisponibilite en un seul appel au HAL.
+local function ligne(f, y, hal, cle, libelle, unite, seuils)
+  local v, motif = hal:lire(cle)
+  return W.mesure(f, y, libelle, v, unite, seuils, motif)
 end
 
 function page.dessiner(fenetre, ctx)
   local largeur, hauteur = fenetre.getSize()
   local hal, cfg = ctx.hal, ctx.config
-  local seuils = (cfg.seuils and cfg.seuils.propulsion) or {}
+  local s = (cfg.seuils and cfg.seuils.propulsion) or {}
 
-  widgets.effacer(fenetre)
-  widgets.entete(fenetre, "PROPULSION", ctx.etat and ctx.etat.mode or nil)
+  W.effacer(fenetre)
+  W.entete(fenetre, "PROPULSION", ctx.etat and ctx.etat.mode or nil)
 
   local y = 3
+  y = y + ligne(fenetre, y, hal, "propulsion.stress", "Stress", "su")
 
-  ---------------------------------------------------------------- stress
-  local stress   = hal:lire("propulsion.stress")
   local capacite = hal:lire("propulsion.capacite")
-  local charge   = hal:pourcentage("propulsion.stress", "propulsion.capacite")
+  if capacite then y = y + W.mesure(fenetre, y, "Capacite", capacite, "su") end
 
-  y = y + widgets.mesure(fenetre, y, "Stress", stress, "su",
-    nil, select(2, hal:lire("propulsion.stress")))
-  if capacite then
-    y = y + widgets.mesure(fenetre, y, "Capacite", capacite, "su")
-  end
+  local charge = hal:pourcentage("propulsion.stress", "propulsion.capacite")
   if charge then
-    widgets.texte(fenetre, 2, y, "Charge reseau", widgets.PALETTE.attenue)
-    widgets.jauge(fenetre, 2, y + 1, largeur - 2, charge,
-      { attention = seuils.chargeAttention or 70,
-        alarme    = seuils.chargeAlarme or 85,
-        critique  = seuils.chargeCritique or 95 })
-    widgets.texte(fenetre, largeur - 5, y, string.format("%3.0f%%", charge),
-      widgets.couleurSeuils(charge, {
-        attention = seuils.chargeAttention or 70,
-        alarme = seuils.chargeAlarme or 85, critique = seuils.chargeCritique or 95 }))
-    y = y + 3
+    y = y + W.bandeau(fenetre, y, "Charge reseau", charge,
+      { attention = s.chargeAttention or 70, alarme = s.chargeAlarme or 85,
+        critique = s.chargeCritique or 95 })
   end
 
-  ---------------------------------------------------------------- regime
-  local _, motifVitesse = hal:lire("propulsion.vitesse")
-  y = y + widgets.mesure(fenetre, y, "Regime", hal:lire("propulsion.vitesse"), "rpm",
-    nil, motifVitesse)
-  local _, motifPoussee = hal:lire("propulsion.poussee")
-  y = y + widgets.mesure(fenetre, y, "Poussee", hal:lire("propulsion.poussee"), "%",
-    nil, motifPoussee)
+  y = y + ligne(fenetre, y, hal, "propulsion.vitesse", "Regime", "rpm")
+  y = y + ligne(fenetre, y, hal, "propulsion.poussee", "Poussee", "%")
 
-  ---------------------------------------------------------------- energie
-  if y < hauteur - 4 then
-    local energie = hal:pourcentage("energie.stock", "energie.capacite")
-    if energie then
-      y = y + 1
-      widgets.texte(fenetre, 2, y, "Energie", widgets.PALETTE.attenue)
-      widgets.jauge(fenetre, 2, y + 1, largeur - 2, energie,
-        { attention = 40, alarme = 20, critique = 10, sensInverse = true })
-      y = y + 3
-    end
+  local energie = y < hauteur - 4 and hal:pourcentage("energie.stock", "energie.capacite")
+  if energie then
+    y = y + 1 + W.bandeau(fenetre, y + 1, "Energie", energie,
+      { attention = 40, alarme = 20, critique = 10, sensInverse = true })
   end
 
-  ------------------------------------------------- carburant nucleaire
-  --[[
-    Echeance tenue par le systeme, faute d'API. Le libelle le dit : « declare »
-    et non « mesure ». Un equipage qui croit lire un capteur alors qu'il lit un
-    minuteur ne verifiera jamais le reacteur.
-  ]]
-  local nucleaire = cfg.carburantNucleaire
-  if nucleaire and y < hauteur - 2 then
+  local nuc = cfg.carburantNucleaire
+  if nuc and y < hauteur - 2 then
     local reste
-    if nucleaire.dureeSecondes and ctx.propulsion.renouvelleA then
-      reste = nucleaire.dureeSecondes - (os.clock() - ctx.propulsion.renouvelleA)
+    if nuc.dureeSecondes and ctx.propulsion.renouvelleA then
+      reste = nuc.dureeSecondes - (os.clock() - ctx.propulsion.renouvelleA)
     end
-    local texte = widgets.duree(reste) or "non initialise"
-    local couleur = widgets.PALETTE.ok
-    if reste == nil then couleur = widgets.PALETTE.indispo
-    elseif reste <= (nucleaire.critique or 600) then couleur = widgets.PALETTE.critique
-    elseif reste <= (nucleaire.alarme or 3600) then couleur = widgets.PALETTE.alarme
-    elseif reste <= (nucleaire.attention or 7200) then couleur = widgets.PALETTE.attention end
+    local texte = W.duree(reste) or "non initialise"
+    -- Seuils en 'if' explicite : un ternaire enchaine ici finirait par masquer
+    -- le cas 'reste == nil', qui doit rester gris et non vert.
+    local couleur = W.PALETTE.ok
+    if reste == nil then couleur = W.PALETTE.indispo
+    elseif reste <= (nuc.critique or 600) then couleur = W.PALETTE.critique
+    elseif reste <= (nuc.alarme or 3600) then couleur = W.PALETTE.alarme
+    elseif reste <= (nuc.attention or 7200) then couleur = W.PALETTE.attention end
 
-    widgets.texte(fenetre, 2, y, "Nucleaire (declare)", widgets.PALETTE.attenue)
-    widgets.texte(fenetre, math.max(2, largeur - #texte), y, texte, couleur)
+    W.texte(fenetre, 2, y, "Nucleaire (declare)", W.PALETTE.attenue)
+    W.texte(fenetre, math.max(2, largeur - #texte), y, texte, couleur)
     y = y + 1
   end
 
-  -- Biofuel : capacite restante, si le HAL a su la lier.
-  local bio = cfg.biofuel and hal:lire(cfg.biofuel.mesure or "energie.stock") or nil
+  local bio = cfg.biofuel and hal:lire(cfg.biofuel.mesure or "energie.stock")
   if bio and y < hauteur then
-    widgets.mesure(fenetre, y, "Biofuel", bio, cfg.biofuel.unite or "mB",
+    y = y + W.mesure(fenetre, y, "Biofuel", bio, cfg.biofuel.unite or "mB",
       { attention = cfg.biofuel.attention, alarme = cfg.biofuel.alarme,
         critique = cfg.biofuel.critique, sensInverse = true })
-    y = y + 1
   end
 
   if y < hauteur then
-    widgets.texte(fenetre, 2, hauteur, "clic : carburant renouvele",
-      widgets.PALETTE.indispo)
+    W.texte(fenetre, 2, hauteur, "clic : carburant renouvele", W.PALETTE.indispo)
   end
 end
 
--- Un clic dans la page acquitte le renouvellement du carburant nucleaire.
-function page.clic(ctx, x, y)
+-- Un clic acquitte le renouvellement du carburant nucleaire.
+function page.clic(ctx)
   ctx.propulsion = ctx.propulsion or {}
   ctx.propulsion.renouvelleA = os.clock()
   if ctx.journal then
-    ctx.journal("INFO", "propulsion",
-      "renouvellement du carburant nucleaire declare par l'equipage : compte a rebours relance")
+    ctx.journal("INFO", "propulsion", "renouvellement du carburant nucleaire " ..
+      "declare par l'equipage : compte a rebours relance")
   end
   if ctx.enregistrerEtat then ctx.enregistrerEtat() end
 end

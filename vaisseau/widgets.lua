@@ -1,144 +1,111 @@
---[[----------------------------------------------------------------------------
-  DOOMSDAY SHIP - PRIMITIVES D'AFFICHAGE PARTAGEES PAR LES PAGES
-  --------------------------------------------------------------------------
-  Une page ne doit pas reinventer une jauge. Ces primitives ecrivent dans une
-  FENETRE (objet rendu par window.create), jamais dans le terminal global.
+--[[ DOOMSDAY SHIP - primitives d'affichage partagees par les pages.
+     Ecrivent dans une FENETRE (window.create), jamais dans le terminal global.
+     REGLE : une valeur nil s'affiche INDISPO, jamais 0. Un reservoir vide et
+     un capteur muet ne se ressemblent pas ; les confondre se paie cher. ]]
 
-  REGLE COMMUNE A TOUTES : une valeur nil s'affiche « INDISPO » et non « 0 ».
-  Un reservoir vide et un capteur muet ne se ressemblent pas ; les confondre
-  sur une page de portance se paie cher.
---------------------------------------------------------------------------------]]
+local W = { VERSION = "2.0.0" }
+local C = colors
 
-local widgets = { VERSION = "1.0.0" }
-
-widgets.PALETTE = {
-  fond      = colors.black,
-  texte     = colors.white,
-  attenue   = colors.lightGray,
-  titre     = colors.cyan,
-  ok        = colors.lime,
-  attention = colors.yellow,
-  alarme    = colors.orange,
-  critique  = colors.red,
-  indispo   = colors.gray,
-  jauge     = colors.gray,
+W.PALETTE = {
+  fond = C.black, texte = C.white, attenue = C.lightGray, titre = C.cyan,
+  ok = C.lime, attention = C.yellow, alarme = C.orange, critique = C.red,
+  indispo = C.gray, jauge = C.gray,
 }
+local P = W.PALETTE
 
-local function couleurs(fenetre, fg, bg)
-  if fg then pcall(fenetre.setTextColour, fg) end
-  if bg then pcall(fenetre.setBackgroundColour, bg) end
+local function coul(f, fg, bg)
+  if fg then pcall(f.setTextColour, fg) end
+  if bg then pcall(f.setBackgroundColour, bg) end
 end
 
-function widgets.effacer(fenetre, fond)
-  couleurs(fenetre, widgets.PALETTE.texte, fond or widgets.PALETTE.fond)
-  pcall(fenetre.clear)
+function W.effacer(f, fond) coul(f, P.texte, fond or P.fond) pcall(f.clear) end
+
+function W.texte(f, x, y, t, fg, bg)
+  coul(f, fg or P.texte, bg or P.fond)
+  pcall(f.setCursorPos, x, y) pcall(f.write, tostring(t))
 end
 
-function widgets.texte(fenetre, x, y, texte, fg, bg)
-  couleurs(fenetre, fg or widgets.PALETTE.texte, bg or widgets.PALETTE.fond)
-  pcall(fenetre.setCursorPos, x, y)
-  pcall(fenetre.write, tostring(texte))
-end
-
-function widgets.entete(fenetre, titre, sousTitre)
-  local largeur = select(1, fenetre.getSize())
-  couleurs(fenetre, colors.black, widgets.PALETTE.titre)
-  pcall(fenetre.setCursorPos, 1, 1)
-  pcall(fenetre.write, string.rep(" ", largeur))
-  pcall(fenetre.setCursorPos, 2, 1)
-  pcall(fenetre.write, tostring(titre):sub(1, largeur - 2))
-  if sousTitre then
-    local s = tostring(sousTitre)
-    local x = math.max(2, largeur - #s)
-    pcall(fenetre.setCursorPos, x, 1)
-    pcall(fenetre.write, s:sub(1, largeur - x + 1))
+function W.entete(f, titre, sous)
+  local l = select(1, f.getSize())
+  coul(f, C.black, P.titre)
+  pcall(f.setCursorPos, 1, 1) pcall(f.write, string.rep(" ", l))
+  pcall(f.setCursorPos, 2, 1) pcall(f.write, tostring(titre):sub(1, l - 2))
+  if sous then
+    local s, x = tostring(sous), math.max(2, l - #tostring(sous))
+    pcall(f.setCursorPos, x, 1) pcall(f.write, s:sub(1, l - x + 1))
   end
-  couleurs(fenetre, widgets.PALETTE.texte, widgets.PALETTE.fond)
+  coul(f, P.texte, P.fond)
 end
 
---[[
-  Couleur d'une valeur selon des seuils croissants de gravite.
-  seuils = { attention = , alarme = , critique = , sensInverse = bool }
-  sensInverse : la gravite augmente quand la valeur BAISSE (pression, gaz,
-  munitions). C'est le cas le plus frequent a bord d'un ballon.
-]]
-function widgets.couleurSeuils(valeur, seuils)
-  if valeur == nil then return widgets.PALETTE.indispo end
-  if not seuils then return widgets.PALETTE.texte end
-  local P = widgets.PALETTE
-  local function depasse(seuil)
+--[[ seuils.sensInverse : la gravite monte quand la valeur BAISSE (pression,
+     gaz, munitions). C'est le cas le plus frequent a bord d'un ballon. ]]
+function W.couleurSeuils(v, s)
+  if v == nil then return P.indispo end
+  if not s then return P.texte end
+  local function passe(seuil)
     if seuil == nil then return false end
-    if seuils.sensInverse then return valeur <= seuil end
-    return valeur >= seuil
+    if s.sensInverse then return v <= seuil end
+    return v >= seuil
   end
-  if depasse(seuils.critique)  then return P.critique end
-  if depasse(seuils.alarme)    then return P.alarme end
-  if depasse(seuils.attention) then return P.attention end
+  if passe(s.critique) then return P.critique end
+  if passe(s.alarme) then return P.alarme end
+  if passe(s.attention) then return P.attention end
   return P.ok
 end
 
---[[
-  Ligne de mesure : libelle a gauche, valeur a droite.
-  valeur = nil -> « INDISPO » en gris, et le motif est affiche si la place le
-  permet : savoir POURQUOI une mesure manque vaut mieux que constater qu'elle
-  manque.
-]]
-function widgets.mesure(fenetre, y, libelle, valeur, unite, seuils, motif)
-  local largeur = select(1, fenetre.getSize())
-  widgets.texte(fenetre, 2, y, tostring(libelle), widgets.PALETTE.attenue)
-
-  local texte, couleur
-  if valeur == nil then
-    texte, couleur = "INDISPO", widgets.PALETTE.indispo
-  else
-    texte = string.format("%.0f%s", valeur, unite and (" " .. unite) or "")
-    couleur = widgets.couleurSeuils(valeur, seuils)
-  end
-
-  local x = math.max(2 + #libelle + 1, largeur - #texte)
-  widgets.texte(fenetre, x, y, texte, couleur)
-
-  if valeur == nil and motif and largeur >= 30 then
-    local court = tostring(motif):sub(1, largeur - 4)
-    widgets.texte(fenetre, 3, y + 1, court, widgets.PALETTE.indispo)
+-- Libelle a gauche, valeur a droite. Rend le nombre de lignes consommees.
+function W.mesure(f, y, libelle, v, unite, seuils, motif)
+  local l = select(1, f.getSize())
+  W.texte(f, 2, y, tostring(libelle), P.attenue)
+  local t, c
+  if v == nil then t, c = "INDISPO", P.indispo
+  else t, c = string.format("%.0f%s", v, unite and (" " .. unite) or ""),
+              W.couleurSeuils(v, seuils) end
+  W.texte(f, math.max(2 + #libelle + 1, l - #t), y, t, c)
+  -- Savoir POURQUOI une mesure manque vaut mieux que constater qu'elle manque.
+  if v == nil and motif and l >= 30 then
+    W.texte(f, 3, y + 1, tostring(motif):sub(1, l - 4), P.indispo)
     return 2
   end
   return 1
 end
 
---[[
-  Jauge horizontale. pourcentage = nil -> barre vide hachuree, pas une barre a
-  zero : une jauge a zero se lit « reservoir vide », ce qui serait un mensonge.
-]]
-function widgets.jauge(fenetre, x, y, largeur, pourcentage, seuils)
-  local P = widgets.PALETTE
-  if pourcentage == nil then
-    widgets.texte(fenetre, x, y, string.rep("-", largeur), P.indispo)
-    return
-  end
-  local rempli = math.max(0, math.min(largeur,
-    math.floor(largeur * math.max(0, math.min(100, pourcentage)) / 100 + 0.5)))
-  local couleur = widgets.couleurSeuils(pourcentage, seuils)
-  couleurs(fenetre, colors.black, couleur)
-  pcall(fenetre.setCursorPos, x, y)
-  pcall(fenetre.write, string.rep(" ", rempli))
-  couleurs(fenetre, P.texte, P.jauge)
-  pcall(fenetre.write, string.rep(" ", largeur - rempli))
-  couleurs(fenetre, P.texte, P.fond)
+-- nil -> barre hachuree, pas une barre a zero : une jauge a zero se lirait
+-- « reservoir vide », ce qui serait un mensonge.
+function W.jauge(f, x, y, larg, pct, seuils)
+  if pct == nil then return W.texte(f, x, y, string.rep("-", larg), P.indispo) end
+  local n = math.max(0, math.min(larg,
+    math.floor(larg * math.max(0, math.min(100, pct)) / 100 + 0.5)))
+  coul(f, C.black, W.couleurSeuils(pct, seuils))
+  pcall(f.setCursorPos, x, y) pcall(f.write, string.rep(" ", n))
+  coul(f, P.texte, P.jauge) pcall(f.write, string.rep(" ", larg - n))
+  coul(f, P.texte, P.fond)
 end
 
--- Compte a rebours lisible : 2j 04h, 3h 12m, 45s.
-function widgets.duree(secondes)
-  if secondes == nil then return nil end
-  if secondes < 0 then secondes = 0 end
-  local j = math.floor(secondes / 86400)
-  local h = math.floor((secondes % 86400) / 3600)
-  local m = math.floor((secondes % 3600) / 60)
-  local s = math.floor(secondes % 60)
+-- Libelle + pourcentage a droite + jauge dessous. Rend les lignes consommees.
+-- Mutualise parce que trois blocs identiques diverges, c'est trois seuils qui
+-- finissent par ne plus dire la meme chose que l'alarme.
+function W.bandeau(f, y, libelle, pct, seuils)
+  local l = select(1, f.getSize())
+  W.texte(f, 2, y, libelle, P.attenue)
+  if pct then
+    W.texte(f, l - 5, y, string.format("%3.0f%%", pct), W.couleurSeuils(pct, seuils))
+  else
+    W.texte(f, l - 7, y, "INDISPO", P.indispo)
+  end
+  W.jauge(f, 2, y + 1, l - 2, pct, seuils)
+  return 3
+end
+
+function W.duree(s)
+  if s == nil then return nil end
+  s = math.max(0, s)
+  local j, h = math.floor(s / 86400), math.floor(s % 86400 / 3600)
+  local m, sec = math.floor(s % 3600 / 60), math.floor(s % 60)
   if j > 0 then return string.format("%dj %02dh", j, h) end
   if h > 0 then return string.format("%dh %02dm", h, m) end
-  if m > 0 then return string.format("%dm %02ds", m, s) end
-  return string.format("%ds", s)
+  if m > 0 then return string.format("%dm %02ds", m, sec) end
+  return string.format("%ds", sec)
 end
 
-return widgets
+return W
