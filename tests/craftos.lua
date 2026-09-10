@@ -186,10 +186,49 @@ function M.creer(options)
     }
   end
 
+  --[[
+    Moniteur simule. La taille en caracteres depend de l'echelle de texte,
+    comme dans le jeu : c'est indispensable pour tester le choix automatique
+    d'echelle, qui cherche la plus grande echelle encore assez large.
+    Modele : un bloc fait 64 pixels, un caractere 6x9 pixels a l'echelle 1.
+  ]]
+  local moniteur
+  if options.moniteur then
+    local blocsL = options.moniteur.largeur or 3
+    local blocsH = options.moniteur.hauteur or 3
+    local echelle = 1
+    moniteur = {
+      setTextScale = function(e) echelle = e end,
+      getTextScale = function() return echelle end,
+      getSize = function()
+        return math.max(1, math.floor((blocsL * 64 - 16) / (6 * echelle))),
+               math.max(1, math.floor((blocsH * 64 - 16) / (9 * echelle)))
+      end,
+      isColour = function() return options.moniteur.couleur ~= false end,
+      isColor = function() return options.moniteur.couleur ~= false end,
+      clear = function() etat.moniteurEfface = (etat.moniteurEfface or 0) + 1 end,
+      clearLine = function() end,
+      setCursorPos = function(x, y) etat.moniteurCurseur = { x, y } end,
+      getCursorPos = function() return 1, 1 end,
+      setTextColour = function() end, setTextColor = function() end,
+      setBackgroundColour = function() end, setBackgroundColor = function() end,
+      write = function(texte)
+        etat.moniteurEcrit = etat.moniteurEcrit or {}
+        etat.moniteurEcrit[#etat.moniteurEcrit + 1] = tostring(texte)
+      end,
+      blit = function(texte)
+        etat.moniteurEcrit = etat.moniteurEcrit or {}
+        etat.moniteurEcrit[#etat.moniteurEcrit + 1] = tostring(texte)
+      end,
+    }
+    etat.moniteur = moniteur
+  end
+
   local function presents()
     local noms = {}
     if etat.modemPresent then noms[#noms + 1] = "back" end
     if radar then noms[#noms + 1] = "top" end
+    if moniteur then noms[#noms + 1] = "right" end
     return noms
   end
 
@@ -198,15 +237,18 @@ function M.creer(options)
     getType = function(n)
       if n == "back" then return etat.modemPresent and "modem" or nil end
       if n == "top" and radar then return "createradars:radar" end
+      if n == "right" and moniteur then return "monitor" end
       return nil
     end,
     isPresent = function(n)
       if n == "back" then return etat.modemPresent end
+      if n == "right" then return moniteur ~= nil end
       return n == "top" and radar ~= nil
     end,
     wrap = function(n)
       if n == "back" then return etat.modemPresent and modem or nil end
       if n == "top" then return radar end
+      if n == "right" then return moniteur end
       return nil
     end,
     hasType = function(n, t)
@@ -277,7 +319,12 @@ function M.creer(options)
   parallel.waitForAll = function(...) return courir({ ... }, select("#", ...)) end
 
   ------------------------------------------------------------------------ term
-  local term = {
+  --[[
+    term REDIRIGEABLE pour de vrai. L'interface redirige temporairement vers
+    le moniteur pour y dessiner la carte avec les memes primitives : un
+    bouchon qui ignore la redirection ne testerait rien de ce mecanisme.
+  ]]
+  local terminalNatif = {
     clear = function() end,
     clearLine = function() end,
     setCursorPos = function() end,
@@ -289,11 +336,28 @@ function M.creer(options)
     setBackgroundColour = function() end,
     setBackgroundColor = function() end,
     write = function() end,
+    blit = function() end,
     getSize = function() return 51, 19 end,
-    current = function() return {} end,
-    native = function() return {} end,
-    redirect = function() return {} end,
   }
+
+  local cibleTerm = terminalNatif
+  local term = {}
+  for _, methode in ipairs({ "clear", "clearLine", "setCursorPos", "getCursorPos",
+      "isColour", "isColor", "setTextColour", "setTextColor",
+      "setBackgroundColour", "setBackgroundColor", "write", "blit", "getSize" }) do
+    term[methode] = function(...)
+      local fn = cibleTerm[methode]
+      if fn then return fn(...) end
+    end
+  end
+  term.current  = function() return cibleTerm end
+  term.native   = function() return terminalNatif end
+  term.redirect = function(nouveau)
+    local ancien = cibleTerm
+    cibleTerm = nouveau or terminalNatif
+    etat.redirections = (etat.redirections or 0) + 1
+    return ancien
+  end
 
   ------------------------------------------------------------------ environnement
   env = shallow(_G)

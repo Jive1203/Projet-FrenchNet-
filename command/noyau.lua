@@ -361,9 +361,35 @@ function noyau.statutIff(transpondeur, codes, maintenant, config, allieManuel)
     return noyau.IFF.INCONNU, string.format("code perime (%.0fs > %.0fs)", age, validite)
   end
 
+  local grace = nombreValide(config.graceRotation) and config.graceRotation or 300
+
+  --[[
+    Periode de grace : apres une rotation, l'ancien code reste accepte le
+    temps que la flotte recoive le nouveau. Sans elle, tourner un code
+    declasserait INCONNU tous les appareils encore en vol - et la doctrine de
+    zone ferait le reste.
+    Les DEUX codes se tournent independamment, chacun avec sa propre date de
+    rotation : tourner le code general ne doit pas ouvrir de grace sur le code
+    allie, et reciproquement.
+  ]]
+  local function dansLaGrace(instantRotation)
+    local depuis = maintenant - (instantRotation or 0)
+    return depuis <= grace, depuis
+  end
+
   if type(codes.codeAllie) == "string" and codes.codeAllie ~= ""
      and transpondeur.code == codes.codeAllie then
     return noyau.IFF.ALLIE, "code allie valide"
+  end
+
+  if type(codes.codeAlliePrecedent) == "string" and codes.codeAlliePrecedent ~= ""
+     and transpondeur.code == codes.codeAlliePrecedent then
+    local dedans, depuis = dansLaGrace(codes.rotationAllieA)
+    if dedans then
+      return noyau.IFF.ALLIE, string.format(
+        "code allie precedent, grace %.0fs/%.0fs", depuis, grace)
+    end
+    return noyau.IFF.INCONNU, "code allie precedent expire"
   end
 
   if type(codes.codeGeneral) == "string" and codes.codeGeneral ~= ""
@@ -371,13 +397,12 @@ function noyau.statutIff(transpondeur, codes, maintenant, config, allieManuel)
     return noyau.IFF.GENERAL, "code general valide"
   end
 
-  -- Periode de grace sur le code general precedent (rotation en cours).
   if type(codes.codeGeneralPrecedent) == "string" and codes.codeGeneralPrecedent ~= ""
      and transpondeur.code == codes.codeGeneralPrecedent then
-    local grace = nombreValide(config.graceRotation) and config.graceRotation or 300
-    local depuis = maintenant - (codes.rotationA or 0)
-    if depuis <= grace then
-      return noyau.IFF.GENERAL, string.format("code general precedent, grace %.0fs/%.0fs", depuis, grace)
+    local dedans, depuis = dansLaGrace(codes.rotationGeneraleA or codes.rotationA)
+    if dedans then
+      return noyau.IFF.GENERAL, string.format(
+        "code general precedent, grace %.0fs/%.0fs", depuis, grace)
     end
     return noyau.IFF.INCONNU, "code general precedent expire"
   end

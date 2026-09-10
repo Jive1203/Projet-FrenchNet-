@@ -148,6 +148,28 @@ end
 -- 3. BOUTONS
 --------------------------------------------------------------------------------
 
+--[[
+  ATTENTE D'EVENEMENT SANS SE FAIRE TUER PAR Ctrl+T.
+
+  os.pullEvent LEVE une erreur "Terminated" des qu'un Ctrl+T arrive. Une
+  interface batie dessus meurt donc avant d'avoir pu demander le mot de passe
+  console - le verrou serait contournable en appuyant simplement sur deux
+  touches.
+
+  Toute l'interface attend donc en pullEventRaw et IGNORE les evenements
+  'terminate' : c'est la boucle de terminaison du poste qui les traite, en
+  levant un drapeau que l'interface consulte pour poser la question.
+]]
+local function attendre(filtre)
+  while true do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] ~= "terminate"
+       and (filtre == nil or evenement[1] == filtre) then
+      return table.unpack(evenement, 1, evenement.n)
+    end
+  end
+end
+
 local boutons = {}
 
 local function reinitialiserBoutons() boutons = {} end
@@ -214,7 +236,7 @@ local function message(titre, lignes, couleur)
     y = y + 1
   end
   ecran.texte(2, ecran.hauteur - 1, "Appuyez sur une touche...", PALETTE.attenue, PALETTE.fond)
-  os.pullEvent("key")
+  attendre("key")
 end
 
 local function confirmer(question)
@@ -222,7 +244,7 @@ local function confirmer(question)
   ecran.bande(1, " CONFIRMATION", PALETTE.titreTexte, PALETTE.avertissement)
   ecran.texte(2, 3, couper(question, ecran.largeur - 2), PALETTE.texte, PALETTE.fond)
   ecran.texte(2, 5, "O = oui    toute autre touche = annuler", PALETTE.attenue, PALETTE.fond)
-  local _, touche = os.pullEvent("char")
+  local _, touche = attendre("char")
   return touche == "o" or touche == "O"
 end
 
@@ -238,6 +260,10 @@ local menuDeverrouille = false
 -- Etat de la carte tactique.
 local vue                -- objet de carte.lua
 local rasterCache        -- grille de classes de zone, recalculee a la demande
+local rasterMoniteur     -- meme grille, aux dimensions du moniteur externe
+local moniteur           -- peripherique moniteur adopte, ou nil
+local moniteurNom
+local zoneMoniteur = { x = 1, y = 2, largeur = 0, hauteur = 0 }
 local pisteSelectionnee  -- id de la piste sur laquelle le panneau d'ordre porte
 local casesCarte = {}    -- zones cliquables du panneau d'ordre
 local ordre = { scramble = false, attaque = false, allie = false }
@@ -342,6 +368,11 @@ local function dessinerPrincipal()
   ecran.texte(2, 10, string.format("Lanceurs        %-4d  Munitions    %d",
     lanceurs, munitions),
     (lanceurs > 0 and munitions > 0) and PALETTE.texte or PALETTE.avertissement, PALETTE.fond)
+  -- L'ecran de situation est la premiere chose qu'on croit en panne quand il
+  -- reste noir : son etat s'affiche donc ici, pas seulement dans le journal.
+  ecran.texte(2, 11, string.format("Ecran situation %s",
+    moniteur and ("moniteur " .. tostring(moniteurNom)) or "aucun (carte dans l'onglet)"),
+    moniteur and PALETTE.texte or PALETTE.attenue, PALETTE.fond)
 
   local c = etat.compteurs
   ecran.texte(2, 12, string.format("Feu %d  Scramble %d  Kills %d  Perdues %d",
@@ -780,8 +811,260 @@ local function dessinerCarte()
 end
 
 --------------------------------------------------------------------------------
+-- 5 ter. ECRAN DE SITUATION SUR MONITEUR EXTERNE
+--
+--   Un moniteur accole a l'ordinateur est detecte et adopte sans reglage.
+--   Il ne DUPLIQUE pas le terminal : il affiche la carte tactique en plein
+--   ecran pendant que le terminal garde l'interface, les menus et la saisie.
+--   C'est la disposition d'un vrai poste de controle - et c'est aussi la
+--   seule qui rende un 3x3 reellement utile : dupliquer un terminal de 51
+--   colonnes sur un mur de 3 metres ne sert a rien.
+--
+--   Le clic sur le moniteur selectionne un contact ; le panneau d'ordre
+--   s'ouvre sur le terminal, la ou se trouve le clavier.
+--------------------------------------------------------------------------------
+
+-- Echelles de texte acceptees par CC: Tweaked, de la plus grande a la plus
+-- petite. On cherche la PLUS GRANDE qui laisse encore assez de place : du
+-- texte lisible de loin prime sur du texte minuscule et une carte immense.
+local ECHELLES_MONITEUR = { 5, 4, 3, 2.5, 2, 1.5, 1, 0.5 }
+
+local function choisirEchelle(ecranMoniteur, largeurMini, hauteurMini)
+  local meilleure, meilleureL, meilleureH
+  for _, echelle in ipairs(ECHELLES_MONITEUR) do
+    local ok = pcall(ecranMoniteur.setTextScale, echelle)
+    if ok then
+      local l, h = ecranMoniteur.getSize()
+      meilleure, meilleureL, meilleureH = meilleure or echelle, meilleureL or l, meilleureH or h
+      if l >= largeurMini and h >= hauteurMini then
+        return echelle, l, h
+      end
+    end
+  end
+  -- Aucune echelle n'atteint le minimum : on prend la plus fine, qui donne le
+  -- plus de place, et on le signale.
+  pcall(ecranMoniteur.setTextScale, 0.5)
+  local l, h = ecranMoniteur.getSize()
+  return 0.5, l, h
+end
+
+local function detecterMoniteur()
+  local cfg = ctx.cfg
+  if cfg.moniteur == false then
+    ctx.journal.ecrire("INFO", "carte tactique",
+      "moniteur externe desactive en configuration")
+    return
+  end
+
+  local candidat
+  if type(cfg.moniteur) == "string" then
+    if peripheral.isPresent(cfg.moniteur)
+       and peripheral.getType(cfg.moniteur) == "monitor" then
+      candidat = cfg.moniteur
+    else
+      ctx.journal.ecrire("AVERT", "carte tactique",
+        "moniteur force '" .. cfg.moniteur .. "' introuvable, detection automatique")
+    end
+  end
+
+  if not candidat then
+    -- Le PLUS GRAND moniteur accole : sur un poste qui en porte plusieurs,
+    -- c'est celui qui est fait pour la situation tactique.
+    local meilleureSurface = 0
+    for _, nom in ipairs(peripheral.getNames()) do
+      if peripheral.getType(nom) == "monitor" then
+        local m = peripheral.wrap(nom)
+        local ok, l, h = pcall(m.getSize)
+        if ok and l and h and (l * h) > meilleureSurface then
+          meilleureSurface, candidat = l * h, nom
+        end
+      end
+    end
+  end
+
+  if not candidat then
+    ctx.journal.ecrire("INFO", "carte tactique",
+      "aucun moniteur externe : la carte reste dans l'onglet du terminal")
+    return
+  end
+
+  moniteur, moniteurNom = peripheral.wrap(candidat), candidat
+  pcall(moniteur.setBackgroundColour, PALETTE.fond)
+  pcall(moniteur.clear)
+
+  local echelle, largeur, hauteur
+  if type(ctx.cfg.echelleMoniteur) == "number" then
+    echelle = ctx.cfg.echelleMoniteur
+    pcall(moniteur.setTextScale, echelle)
+    largeur, hauteur = moniteur.getSize()
+  else
+    echelle, largeur, hauteur = choisirEchelle(moniteur,
+      ctx.cfg.carteLargeurMini or 50, ctx.cfg.carteHauteurMini or 20)
+  end
+
+  local couleur = moniteur.isColour and moniteur.isColour()
+  ctx.journal.ecrire("INFO", "carte tactique", string.format(
+    "moniteur '%s' adopte comme ecran de situation : %dx%d caracteres a l'echelle %.1f%s",
+    candidat, largeur, hauteur, echelle, couleur and "" or " (monochrome)"))
+
+  if largeur < (ctx.cfg.carteLargeurMini or 50) or hauteur < (ctx.cfg.carteHauteurMini or 20) then
+    ctx.journal.ecrire("AVERT", "carte tactique", string.format(
+      "moniteur trop petit pour la carte demandee (%dx%d obtenus, %dx%d voulus) : " ..
+      "agrandissez le moniteur ou baissez carteLargeurMini / carteHauteurMini",
+      largeur, hauteur, ctx.cfg.carteLargeurMini or 50, ctx.cfg.carteHauteurMini or 20))
+  end
+end
+
+--[[
+  Rendu de la carte sur le moniteur. On redirige temporairement le terminal
+  vers le moniteur pour reutiliser exactement les memes primitives de dessin :
+  une seule implementation de la carte, donc une seule a maintenir et a
+  corriger.
+]]
+local function dessinerCarteMoniteur()
+  if not (moniteur and ctx.carte and vue) then return end
+  local C, etat = ctx.carte, ctx.etat
+
+  local ancien = term.redirect(moniteur)
+  local sauveL, sauveH, sauveC = ecran.largeur, ecran.hauteur, ecran.couleur
+
+  local ok = pcall(function()
+    ecran.largeur, ecran.hauteur = term.getSize()
+    ecran.couleur = term.isColour and term.isColour()
+
+    zoneMoniteur.x, zoneMoniteur.y = 1, 2
+    zoneMoniteur.largeur = ecran.largeur
+    zoneMoniteur.hauteur = math.max(1, ecran.hauteur - 2)
+
+    local poste = positionPoste()
+    local guerre = (etat.mode == ctx.noyau.MODES.GUERRE)
+
+    -- Bandeau : etat du theatre, visible de l'autre bout de la salle.
+    local titre = string.format(" FRENCHNET %s  %s%s",
+      ctx.cfg.identifiant, etat.mode,
+      etat.alerteMax and "  *** ALERTE MAXIMALE ***" or "")
+    ecran.bande(1, titre, colors.white,
+      etat.alerteMax and PALETTE.alerte or (guerre and PALETTE.guerre or PALETTE.titre))
+
+    local altitudeSonde = poste.y or 64
+    rasterMoniteur = C.rasterCache(rasterMoniteur, vue,
+      zoneMoniteur.largeur, zoneMoniteur.hauteur,
+      etat.zones, ctx.noyau, etat.versionZones, altitudeSonde)
+
+    local t = nouveauTampon(zoneMoniteur.largeur, zoneMoniteur.hauteur, PALETTE.fond)
+    for ligne = 1, zoneMoniteur.hauteur do
+      for col = 1, zoneMoniteur.largeur do
+        local classe = rasterMoniteur.grille[ligne] and rasterMoniteur.grille[ligne][col]
+        if classe then t[ligne].bg[col] = FOND_CLASSE[classe] or PALETTE.fond end
+      end
+    end
+
+    local function poserMonde(x, z, glyphe, fg, bg)
+      local col, li, visible = C.versEcran(vue, x, z,
+        zoneMoniteur.largeur, zoneMoniteur.hauteur)
+      if visible then poser(t, col, li, glyphe, fg, bg) end
+    end
+
+    poserMonde(poste.x, poste.z, C.SYMBOLE_INFRA.COMMANDEMENT, colors.white)
+    for _, station in pairs(etat.stations) do
+      if station.x then
+        poserMonde(station.x, station.z, C.SYMBOLE_INFRA.RADAR,
+          station.muette and colors.red or colors.cyan)
+      end
+    end
+    for _, lanceur in pairs(etat.lanceurs) do
+      if lanceur.x then
+        poserMonde(lanceur.x, lanceur.z, C.SYMBOLE_INFRA.LANCEUR,
+          (lanceur.munitions or 1) <= 0 and colors.red or colors.lime)
+      end
+    end
+
+    local visibles = 0
+    for id, piste in pairs(etat.pistes) do
+      if type(piste.x) == "number" then
+        local col, li, visible = C.versEcran(vue, piste.x, piste.z,
+          zoneMoniteur.largeur, zoneMoniteur.hauteur)
+        if visible then
+          visibles = visibles + 1
+          local glyphe, cle = C.symbole(piste)
+          local fg, bg = COULEUR_ETAT[cle] or PALETTE.texte, nil
+          if cle == "engage" then bg = colors.white end
+          if etat.demandesAG[id] then bg = colors.yellow fg = colors.black end
+          if id == pisteSelectionnee then bg = colors.white fg = colors.black end
+          poser(t, col, li, glyphe, fg, bg)
+        end
+      end
+    end
+
+    rendreTampon(t, zoneMoniteur.x, zoneMoniteur.y)
+
+    local largeurMonde, hauteurMonde = C.etendue(vue,
+      zoneMoniteur.largeur, zoneMoniteur.hauteur)
+    local mentionAG = etat.nombreDemandesAG > 0
+      and string.format("  %d AG A VALIDER", etat.nombreDemandesAG) or ""
+    ecran.bande(ecran.hauteur, string.format(
+      " %d b/car  %.0fx%.0f b  %s  %d/%d radar  %d contact(s)%s",
+      C.echelle(vue), largeurMonde, hauteurMonde, vue.suivi,
+      etat.stationsActives, etat.nombreStations, visibles, mentionAG),
+      etat.nombreDemandesAG > 0 and colors.black or PALETTE.boutonTexte,
+      etat.nombreDemandesAG > 0 and PALETTE.avertissement or PALETTE.fondPanneau)
+  end)
+
+  ecran.largeur, ecran.hauteur, ecran.couleur = sauveL, sauveH, sauveC
+  term.redirect(ancien)
+  return ok
+end
+
+--------------------------------------------------------------------------------
 -- 6. MENU PROTEGE
 --------------------------------------------------------------------------------
+
+--[[
+  VERROU DE LA CONSOLE CraftOS
+  Sortir de l'interface, c'est se retrouver devant un shell avec acces a tous
+  les fichiers du poste : codes transpondeur, zones, journal. La porte est
+  donc gardee, et chaque tentative journalisee.
+]]
+local function demanderConsole()
+  local saisie = saisir("Mot de passe d'acces a la console",
+    "Le poste s'arretera et cessera de decider", true)
+  ctx.etat.demandeConsole = false
+  if saisie == nil or saisie == "" then
+    return false
+  end
+  local ok = ctx.actions.ouvrirConsole(saisie)
+  if not ok then
+    message("ACCES REFUSE", {
+      "Mot de passe console incorrect.",
+      "",
+      "La tentative a ete journalisee.",
+    }, PALETTE.danger)
+  end
+  return ok
+end
+
+-- Verrouillage au demarrage : l'ecran reste noir tant que le mot de passe
+-- console n'a pas ete donne. Desactive par defaut, parce qu'en salle de
+-- controle la bascule guerre / paix doit rester accessible en un clic.
+local function ecranVerrouille()
+  while not ctx.etat.arret do
+    ecran.effacer(PALETTE.fond)
+    ecran.bande(1, " FRENCHNET COMMAND - POSTE VERROUILLE",
+      PALETTE.titreTexte, PALETTE.danger)
+    ecran.texte(2, 3, "Poste " .. tostring(ctx.cfg.identifiant), PALETTE.texte, PALETTE.fond)
+    ecran.texte(2, 5, "Le systeme de defense continue de decider.", PALETTE.attenue, PALETTE.fond)
+    ecran.texte(2, 6, "Seul l'affichage est verrouille.", PALETTE.attenue, PALETTE.fond)
+    local saisie = saisir("Mot de passe", "Acces a l'interface de controle", true)
+    if saisie == ctx.cfg.motDePasseConsole then
+      ctx.journal.ecrire("INFO", "interface de controle",
+        "poste deverrouille par un controleur")
+      return
+    end
+    ctx.journal.ecrire("AVERT", "interface de controle",
+      "deverrouillage du poste refuse : mot de passe incorrect")
+    message("ACCES REFUSE", { "Mot de passe incorrect." }, PALETTE.danger)
+  end
+end
 
 local function demanderCode()
   if menuDeverrouille then return true end
@@ -816,39 +1099,107 @@ local function dessinerMenu()
 end
 
 ------------------------------------------------------------------- ecran codes
+--[[
+  Tout se change ici, en jeu : les DEUX codes transpondeur et les DEUX mots de
+  passe. Les nouvelles valeurs sont enregistrees dans etat.dat et PRIMENT sur
+  config_command.lua, qui n'amorce qu'un poste neuf. Sans cette priorite,
+  chaque redemarrage ramenerait les codes d'usine et toute la flotte deja
+  reconfiguree deviendrait INCONNUE d'un coup.
+]]
 local function dessinerCodes()
   local cfg = ctx.cfg
-  ecran.texte(2, 3, "CODES TRANSPONDEUR", PALETTE.attenue, PALETTE.fond)
+  ecran.texte(2, 3, "CODES ET MOTS DE PASSE", PALETTE.attenue, PALETTE.fond)
 
-  ecran.texte(2, 5, "Code allie (fixe)", PALETTE.attenue, PALETTE.fond)
-  ecran.texte(2, 6, couper(tostring(cfg.codeAllie), ecran.largeur - 2), PALETTE.ok, PALETTE.fond)
-
-  ecran.texte(2, 8, "Code general (rotatif)", PALETTE.attenue, PALETTE.fond)
-  ecran.texte(2, 9, couper(tostring(cfg.codeGeneral), ecran.largeur - 2),
-    PALETTE.avertissement, PALETTE.fond)
-
-  if cfg.codeGeneralPrecedent then
-    local reste = (cfg.graceRotation or 300) - (os.clock() - (cfg.rotationA or 0))
-    if reste > 0 then
-      ecran.texte(2, 11, string.format("Code precedent encore accepte %ds", math.floor(reste)),
-        PALETTE.attenue, PALETTE.fond)
-    end
+  local function resteDeGrace(instantRotation)
+    if not instantRotation then return nil end
+    local reste = (cfg.graceRotation or 300) - (os.clock() - instantRotation)
+    if reste > 0 then return reste end
+    return nil
   end
 
-  bouton(2, 13, "Tourner le code general", function()
-    local nouveau = saisir("Nouveau code general",
+  ----------------------------------------------------------------- code allie
+  ecran.texte(2, 5, "Code allie - libre passage", PALETTE.attenue, PALETTE.fond)
+  ecran.texte(2, 6, couper(tostring(cfg.codeAllie), 26), PALETTE.ok, PALETTE.fond)
+  bouton(29, 6, "Tourner", function()
+    local nouveau = saisir("Nouveau code ALLIE",
+      "L'ancien reste accepte pendant la periode de grace")
+    if nouveau and nouveau ~= "" then
+      local ok, motif = ctx.actions.changerCodeAllie(nouveau)
+      message(ok and "CODE ALLIE TOURNE" or "REFUS", ok and {
+        "Nouveau code allie : " .. nouveau,
+        "",
+        "L'ancien reste accepte " .. tostring(cfg.graceRotation) .. "s.",
+        "Reconfigurez les transpondeurs AVANT la fin",
+        "de ce delai, sinon la flotte sera declassee.",
+      } or { tostring(motif) }, ok and PALETTE.ok or PALETTE.danger)
+    end
+  end, colors.black, PALETTE.ok, 10)
+
+  local resteAllie = resteDeGrace(cfg.rotationAllieA)
+  if cfg.codeAlliePrecedent and resteAllie then
+    ecran.texte(2, 7, string.format("ancien accepte encore %ds", math.floor(resteAllie)),
+      PALETTE.avertissement, PALETTE.fond)
+  end
+
+  --------------------------------------------------------------- code general
+  ecran.texte(2, 9, "Code general - acces conditionnel", PALETTE.attenue, PALETTE.fond)
+  ecran.texte(2, 10, couper(tostring(cfg.codeGeneral), 26), PALETTE.avertissement, PALETTE.fond)
+  bouton(29, 10, "Tourner", function()
+    local nouveau = saisir("Nouveau code GENERAL",
       "L'ancien reste accepte pendant la periode de grace")
     if nouveau and nouveau ~= "" then
       local ok, motif = ctx.actions.changerCodeGeneral(nouveau)
-      message(ok and "CODE TOURNE" or "REFUS", {
-        ok and ("Nouveau code general : " .. nouveau) or tostring(motif),
-        ok and ("Ancien code accepte encore " .. tostring(ctx.cfg.graceRotation) .. "s.") or "",
-      }, ok and PALETTE.ok or PALETTE.danger)
+      message(ok and "CODE GENERAL TOURNE" or "REFUS", ok and {
+        "Nouveau code general : " .. nouveau,
+        "",
+        "L'ancien reste accepte " .. tostring(cfg.graceRotation) .. "s.",
+      } or { tostring(motif) }, ok and PALETTE.ok or PALETTE.danger)
     end
-  end, colors.black, PALETTE.avertissement, 26)
+  end, colors.black, PALETTE.avertissement, 10)
 
-  ecran.texte(2, 15, "Le code allie se change dans", PALETTE.attenue, PALETTE.fond)
-  ecran.texte(2, 16, "config_command.lua (redemarrage requis).", PALETTE.attenue, PALETTE.fond)
+  local resteGeneral = resteDeGrace(cfg.rotationGeneraleA)
+  if cfg.codeGeneralPrecedent and resteGeneral then
+    ecran.texte(2, 11, string.format("ancien accepte encore %ds", math.floor(resteGeneral)),
+      PALETTE.avertissement, PALETTE.fond)
+  end
+
+  ------------------------------------------------------------ mots de passe
+  local function changerMotDePasse(libelle, action)
+    local ancien = saisir("Mot de passe " .. libelle .. " ACTUEL",
+      "Sans lui, aucun changement n'est possible", true)
+    if not ancien then return end
+    local nouveau = saisir("NOUVEAU mot de passe " .. libelle,
+      "4 caracteres minimum", true)
+    if not nouveau then return end
+    local confirmation = saisir("Confirmez le nouveau mot de passe", nil, true)
+    if confirmation ~= nouveau then
+      message("REFUS", { "Les deux saisies ne concordent pas." }, PALETTE.danger)
+      return
+    end
+    local ok, motif = action(ancien, nouveau)
+    message(ok and "MOT DE PASSE CHANGE" or "REFUS",
+      { ok and ("Mot de passe " .. libelle .. " mis a jour.") or tostring(motif) },
+      ok and PALETTE.ok or PALETTE.danger)
+  end
+
+  ecran.texte(2, 13, "Mots de passe", PALETTE.attenue, PALETTE.fond)
+  local x = bouton(2, 14, "Menu protege", function()
+    changerMotDePasse("MENU", ctx.actions.changerCodeAccesMenu)
+  end, PALETTE.boutonTexte, PALETTE.fondPanneau, 16)
+  bouton(x + 1, 14, "Console CraftOS", function()
+    changerMotDePasse("CONSOLE", ctx.actions.changerMotDePasseConsole)
+  end, PALETTE.boutonTexte, PALETTE.fondPanneau, 19)
+
+  -- Avertissement tant que les valeurs d'usine sont en place : elles figurent
+  -- en clair dans le depot public, donc elles ne protegent rien.
+  local usine = (cfg.codeAccesMenu == "1234") or (cfg.motDePasseConsole == "578933")
+  if usine then
+    ecran.bande(16, " ! mot(s) de passe d'usine : publics, donc sans effet",
+      colors.black, PALETTE.danger)
+  else
+    ecran.texte(2, 16, "Valeurs enregistrees dans etat.dat, elles", PALETTE.attenue, PALETTE.fond)
+    ecran.texte(2, 17, "priment sur config_command.lua.", PALETTE.attenue, PALETTE.fond)
+  end
 end
 
 ------------------------------------------------------------------- ecran zones
@@ -876,7 +1227,7 @@ local function choisirClasse()
     PALETTE.attenue, PALETTE.fond)
 
   while not choix do
-    local evenement = { os.pullEvent() }
+    local evenement = { attendre() }
     if evenement[1] == "mouse_click" or evenement[1] == "monitor_touch" then
       local x, y2 = evenement[3], evenement[4]
       local b = boutonSous(x, y2)
@@ -903,7 +1254,7 @@ local function creerZone()
   ecran.texte(2, ecran.hauteur - 1, "Clic pour choisir, Q pour annuler", PALETTE.attenue, PALETTE.fond)
 
   while not forme do
-    local evenement = { os.pullEvent() }
+    local evenement = { attendre() }
     if evenement[1] == "mouse_click" or evenement[1] == "monitor_touch" then
       local b = boutonSous(evenement[3], evenement[4])
       if b then b.action() end
@@ -1033,16 +1384,6 @@ function interface.executer(contexte)
   ctx = contexte
   ctx.ETAPES = ctx.actions.ETAPES
 
-  -- Sortie sur moniteur externe si demande. Le clavier reste celui de
-  -- l'ordinateur : seule la sortie est deportee.
-  local cible = term.current()
-  if type(ctx.cfg.moniteur) == "string" and peripheral.isPresent(ctx.cfg.moniteur) then
-    local moniteur = peripheral.wrap(ctx.cfg.moniteur)
-    pcall(moniteur.setTextScale, ctx.cfg.echelleMoniteur or 0.5)
-    term.redirect(moniteur)
-    cible = moniteur
-  end
-
   ecran.largeur, ecran.hauteur = term.getSize()
   ecran.couleur = term.isColour and term.isColour()
 
@@ -1054,9 +1395,21 @@ function interface.executer(contexte)
     })
   end
 
+  -- Le moniteur externe devient l'ecran de situation : carte en plein ecran,
+  -- pendant que le terminal garde l'interface et le clavier.
+  pcall(detecterMoniteur)
+
+  if ctx.cfg.verrouillageDemarrage == true then ecranVerrouille() end
+
   local minuteur = os.startTimer(1)
 
   while not ctx.etat.arret do
+    -- Ctrl+T a ete presse : la boucle de terminaison a leve le drapeau
+    -- plutot que d'arreter, pour que le mot de passe soit demande ici.
+    if ctx.etat.demandeConsole then
+      if demanderConsole() then break end
+    end
+
     -- Le menu protege se verrouille des qu'on le quitte.
     if (ecranCourant == "MENU" or ecranCourant == "ZONES" or ecranCourant == "CODES") then
       if not demanderCode() then
@@ -1065,14 +1418,37 @@ function interface.executer(contexte)
     end
 
     pcall(dessiner)
+    if moniteur then pcall(dessinerCarteMoniteur) end
 
-    local evenement = { os.pullEvent() }
+    local evenement = { attendre() }
     local nom = evenement[1]
 
     if nom == "timer" and evenement[2] == minuteur then
       minuteur = os.startTimer(1)
 
-    elseif nom == "mouse_click" or nom == "monitor_touch" then
+    elseif nom == "monitor_touch" and moniteur and ctx.carte and vue then
+      --[[
+        Clic sur l'ECRAN DE SITUATION. Il ne porte aucun bouton : il ne sert
+        qu'a designer. Le contact selectionne ouvre le panneau d'ordre sur le
+        TERMINAL, la ou se trouve le clavier - un moniteur ne se tape pas.
+      ]]
+      local x, y = evenement[3], evenement[4]
+      local col   = x - zoneMoniteur.x + 1
+      local ligne = y - zoneMoniteur.y + 1
+      if col >= 1 and col <= zoneMoniteur.largeur
+         and ligne >= 1 and ligne <= zoneMoniteur.hauteur then
+        local piste = ctx.carte.pisteSous(ctx.etat.pistes, vue, col, ligne,
+          zoneMoniteur.largeur, zoneMoniteur.hauteur, 1)
+        pisteSelectionnee = piste and piste.id or nil
+        ordre.scramble, ordre.attaque, ordre.allie = false, false, false
+        if piste then
+          ecranCourant = "CARTE"
+          ctx.journal.ecrire("DEBUG", "carte tactique",
+            "contact " .. tostring(piste.nom) .. " designe depuis l'ecran de situation")
+        end
+      end
+
+    elseif nom == "mouse_click" then
       local x, y = evenement[3], evenement[4]
       local b = boutonSous(x, y)
       if b then
@@ -1135,12 +1511,34 @@ function interface.executer(contexte)
         vue.version = vue.version + 1
       end
 
-    elseif nom == "term_resize" or nom == "monitor_resize" then
+    elseif nom == "term_resize" then
       ecran.largeur, ecran.hauteur = term.getSize()
+
+    elseif nom == "monitor_resize" then
+      -- Le moniteur a change de taille : on refait le choix d'echelle et on
+      -- invalide son cache de fond de carte.
+      rasterMoniteur = nil
+      pcall(detecterMoniteur)
+
+    elseif nom == "peripheral" or nom == "peripheral_detach" then
+      -- Un moniteur vient d'etre pose ou casse : on reprend la detection.
+      rasterMoniteur = nil
+      moniteur, moniteurNom = nil, nil
+      pcall(detecterMoniteur)
     end
   end
 
-  if cible ~= term.current() then pcall(term.redirect, term.native()) end
+  -- On laisse l'ecran de situation propre : un moniteur fige sur une vieille
+  -- situation tactique est pire qu'un moniteur eteint.
+  if moniteur then
+    pcall(function()
+      moniteur.setBackgroundColour(PALETTE.fond)
+      moniteur.clear()
+      moniteur.setCursorPos(1, 1)
+      moniteur.setTextColour(PALETTE.attenue)
+      moniteur.write("FRENCHNET COMMAND - poste arrete")
+    end)
+  end
 end
 
 return interface

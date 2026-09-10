@@ -46,8 +46,8 @@ Défense aérienne autonome installée au sol. **Command décide, il ne tire pas
 
 ### Installation — poste de commandement
 
-Advanced Computer + modem Ender, chunk **forceload**. Un moniteur avancé 3×2
-change tout pour la carte tactique.
+Advanced Computer + modem Ender, chunk **forceload**. Accolez un **moniteur
+avancé 3×3** : il est détecté sans aucun réglage et devient l'écran de situation.
 
 ```
 mkdir command
@@ -66,10 +66,13 @@ reboot
 Trois champs avant la mise en service :
 
 ```lua
-positionPoste = { x = 0, y = 80, z = 0 },   -- F3, ligne "Block:"
-codeAllie     = "FN-ALLIE-0000",              -- code fixe, à changer
-codeAccesMenu = "1234",                       -- code du menu protégé
+positionPoste     = { x = 0, y = 80, z = 0 },   -- F3, ligne "Block:"
+codeAllie         = "FN-ALLIE-0000",            -- à changer
+codeAccesMenu     = "1234",                     -- menu protégé, à changer
+motDePasseConsole = "578933",                   -- console CraftOS, à changer
 ```
+
+> ⚠ **Ces valeurs par défaut ne protègent rien** : elles sont écrites en clair dans ce dépôt public. Changez-les à l'installation — le poste vous le rappelle à chaque démarrage, et l'écran des codes affiche un bandeau rouge tant que c'est le cas. Les quatre se changent aussi **en jeu**, depuis le menu protégé.
 
 ### Installation — chaque station radar
 
@@ -147,7 +150,9 @@ Les listes `nomsHostiles` / `nomsAllies` fonctionnent sans aucun mod tiers.
 - Chevauchement → **la classe la plus stricte l'emporte** : Roméo > Alpha > Bravo > Charlie.
 - Alerte maximale manuelle → régime **Roméo / Guerre** partout, en un clic.
 
-### Carte tactique
+### Écran de situation et carte tactique
+
+Un **moniteur avancé accolé est détecté au démarrage, sans réglage**. Il ne duplique pas le terminal : il affiche la **carte en plein écran** pendant que le terminal garde l'interface et le clavier. L'échelle de texte est choisie automatiquement — la plus grande qui laisse encore la place demandée. Un clic sur le moniteur désigne un contact ; le panneau d'ordre s'ouvre sur le terminal.
 
 Carte mouvante, zoomable de 2 à 1024 blocs par caractère, qui reste accrochée au
 contact le plus dangereux pendant tout l'engagement.
@@ -201,6 +206,14 @@ score =   1.5 × (1 − munitions / munitionsMax)     <- le stock pèse le plus 
 
 Une plateforme à **stock nul n'est jamais désignée** : envoyer l'ordre à une rampe vide, c'est perdre la cible au deuxième tir. La balise déduit les tirs des **baisses de stock** — aucune déclaration à faire.
 
+### Codes et mots de passe
+
+Les **deux codes transpondeur** et les **deux mots de passe** se changent en jeu depuis le menu protégé. Chaque rotation de code ouvre une **période de grâce** (300 s) pendant laquelle l'ancien reste accepté : sans elle, tourner un code déclasserait INCONNU toute la flotte encore en vol.
+
+Les valeurs changées sont enregistrées dans `etat.dat` et **priment sur `config_command.lua`** — sinon chaque redémarrage ramènerait les codes d'usine.
+
+**`Ctrl+T` ne stoppe plus le poste** : il demande le mot de passe console. Sortir de l'interface donne accès à un shell, donc à tous les fichiers du poste. Chaque tentative est journalisée, trois échecs lèvent une alerte. Mot de passe oublié → maintenez `Ctrl+T` **pendant le démarrage**, avant que le programme n'installe son gestionnaire.
+
 ### Terrain
 
 Le système **apprend** le relief au lieu de le calculer : reconstituer la génération de Minecraft depuis la seed est hors de portée d'un ordinateur CC: Tweaked, et ignorerait de toute façon tout ce que les joueurs ont construit. Chaque station radar, chaque lanceur et chaque joueur qui marche est une sonde d'altitude. Le modèle survit aux redémarrages et devient plus fin avec le temps.
@@ -218,7 +231,7 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 
 ```
 lua5.4 tests/test_command.lua           -- 229 vérifications : doctrine, terrain, carte, IFF
-lua5.4 tests/test_command_runtime.lua   -- 100 vérifications : la chaîne complète, réseau simulé
+lua5.4 tests/test_command_runtime.lua   -- 121 vérifications : la chaîne complète, réseau simulé
 ```
 
 ---

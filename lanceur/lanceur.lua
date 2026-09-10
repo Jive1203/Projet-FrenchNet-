@@ -83,6 +83,30 @@ local function avert(e, m) ecrire("AVERT", e, m) end
 local function erreur(e, m) ecrire("ERREUR", e, m) end
 
 --------------------------------------------------------------------------------
+--[[
+  Attente insensible a Ctrl+T. os.pullEvent - et donc sleep() - LEVE une
+  erreur "Terminated" a la moindre pression sur Ctrl+T. Sans cette fonction,
+  un Ctrl+T fait CRASHER la boucle puis REDEMARRER le programme au lieu de
+  l'arreter proprement : c'est la fonction terminaison() qui doit decider.
+]]
+local function attendreBrut(filtre)
+  while true do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] ~= "terminate"
+       and (filtre == nil or evenement[1] == filtre) then
+      return table.unpack(evenement, 1, evenement.n)
+    end
+  end
+end
+
+local function dormir(secondes)
+  local minuteur = os.startTimer(secondes or 0)
+  while true do
+    local _, identifiant = attendreBrut("timer")
+    if identifiant == minuteur then return end
+  end
+end
+
 local DEFAUTS = {
   identifiant       = nil,
   designation       = "",
@@ -273,7 +297,7 @@ local function diffuser()
         etat.munitions, etat.tirs, etat.emissions))
     end)
 
-    sleep(cfg.intervalleSecondes or 5)
+    dormir(cfg.intervalleSecondes or 5)
   end
 end
 
@@ -281,7 +305,7 @@ end
 -- tirs a zero apres un rearmement complet.
 local function clavier()
   while not etat.arret do
-    local _, touche = os.pullEvent("char")
+    local _, touche = attendreBrut("char")
     if cfg.sourceMunitions == "manuel" then
       if touche == "+" or touche == "=" then
         cfg.munitionsManuelles = (cfg.munitionsManuelles or 0) + 1

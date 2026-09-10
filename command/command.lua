@@ -78,7 +78,9 @@ local ETAPES = {
   BASCULE_MODE         = "bascule guerre / paix",
   ALERTE_MAXIMALE      = "alerte maximale manuelle",
   CONFIGURATION_ZONE   = "configuration d'une zone",
-  ROTATION_CODE        = "rotation du code general",
+  ROTATION_CODE        = "rotation d'un code transpondeur",
+  CHANGEMENT_MDP       = "changement de mot de passe",
+  ACCES_CONSOLE        = "acces a la console",
   INTERFACE            = "interface de controle",
   BOUCLE_PRINCIPALE    = "boucle principale (parallele)",
   ROTATION_JOURNAL     = "rotation du fichier journal",
@@ -210,6 +212,53 @@ local function proteger(etape, fn, ...)
 end
 
 --------------------------------------------------------------------------------
+-- 3 bis. ATTENTE INSENSIBLE A Ctrl+T
+--
+--   os.pullEvent, et donc sleep() et rednet.receive(), LEVENT une erreur
+--   "Terminated" des qu'un Ctrl+T arrive. Un poste bati dessus s'interrompt
+--   entierement des qu'on effleure ces deux touches : les boucles de decision
+--   meurent, le superviseur redemarre, et le mot de passe console n'est
+--   jamais demande - le verrou serait contournable en appuyant sur Ctrl+T.
+--
+--   Toutes les boucles du poste attendent donc en pullEventRaw et IGNORENT
+--   les evenements 'terminate'. Une seule boucle les traite : boucleTerminate,
+--   qui decide s'il faut demander un mot de passe ou s'arreter.
+--------------------------------------------------------------------------------
+
+local function attendreBrut(filtre)
+  while true do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] ~= "terminate"
+       and (filtre == nil or evenement[1] == filtre) then
+      return table.unpack(evenement, 1, evenement.n)
+    end
+  end
+end
+
+-- Remplace sleep() : meme comportement, mais un Ctrl+T ne l'interrompt pas.
+local function dormir(secondes)
+  local minuteur = os.startTimer(secondes or 0)
+  while true do
+    local _, identifiant = attendreBrut("timer")
+    if identifiant == minuteur then return end
+  end
+end
+
+-- Remplace rednet.receive() : meme signature, meme insensibilite.
+local function recevoir(protocole, delai)
+  local minuteur = delai and os.startTimer(delai) or nil
+  while true do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] == "rednet_message"
+       and (protocole == nil or evenement[4] == protocole) then
+      return evenement[2], evenement[3], evenement[4]
+    elseif evenement[1] == "timer" and minuteur and evenement[2] == minuteur then
+      return nil
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
 -- 4. CHARGEMENT DU NOYAU DE DECISION
 --------------------------------------------------------------------------------
 
@@ -292,6 +341,7 @@ local DEFAUTS = {
   historiquePiste          = 20,
   oubliPisteSecondes       = 30,
   codeAllie                = nil,
+  codeAlliePrecedent       = nil,
   codeGeneral              = nil,
   codeGeneralPrecedent     = nil,
   graceRotation            = 300,
@@ -325,8 +375,12 @@ local DEFAUTS = {
   alerteMaxCouvreHorsZone  = false,
   alerteMaxDureeSecondes   = 0,
   codeAccesMenu            = "1234",
+  motDePasseConsole        = "578933",
+  verrouillageDemarrage    = false,
   moniteur                 = nil,
-  echelleMoniteur          = 0.5,
+  echelleMoniteur          = "auto",
+  carteLargeurMini         = 50,
+  carteHauteurMini         = 20,
   contactsAffiches         = 6,
   sortieRedstoneAlerte     = nil,
   journalFichier           = true,
@@ -394,6 +448,16 @@ local function validerConfiguration()
       "porteeRadar inconnue : le garde-fou d'enveloppe fiable est desactive, " ..
       "une cible en fuite pourra etre declaree detruite"
     cfg.porteeRadar = 0
+  end
+  if cfg.codeAccesMenu == "1234" then
+    anomalies[#anomalies + 1] =
+      "codeAccesMenu laisse a sa valeur par defaut : la configuration des zones " ..
+      "n'est pas protegee"
+  end
+  if cfg.motDePasseConsole == "578933" then
+    anomalies[#anomalies + 1] =
+      "motDePasseConsole laisse a sa valeur par defaut, qui figure en clair dans le " ..
+      "depot public : la console CraftOS n'est pas protegee"
   end
   if cfg.formatUniqueFire == true then
     anomalies[#anomalies + 1] =
@@ -535,9 +599,14 @@ local function enregistrerEtat()
   return ecrireTable(CHEMIN_ETAT, {
     mode                 = etat.mode,
     alerteMax            = etat.alerteMax,
+    codeAllie            = cfg.codeAllie,
+    codeAlliePrecedent   = cfg.codeAlliePrecedent,
+    rotationAllieA       = cfg.rotationAllieA,
     codeGeneral          = cfg.codeGeneral,
     codeGeneralPrecedent = cfg.codeGeneralPrecedent,
-    rotationA            = cfg.rotationA,
+    rotationGeneraleA    = cfg.rotationGeneraleA,
+    codeAccesMenu        = cfg.codeAccesMenu,
+    motDePasseConsole    = cfg.motDePasseConsole,
     alliesManuels        = etat.alliesManuels,
   }, ETAPES.ENREGISTREMENT_ETAT)
 end
@@ -593,10 +662,28 @@ local function chargerEtat()
   end
   if donnees.mode == noyau.MODES.GUERRE then etat.mode = noyau.MODES.GUERRE end
   etat.alerteMax = donnees.alerteMax == true
+  --[[
+    Les codes et les mots de passe tournes en jeu font autorite sur le fichier
+    de configuration : celui-ci n'amorce qu'un poste neuf. Sans cela, chaque
+    redemarrage ramenerait les codes d'usine - et toute la flotte deja
+    reconfiguree deviendrait INCONNUE d'un coup.
+  ]]
   if type(donnees.codeGeneral) == "string" and donnees.codeGeneral ~= "" then
     cfg.codeGeneral = donnees.codeGeneral
     cfg.codeGeneralPrecedent = donnees.codeGeneralPrecedent
-    cfg.rotationA = donnees.rotationA
+    cfg.rotationGeneraleA = donnees.rotationGeneraleA or donnees.rotationA
+  end
+  if type(donnees.codeAllie) == "string" and donnees.codeAllie ~= "" then
+    cfg.codeAllie = donnees.codeAllie
+    cfg.codeAlliePrecedent = donnees.codeAlliePrecedent
+    cfg.rotationAllieA = donnees.rotationAllieA
+    info(ETAPES.CHARGEMENT_ETAT, "code allie restaure depuis l'etat persistant")
+  end
+  if type(donnees.codeAccesMenu) == "string" and donnees.codeAccesMenu ~= "" then
+    cfg.codeAccesMenu = donnees.codeAccesMenu
+  end
+  if type(donnees.motDePasseConsole) == "string" and donnees.motDePasseConsole ~= "" then
+    cfg.motDePasseConsole = donnees.motDePasseConsole
   end
   if type(donnees.alliesManuels) == "table" then
     etat.alliesManuels = donnees.alliesManuels
@@ -1242,10 +1329,12 @@ local function decider(piste, maintenant)
 
   local transpondeur, motifAppariement = transpondeurPourPiste(piste, maintenant)
   local codes = {
-    codeAllie = cfg.codeAllie,
-    codeGeneral = cfg.codeGeneral,
+    codeAllie            = cfg.codeAllie,
+    codeAlliePrecedent   = cfg.codeAlliePrecedent,
+    rotationAllieA       = cfg.rotationAllieA or 0,
+    codeGeneral          = cfg.codeGeneral,
     codeGeneralPrecedent = cfg.codeGeneralPrecedent,
-    rotationA = cfg.rotationA or 0,
+    rotationGeneraleA    = cfg.rotationGeneraleA or 0,
   }
   piste.allieManuel = etat.alliesManuels[piste.nom] ~= nil
 
@@ -1567,18 +1656,111 @@ function actions.supprimerZone(nom)
   return false, "zone introuvable"
 end
 
-function actions.changerCodeGeneral(nouveau)
+--[[
+  ROTATION D'UN CODE TRANSPONDEUR
+  Les deux codes se tournent depuis le menu protege, chacun avec sa propre
+  periode de grace : l'ancien code reste accepte le temps que la flotte
+  recoive le nouveau. Sans cette grace, tourner un code declasserait INCONNU
+  tous les appareils encore en vol, et la doctrine de zone ferait le reste.
+
+  La nouvelle valeur est enregistree dans etat.dat : elle survit au
+  redemarrage et prime sur le fichier de configuration.
+]]
+local function tournerCode(genre, nouveau)
   if type(nouveau) ~= "string" or nouveau == "" then return false, "code vide" end
-  if nouveau == cfg.codeAllie then
-    return false, "le code general ne peut pas etre egal au code allie"
+  if #nouveau < 4 then
+    return false, "code trop court : 4 caracteres minimum"
   end
-  cfg.codeGeneralPrecedent = cfg.codeGeneral
-  cfg.codeGeneral = nouveau
-  cfg.rotationA = os.clock()
-  info(ETAPES.ROTATION_CODE, string.format(
-    "code general tourne ; l'ancien code reste accepte %ds (periode de grace)",
-    cfg.graceRotation or 300))
+
+  local autre = (genre == "ALLIE") and cfg.codeGeneral or cfg.codeAllie
+  if nouveau == autre then
+    return false, "les deux codes ne peuvent pas etre identiques : la distinction " ..
+      "ami / conditionnel serait perdue"
+  end
+
+  if genre == "ALLIE" then
+    if nouveau == cfg.codeAllie then return false, "c'est deja le code en vigueur" end
+    cfg.codeAlliePrecedent = cfg.codeAllie
+    cfg.codeAllie = nouveau
+    cfg.rotationAllieA = os.clock()
+  else
+    if nouveau == cfg.codeGeneral then return false, "c'est deja le code en vigueur" end
+    cfg.codeGeneralPrecedent = cfg.codeGeneral
+    cfg.codeGeneral = nouveau
+    cfg.rotationGeneraleA = os.clock()
+  end
+
+  -- Toute piste doit etre reevaluee : un appareil classe INCONNU sous
+  -- l'ancien code peut devenir allie sous le nouveau, et inversement.
+  for _, piste in pairs(etat.pistes) do piste.verdictNom = nil end
+
+  avert(ETAPES.ROTATION_CODE, string.format(
+    "code %s tourne par un controleur ; l'ancien reste accepte %ds (periode de grace)",
+    genre == "ALLIE" and "ALLIE" or "GENERAL", cfg.graceRotation or 300))
   enregistrerEtat()
+  return true
+end
+
+function actions.changerCodeGeneral(nouveau) return tournerCode("GENERAL", nouveau) end
+function actions.changerCodeAllie(nouveau)   return tournerCode("ALLIE", nouveau) end
+
+--[[
+  CHANGEMENT DE MOT DE PASSE
+  L'ancien est exige : sans cela, un ecran laisse deverrouille suffirait a
+  verrouiller le poste contre son propre exploitant.
+  La valeur elle-meme n'est JAMAIS journalisee - un journal se lit.
+]]
+local function changerMotDePasse(genre, ancien, nouveau)
+  local courant = (genre == "CONSOLE") and cfg.motDePasseConsole or cfg.codeAccesMenu
+  if ancien ~= courant then
+    avert(ETAPES.CHANGEMENT_MDP, string.format(
+      "changement du mot de passe %s refuse : ancien mot de passe incorrect", genre))
+    return false, "ancien mot de passe incorrect"
+  end
+  if type(nouveau) ~= "string" or #nouveau < 4 then
+    return false, "nouveau mot de passe trop court : 4 caracteres minimum"
+  end
+  if nouveau == courant then return false, "c'est deja le mot de passe en vigueur" end
+
+  if genre == "CONSOLE" then cfg.motDePasseConsole = nouveau
+  else cfg.codeAccesMenu = nouveau end
+
+  info(ETAPES.CHANGEMENT_MDP, string.format(
+    "mot de passe %s change par un controleur (%d caracteres)", genre, #nouveau))
+  enregistrerEtat()
+  return true
+end
+
+function actions.changerMotDePasseConsole(ancien, nouveau)
+  return changerMotDePasse("CONSOLE", ancien, nouveau)
+end
+function actions.changerCodeAccesMenu(ancien, nouveau)
+  return changerMotDePasse("MENU", ancien, nouveau)
+end
+
+--[[
+  ACCES A LA CONSOLE CraftOS
+  Sortir de l'interface, c'est se retrouver devant un shell avec acces a tous
+  les fichiers du poste : codes transpondeur, zones, journal. Le mot de passe
+  console garde cette porte. Chaque tentative, reussie ou non, est journalisee.
+]]
+function actions.ouvrirConsole(motDePasse)
+  if motDePasse ~= cfg.motDePasseConsole then
+    etat.echecsConsole = (etat.echecsConsole or 0) + 1
+    avert(ETAPES.ACCES_CONSOLE, string.format(
+      "ACCES CONSOLE REFUSE : mot de passe incorrect (%d tentative(s) depuis le demarrage)",
+      etat.echecsConsole))
+    if etat.echecsConsole >= 3 then
+      alerterControleur("tentatives d'acces console repetees",
+        string.format("%d mots de passe console incorrects depuis le demarrage du poste",
+          etat.echecsConsole))
+    end
+    return false, "mot de passe incorrect"
+  end
+  avert(ETAPES.ACCES_CONSOLE,
+    "acces console accorde : le poste s'arrete et rend la main au shell CraftOS. " ..
+    "La defense cesse de decider jusqu'a sa relance.")
+  etat.arret = true
   return true
 end
 
@@ -1765,13 +1947,13 @@ local function boucleRadar()
       end
     end
     proteger(ETAPES.EVALUATION_KILL, evaluerEngagements, maintenant)
-    sleep(cfg.intervalleBalayage or 1)
+    dormir(cfg.intervalleBalayage or 1)
   end
 end
 
 local function boucleReseau()
   while not etat.arret do
-    local expediteur, message, protocole = rednet.receive(nil, 5)
+    local expediteur, message, protocole = recevoir(nil, 5)
     if expediteur then
       local maintenant = os.clock()
 
@@ -1868,7 +2050,7 @@ end
 
 local function boucleBattement()
   while not etat.arret do
-    sleep(cfg.battementSecondes or 60)
+    dormir(cfg.battementSecondes or 60)
     local pistes, engagees = 0, 0
     for _, p in pairs(etat.pistes) do
       pistes = pistes + 1
@@ -1918,12 +2100,25 @@ local function boucleTerminate()
   while true do
     local evenement = os.pullEventRaw("terminate")
     if evenement == "terminate" then
-      if cfg.arretParTerminate ~= false then
+      if cfg.arretParTerminate == false then
+        avert(ETAPES.ARRET, "Ctrl+T ignore : le poste est en autonomie totale")
+      elseif etat.interfaceActive and type(cfg.motDePasseConsole) == "string"
+             and cfg.motDePasseConsole ~= "" then
+        --[[
+          L'interface est la : c'est elle qui demandera le mot de passe. On
+          leve un drapeau plutot que d'arreter, sinon n'importe qui obtiendrait
+          un shell et l'acces a tous les fichiers du poste - codes compris.
+        ]]
+        etat.demandeConsole = true
+        info(ETAPES.ACCES_CONSOLE, "Ctrl+T : mot de passe console demande")
+      else
+        -- Pas d'interface pour poser la question, ou pas de mot de passe
+        -- defini : on ne peut pas verrouiller un poste sans lui laisser une
+        -- porte de sortie.
         info(ETAPES.ARRET, "arret demande par le controleur (Ctrl+T)")
         etat.arret = true
         return
       end
-      avert(ETAPES.ARRET, "Ctrl+T ignore : le poste est en autonomie totale")
     end
   end
 end
@@ -1947,8 +2142,12 @@ local function demarrer()
     info(ETAPES.INIT_JOURNAL, "journal fichier actif : " .. CHEMIN_JOURNAL)
   end
 
-  validerConfiguration()
+  -- L'etat persistant est charge AVANT la validation : les codes et mots de
+  -- passe tournes en jeu priment sur le fichier d'amorcage, et c'est la
+  -- configuration EFFECTIVE qu'il faut valider. Valider le fichier
+  -- reprocherait eternellement un mot de passe d'usine deja change.
   chargerEtat()
+  validerConfiguration()
   chargerZones()
   chargerTerrain()
 
@@ -1991,6 +2190,7 @@ local function executer()
 
   if interface then
     journal.ecranSilencieux = true -- l'interface prend la main sur l'affichage
+    etat.interfaceActive = true
     boucles[#boucles + 1] = function()
       local ok, err = pcall(interface.executer, {
         etat = etat, cfg = cfg, noyau = noyau, journal = journal,
@@ -2002,7 +2202,7 @@ local function executer()
         erreur(ETAPES.INTERFACE, "interface interrompue : " .. tostring(err))
         -- L'interface n'est pas critique : le systeme continue de decider sans
         -- ecran. On bloque cette coroutine pour ne pas tuer les autres.
-        while not etat.arret do sleep(5) end
+        while not etat.arret do dormir(5) end
       end
     end
   else
@@ -2044,6 +2244,12 @@ while true do
     avert(ETAPES.BOUCLE_PRINCIPALE, "la boucle principale s'est terminee sans erreur, relance")
   end
 
+  --[[
+    Temporisation de redemarrage. Volontairement le SEUL sleep() du programme :
+    ici, un Ctrl+T doit pouvoir interrompre pour de bon. C'est la soupape de
+    secours d'un poste qui plante en boucle - sans elle, un poste dont le
+    demarrage echoue serait impossible a arreter, et donc impossible a reparer.
+  ]]
   local delai = math.min(delaiRedemarrage, cfg.redemarrageDelaiMax or 60)
   avert(ETAPES.DEMARRAGE, string.format("redemarrage automatique dans %ds", delai))
   sleep(delai)

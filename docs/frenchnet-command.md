@@ -56,8 +56,9 @@ Fichiers créés à l'exécution sur le poste : `command/zones.dat` (zones),
 - 1 **modem Ender** accolé ;
 - **aucun radar n'est nécessaire** : le poste écoute les stations. Un radar
   accolé est accepté et devient la station `LOCAL` ;
-- fortement recommandé : un **moniteur avancé 3×2 minimum** (`moniteur` en
-  configuration). La carte tactique change de nature sur un grand écran ;
+- fortement recommandé : un **moniteur avancé 3×3**, simplement accolé.
+  Aucun réglage : il est détecté au démarrage et devient l'**écran de
+  situation** (voir §10) ;
 - le chunk **doit rester chargé** (`forceload`). Un poste dans un chunk déchargé
   cesse purement et simplement de décider.
 
@@ -218,14 +219,25 @@ décision humaine, elle n'est pas soumise au recoupement.
 
 ### 4.3 Les codes transpondeur
 
-- **Code allié** — fixe. Libre passage dans toutes les zones et tous les modes,
+- **Code allié** — libre passage dans toutes les zones et tous les modes,
   **sauf en zone Roméo en temps de guerre**, où il déclenche un scramble de
   vérification visuelle sans engagement. C'est la seule exception du système.
-- **Code général** — rotatif, changé régulièrement depuis le menu protégé.
-  Accès conditionnel selon la zone. L'ancien code reste accepté pendant une
-  **période de grâce** (`graceRotation`, 300 s par défaut) : sans elle, une
-  rotation abattrait toute la flotte qui n'a pas encore reçu le nouveau code.
+- **Code général** — accès conditionnel selon la zone.
 - **Absence de code, code invalide, code périmé** → **INCONNU**, sans appel.
+
+**Les deux codes se tournent en jeu**, depuis le menu protégé, indépendamment
+l'un de l'autre. Chaque rotation ouvre une **période de grâce** propre
+(`graceRotation`, 300 s par défaut) pendant laquelle l'ancien code reste
+accepté : sans elle, tourner un code déclasserait INCONNU toute la flotte
+encore en vol, et la doctrine de zone ferait le reste.
+
+Les valeurs tournées sont enregistrées dans `command/etat.dat` et **priment sur
+`config_command.lua`**, qui n'amorce qu'un poste neuf. Sans cette priorité,
+chaque redémarrage ramènerait les codes d'usine.
+
+> Après avoir tourné le code allié, reconfigurez les transpondeurs **avant la
+> fin de la période de grâce**. Le compte à rebours est affiché sur l'écran des
+> codes.
 
 ### 4.4 Table d'engagement complète
 
@@ -591,6 +603,31 @@ coûterait des vies. Raccourci clavier : **`G`**. Onglets : **`1`** à **`6`**.
 Une demande de Scramble AG en attente passe devant tout le reste : c'est la
 seule chose que le système ne peut pas résoudre seul.
 
+### Écran de situation — moniteur externe
+
+Un moniteur avancé accolé à l'ordinateur est **détecté au démarrage, sans aucun
+réglage**. Il ne duplique pas le terminal : il affiche la **carte tactique en
+plein écran** pendant que le terminal garde l'interface, les menus et la saisie.
+
+C'est la disposition d'un vrai poste de contrôle — et c'est aussi la seule qui
+rende un 3×3 réellement utile : dupliquer un terminal de 51 colonnes sur un mur
+de trois mètres n'apporte rien.
+
+- **Échelle de texte automatique** (`echelleMoniteur = "auto"`) : la **plus
+  grande** échelle qui laisse encore la place demandée par `carteLargeurMini` ×
+  `carteHauteurMini` (50 × 20 par défaut). Du texte lisible de loin prime sur du
+  texte minuscule et une carte immense.
+- **Le plus grand moniteur** est retenu si le poste en porte plusieurs.
+- **Un clic sur le moniteur désigne un contact** ; le panneau d'ordre s'ouvre sur
+  le **terminal**, là où se trouve le clavier — un moniteur ne se tape pas.
+- Poser ou casser un moniteur en cours de fonctionnement est pris en compte :
+  la détection est relancée sur l'événement.
+- L'état de l'écran de situation est affiché sur l'écran d'accueil : c'est la
+  première chose qu'on croit en panne quand il reste noir.
+
+`moniteur = "monitor_0"` force un moniteur précis, `moniteur = false` désactive
+la fonction, `echelleMoniteur = 1.5` fige l'échelle.
+
 ### Carte tactique — moving map
 
 ```
@@ -705,6 +742,9 @@ Consultable à l'écran (onglet **Journal**) et dans `command/command.log`
 | `declaration d'allie par un controleur` | déclaration, engagement interrompu, révocation |
 | `identification a deux voies` | statut et motif de chaque voie, concordance |
 | `discordance entre les deux voies` | transpondeur capturé, ou ami à l'émetteur muet |
+| `rotation d'un code transpondeur` | quel code, et la durée de grâce ouverte |
+| `changement de mot de passe` | lequel, jamais sa valeur |
+| `acces a la console` | demande, refus comptés, accès accordé |
 
 Les autres étapes couvrent le démarrage, le réseau, la persistance et
 l'interface. La liste complète est en tête de `command/command.lua`, table
@@ -725,6 +765,10 @@ l'interface. La liste complète est en tête de `command/command.lua`, table
 | Tout est classé INCONNU | code allié non configuré, transpondeurs arrêtés, ou GPS absent |
 | « transpondeur probablement capture » | un code valide est porté par un engin identifié hostile |
 | « emetteur en panne ? » | un ami reconnu par le radar n'a pas de code valide |
+| « aucun moniteur externe » | aucun moniteur accolé — la carte reste dans l'onglet |
+| « moniteur trop petit » | agrandir l'écran, ou baisser `carteLargeurMini` |
+| « ACCES CONSOLE REFUSE » | mot de passe console incorrect ; 3 échecs lèvent une alerte |
+| « mot de passe d'usine » au démarrage | `codeAccesMenu` ou `motDePasseConsole` jamais changés |
 | « piste perdue hors enveloppe fiable » | la cible est probablement sortie de portée, pas détruite |
 | « scramble AG en attente de validation » | normal — un contrôleur doit valider depuis la carte |
 | Le système engage des vaches | `traiterEntitesNeutres = true` — le remettre à `false` |
@@ -738,7 +782,7 @@ l'interface. La liste complète est en tête de `command/command.lua`, table
 
 ```
 lua5.4 tests/test_command.lua          # 229 vérifications — doctrine, terrain, carte, IFF
-lua5.4 tests/test_command_runtime.lua  # 100 vérifications — la chaîne complète
+lua5.4 tests/test_command_runtime.lua  # 121 vérifications — la chaîne complète
 ```
 
 **`test_command.lua` — le noyau de décision**, sans Minecraft : les 24 cases de
@@ -851,7 +895,69 @@ première chose à relire après une mise à jour du mod.
 
 ---
 
-## 14. Limites connues
+## 14. Mots de passe et accès
+
+Deux mots de passe, deux rôles distincts :
+
+| Mot de passe | Protège | Défaut |
+|---|---|---|
+| `codeAccesMenu` | la **configuration** : zones, rotation des codes | `1234` |
+| `motDePasseConsole` | la **sortie vers la console CraftOS** (Ctrl+T) | `578933` |
+
+> ### ⚠ Ces valeurs par défaut ne protègent rien
+>
+> Elles figurent en clair dans ce dépôt, que tout le monde peut lire. Changez-les
+> à l'installation. Le poste vous le rappelle à chaque démarrage dans son
+> journal, et l'écran des codes affiche un bandeau rouge tant que les valeurs
+> d'usine sont en place.
+
+Les deux se changent **en jeu**, depuis le menu protégé → *Codes*. L'ancien mot
+de passe est exigé, le nouveau doit être saisi deux fois, et la valeur est
+enregistrée dans `etat.dat`. La valeur elle-même n'est **jamais journalisée** —
+un journal se lit.
+
+### Pourquoi la console est gardée
+
+Sortir de l'interface, c'est se retrouver devant un shell CraftOS avec accès à
+tous les fichiers du poste : codes transpondeur, zones, journal. Sans mot de
+passe, deux touches suffisent à tout lire et tout modifier.
+
+Un `Ctrl+T` ne stoppe donc plus le poste : il déclenche une **demande de mot de
+passe**. Chaque tentative est journalisée, et trois échecs lèvent une alerte
+contrôleur.
+
+> Le poste continue de décider pendant que la question est posée. Accorder
+> l'accès **arrête la défense** — le journal le dit explicitement.
+
+### Ctrl+T ne tue plus rien
+
+`os.pullEvent`, et donc `sleep()` et `rednet.receive()`, **lèvent une erreur**
+« Terminated » à la moindre pression sur Ctrl+T. Un poste bâti dessus
+s'interrompt entièrement : les boucles de décision meurent, le superviseur
+redémarre, et le mot de passe n'est jamais demandé — le verrou serait
+contournable en appuyant sur deux touches.
+
+Toutes les boucles du poste, des stations et des balises attendent donc en
+`pullEventRaw` et **ignorent** les événements `terminate`. Une seule boucle les
+traite. C'est un défaut que le banc d'essai a mis au jour, et qui se serait
+produit en jeu exactement de la même façon.
+
+### En cas d'oubli du mot de passe console
+
+1. **Maintenez Ctrl+T pendant le démarrage** de l'ordinateur, avant que le
+   programme n'installe son gestionnaire. C'est la voie normale.
+2. À défaut : cassez l'ordinateur — il **conserve ses fichiers** — reposez-le à
+   côté d'un lecteur de disquette contenant un `startup.lua` qui renomme
+   `/startup.lua`, et redémarrez.
+
+Une troisième soupape existe : si le poste **plante en boucle**, la
+temporisation de redémarrage est le seul `sleep()` du programme, et un Ctrl+T y
+interrompt pour de bon. Sans elle, un poste dont le démarrage échoue serait
+impossible à arrêter, donc impossible à réparer.
+
+---
+
+## 15. Limites connues
 
 - **Le terrain n'est pas calculé depuis la seed, il est observé.** C'est un
   choix imposé par la plateforme (voir §6) et non un raccourci : au démarrage le

@@ -84,6 +84,30 @@ local function info(e, m)  ecrire("INFO", e, m) end
 local function avert(e, m) ecrire("AVERT", e, m) end
 local function erreur(e, m) ecrire("ERREUR", e, m) end
 
+--[[
+  Attente insensible a Ctrl+T. os.pullEvent - et donc sleep() - LEVE une
+  erreur "Terminated" a la moindre pression sur Ctrl+T. Sans cette fonction,
+  un Ctrl+T fait CRASHER la boucle puis REDEMARRER le programme au lieu de
+  l'arreter proprement : c'est la fonction terminaison() qui doit decider.
+]]
+local function attendreBrut(filtre)
+  while true do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] ~= "terminate"
+       and (filtre == nil or evenement[1] == filtre) then
+      return table.unpack(evenement, 1, evenement.n)
+    end
+  end
+end
+
+local function dormir(secondes)
+  local minuteur = os.startTimer(secondes or 0)
+  while true do
+    local _, identifiant = attendreBrut("timer")
+    if identifiant == minuteur then return end
+  end
+end
+
 local function proteger(etape, fn, ...)
   local r = table.pack(pcall(fn, ...))
   if not r[1] then
@@ -297,13 +321,13 @@ local function balayer()
       end
     end
 
-    sleep(cfg.intervalleBalayage or 1)
+    dormir(cfg.intervalleBalayage or 1)
   end
 end
 
 local function battement()
   while not etat.arret do
-    sleep(cfg.battementSecondes or 60)
+    dormir(cfg.battementSecondes or 60)
     info("battement", string.format("station %s : %d trame(s), %d contact(s) cumule(s), %d echec(s)",
       cfg.identifiant, etat.trames, etat.contactsVus, etat.echecs))
   end

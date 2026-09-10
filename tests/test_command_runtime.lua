@@ -795,6 +795,154 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 17 : moniteur 3x3 adopte comme ecran de situation ==")
+do
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL)
+  os.execute("cp " .. SRC .. "/interface.lua " .. BANC .. "/command/")
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({
+    racine = BANC, programme = "command/command.lua",
+    moniteur = { largeur = 3, hauteur = 3 },
+  })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 4 then
+          return { { id = "ID:7", nom = "Raider-7", nature = "VEHICULE",
+                     x = 100, y = 150, z = 0 } }
+        end
+        return {}
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Est", { x = 150, y = 70, z = 0 }, 12, 600))
+
+  craftos.executer(BANC .. "/command/command.lua", 20)
+  local journal = journalDisque()
+  local function dansJournal(motif) return journal:find(motif, 1, true) ~= nil end
+
+  verifier("le moniteur est detecte sans aucun reglage",
+    dansJournal("moniteur 'right' adopte comme ecran de situation"))
+  verifier("une echelle de texte est choisie automatiquement",
+    dansJournal("caracteres a l'echelle"))
+  verifier("le moniteur a ete efface au moins une fois",
+    (etat.moniteurEfface or 0) > 0, tostring(etat.moniteurEfface))
+  verifier("la carte est reellement dessinee sur le moniteur",
+    etat.moniteurEcrit ~= nil and #etat.moniteurEcrit > 0,
+    "#" .. #(etat.moniteurEcrit or {}))
+  verifier("le terminal est bien restaure apres chaque dessin",
+    (etat.redirections or 0) % 2 == 0, tostring(etat.redirections))
+  verifier("l'interface n'est pas tombee",
+    not dansJournal("interface interrompue"))
+
+  -- L'echelle retenue doit laisser au moins la carte minimale demandee.
+  local largeur = etat.moniteur and select(1, etat.moniteur.getSize()) or 0
+  local hauteur = etat.moniteur and select(2, etat.moniteur.getSize()) or 0
+  verifier("l'echelle retenue laisse la place demandee pour la carte",
+    largeur >= 50 and hauteur >= 20, string.format("%dx%d", largeur, hauteur))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 18 : la console est gardee par un mot de passe ==")
+do
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL
+    .. ' motDePasseConsole = "578933",')
+  os.execute("cp " .. SRC .. "/interface.lua " .. BANC .. "/command/")
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  -- Deux tentatives : d'abord un mauvais mot de passe, puis le bon.
+  local env, etat = craftos.creer({
+    racine = BANC, programme = "command/command.lua",
+    saisies = { "000000", "578933" },
+  })
+
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500, function() return {} end))
+
+  -- Ctrl+T : le poste ne doit PAS s'arreter, il doit demander le mot de passe.
+  craftos.programmerEvenement(6, "terminate")
+  craftos.programmerEvenement(9, "key", "touche_enter")   -- referme le refus
+  craftos.programmerEvenement(12, "terminate")
+
+  local motif = craftos.executer(BANC .. "/command/command.lua", 30)
+  local journal = journalDisque()
+  local function dansJournal(m) return journal:find(m, 1, true) ~= nil end
+
+  verifier("Ctrl+T declenche une demande de mot de passe, pas un arret",
+    dansJournal("Ctrl+T : mot de passe console demande"))
+  verifier("un mot de passe incorrect est refuse",
+    dansJournal("ACCES CONSOLE REFUSE"))
+  verifier("le refus est compte", dansJournal("1 tentative(s)"))
+  verifier("le bon mot de passe ouvre la console",
+    dansJournal("acces console accorde"))
+  verifier("le journal previent que la defense cesse de decider",
+    dansJournal("cesse de decider"))
+  verifier("le poste s'arrete proprement apres l'acces accorde",
+    dansJournal("arret propre du poste"), tostring(motif))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 19 : rotation des deux codes transpondeur ==")
+do
+  local noyauSeul = dofile(RACINE .. "/command/noyau.lua")
+  -- Verification directe de la grace independante des deux codes : c'est ce
+  -- qui evite qu'une rotation abatte la flotte qui n'a pas encore le nouveau
+  -- code, et qu'une rotation de l'un ouvre une grace sur l'autre.
+  local codes = {
+    codeAllie = "A2", codeAlliePrecedent = "A1", rotationAllieA = 1000,
+    codeGeneral = "G2", codeGeneralPrecedent = "G1", rotationGeneraleA = 500,
+  }
+  local cfg = { validiteTranspondeur = 15, graceRotation = 300 }
+  local function statut(code)
+    return (noyauSeul.statutIff({ code = code, recuA = 1000 }, codes, 1000, cfg))
+  end
+  verifier("nouveau code allie accepte", statut("A2") == "ALLIE")
+  verifier("ancien code allie encore accepte dans la grace", statut("A1") == "ALLIE")
+  verifier("nouveau code general accepte", statut("G2") == "GENERAL")
+  verifier("ancien code general expire hors de sa propre grace",
+    statut("G1") == "INCONNU")
+  verifier("code inconnu toujours refuse", statut("XX") == "INCONNU")
+
+  -- Persistance : un code tourne doit survivre au redemarrage, sinon toute la
+  -- flotte reconfiguree redeviendrait INCONNUE au prochain rechargement.
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL)
+  local f = io.open(BANC .. "/command/etat.dat", "w")
+  f:write([[{ mode = "GUERRE", alerteMax = false,
+    codeAllie = "FN-ALLIE-TOURNE", codeAlliePrecedent = "FN-ALLIE-0000",
+    rotationAllieA = 0,
+    codeGeneral = "FN-GEN-TOURNE",
+    codeAccesMenu = "9876", motDePasseConsole = "112233" }]])
+  f:close()
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({ racine = BANC, programme = "command/command.lua" })
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 4 then
+          return { { id = "ID:1", nom = "Ally-1", nature = "VEHICULE",
+                     x = 100, y = 150, z = 0 } }
+        end
+        return {}
+      end))
+  craftos.programmerRednet(30, "frenchnet_transpondeur", 4, function()
+    return { protocole = "FRENCHNET_TRANSPONDEUR", identifiant = "Ally-1",
+             nom = "Ally-1", code = "FN-ALLIE-TOURNE" }
+  end)
+
+  craftos.executer(BANC .. "/command/command.lua", 14)
+  local s = etat.sorties
+
+  verifier("le code allie tourne est restaure au demarrage",
+    (contient(s, "code allie restaure depuis l'etat persistant")))
+  verifier("un appareil portant le code tourne est reconnu allie",
+    (contient(s, "transpondeur : code allie valide")))
+  verifier("aucun avertissement de mot de passe d'usine apres changement",
+    not contient(s, "motDePasseConsole laisse a sa valeur par defaut"))
+end
+
+--------------------------------------------------------------------------------
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

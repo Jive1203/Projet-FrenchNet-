@@ -90,23 +90,39 @@ return {
 
   ------------------------------------------------------------ TRANSPONDEURS ---
 
-  -- CODE ALLIE : code fixe. Libre passage dans toutes les zones et tous les
-  -- modes, sauf en zone Romeo en temps de guerre ou il declenche un scramble
-  -- de verification visuelle SANS engagement.
-  -- A changer avant toute mise en service reelle.
+  --[[
+    LES DEUX CODES SE CHANGENT, EN JEU, DEPUIS LE MENU PROTEGE.
+    Les valeurs ci-dessous ne sont que les valeurs de DEPART : des qu'un code
+    est tourne depuis l'interface, la nouvelle valeur est enregistree dans
+    command/etat.dat et survit aux redemarrages. Ce fichier n'est relu que
+    pour amorcer un poste neuf.
+
+    Toute rotation, des deux codes, ouvre une PERIODE DE GRACE pendant
+    laquelle l'ancien code reste accepte. Sans elle, tourner un code
+    abattrait toute la flotte qui ne l'a pas encore recu.
+  ]]
+
+  -- CODE ALLIE : libre passage dans toutes les zones et tous les modes, sauf
+  -- en zone Romeo en temps de guerre ou il declenche un scramble de
+  -- verification visuelle SANS engagement.
+  -- A CHANGER avant toute mise en service reelle.
   codeAllie = "FN-ALLIE-0000",
 
-  -- CODE GENERAL ROTATIF : acces conditionnel selon la zone. Se change
-  -- regulierement pour la securite, depuis le menu protege de l'interface.
+  -- Code allie precedent, accepte pendant la periode de grace. Renseigne
+  -- automatiquement lors d'une rotation depuis l'interface.
+  codeAlliePrecedent = nil,
+
+  -- CODE GENERAL ROTATIF : acces conditionnel selon la zone. A tourner
+  -- regulierement pour la securite.
   codeGeneral = "FN-GEN-1234",
 
-  -- Code general precedent, accepte pendant la periode de grace ci-dessous.
-  -- Renseigne automatiquement lors d'une rotation depuis l'interface.
+  -- Code general precedent, accepte pendant la periode de grace.
   codeGeneralPrecedent = nil,
 
-  -- Duree pendant laquelle le code general precedent reste accepte apres une
-  -- rotation (secondes). Sans cette grace, une rotation abattrait toute la
-  -- flotte qui n'a pas encore recu le nouveau code.
+  -- Duree pendant laquelle un code precedent reste accepte apres une rotation
+  -- (secondes). S'applique aux DEUX codes.
+  -- Trop court : la flotte qui n'a pas encore recu le nouveau code est
+  -- declassee INCONNU. Trop long : un code compromis reste valide d'autant.
   graceRotation = 300,
 
   -- Duree de validite d'une trame transpondeur (secondes). Au-dela, le code
@@ -385,9 +401,42 @@ return {
 
   -------------------------------------------------------------- INTERFACE -----
 
-  -- Code d'acces au menu protege (zones, codes, reglages sensibles).
-  -- A CHANGER. Sa seule fonction est d'eviter la fausse manoeuvre.
+  --[[
+    DEUX MOTS DE PASSE, DEUX ROLES DIFFERENTS.
+
+    codeAccesMenu       protege la CONFIGURATION : zones, rotation des codes.
+                        Sa fonction est d'eviter la fausse manoeuvre, pas de
+                        resister a un assaut.
+
+    motDePasseConsole   protege la SORTIE VERS LA CONSOLE CraftOS. Sans lui,
+                        n'importe qui appuyant sur Ctrl+T se retrouve devant
+                        un shell, avec acces a tous les fichiers du poste :
+                        codes transpondeur, zones, journal.
+
+    Les deux se changent en jeu depuis le menu protege, et la nouvelle valeur
+    est enregistree dans command/etat.dat.
+
+    AVERTISSEMENT : ces valeurs par defaut sont publiques - elles figurent
+    dans le depot que tout le monde peut lire. Changez-les a l'installation,
+    sinon la protection est purement decorative.
+
+    EN CAS D'OUBLI du mot de passe console : maintenez Ctrl+T pendant le
+    demarrage de l'ordinateur, avant que le programme n'installe son propre
+    gestionnaire. A defaut, cassez l'ordinateur (il conserve ses fichiers),
+    reposez-le a cote d'un lecteur de disquette contenant un startup.lua qui
+    renomme /startup.lua, et redemarrez.
+  ]]
   codeAccesMenu = "1234",
+
+  -- Mot de passe d'acces a la console CraftOS (Ctrl+T).
+  motDePasseConsole = "578933",
+
+  -- Verrouiller l'ecran au demarrage du poste ?
+  --   false (defaut) : l'interface est immediatement consultable. La bascule
+  --                    guerre / paix reste accessible en un clic, ce qui est
+  --                    le comportement voulu en salle de controle.
+  --   true           : le mot de passe console est exige avant tout affichage.
+  verrouillageDemarrage = false,
 
   -- Position du poste de commandement, utilisee comme origine de la carte
   -- tactique. nil = reprend positionRadar.
@@ -403,13 +452,35 @@ return {
   --   "LIBRE"  : le controleur deplace la carte lui-meme
   suiviCarte = "MENACE",
 
-  -- Nom du moniteur externe a utiliser pour l'affichage. nil = terminal.
-  -- Un grand moniteur avance change tout pour la carte : 3x2 blocs a l'echelle
-  -- 0.5 donne une situation tactique reellement lisible.
+  --[[
+    MONITEUR EXTERNE - detection automatique.
+
+    Un moniteur avance accole a l'ordinateur est detecte et adopte sans aucun
+    reglage. Il ne DUPLIQUE pas le terminal : il devient l'ECRAN DE SITUATION,
+    affichant la carte tactique en plein ecran pendant que le terminal garde
+    l'interface, les menus et la saisie. C'est la disposition d'un vrai poste
+    de controle - et un 3x3 y suffit largement.
+
+    Le clic sur le moniteur selectionne un contact ; le panneau d'ordre
+    s'ouvre sur le terminal.
+
+    nil = detection automatique du plus grand moniteur accole.
+    "nom" = forcer un moniteur precis (par exemple "monitor_0").
+    false = ne pas utiliser de moniteur, meme s'il y en a un.
+  ]]
   moniteur = nil,
 
-  -- Echelle de texte du moniteur externe (0.5 a 5).
-  echelleMoniteur = 0.5,
+  -- Echelle de texte du moniteur.
+  --   "auto" (defaut) : la plus GRANDE echelle qui laisse encore assez de
+  --                     place pour la carte. Texte lisible de loin, carte
+  --                     utilisable. C'est presque toujours le bon choix.
+  --   0.5 a 5         : echelle fixe.
+  echelleMoniteur = "auto",
+
+  -- Dimensions minimales exigees de la carte sur le moniteur, en caracteres.
+  -- L'echelle automatique descend jusqu'a les obtenir.
+  carteLargeurMini = 50,
+  carteHauteurMini = 20,
 
   -- Nombre de contacts affiches simultanement sur l'ecran principal.
   contactsAffiches = 6,
