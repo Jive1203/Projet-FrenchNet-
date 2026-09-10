@@ -69,33 +69,79 @@ function terrain.nouveau(config)
     rayonRecherche = nombreValide(config.rayonRecherche) and config.rayonRecherche or 3,
     cellulesMax    = nombreValide(config.cellulesMax) and config.cellulesMax or 4000,
     altitudeDefaut = nombreValide(config.altitudeDefaut) and config.altitudeDefaut or 64,
+    -- Grille a DEUX NIVEAUX : cases[cx][cz]. La version a cle textuelle
+    -- ("cx:cz") allouait une chaine a chaque lecture comme a chaque ecriture,
+    -- et le terrain est interroge pour chaque contact a chaque balayage.
     cases          = {},
     nombreCases    = 0,
     echantillons   = 0,
   }
 end
 
-local function cle(modele, x, z)
-  local cx = math.floor(x / modele.resolution)
-  local cz = math.floor(z / modele.resolution)
-  return cx .. ":" .. cz, cx, cz
+local function coordonnees(modele, x, z)
+  local resolution = modele.resolution
+  return math.floor(x / resolution), math.floor(z / resolution)
 end
-terrain.cle = cle
+terrain.coordonnees = coordonnees
+
+local function caseA(modele, cx, cz)
+  local colonne = modele.cases[cx]
+  return colonne and colonne[cz]
+end
+
+local function poserCase(modele, cx, cz, cellule)
+  local colonne = modele.cases[cx]
+  if not colonne then
+    colonne = {}
+    modele.cases[cx] = colonne
+  end
+  if colonne[cz] == nil then modele.nombreCases = modele.nombreCases + 1 end
+  colonne[cz] = cellule
+end
+
+local function retirerCase(modele, cx, cz)
+  local colonne = modele.cases[cx]
+  if not (colonne and colonne[cz]) then return end
+  colonne[cz] = nil
+  modele.nombreCases = modele.nombreCases - 1
+  if next(colonne) == nil then modele.cases[cx] = nil end
+end
+
+-- Parcours de toutes les cases, sans allouer de table intermediaire.
+local function pourChaqueCase(modele, fn)
+  for cx, colonne in pairs(modele.cases) do
+    for cz, cellule in pairs(colonne) do
+      fn(cx, cz, cellule)
+    end
+  end
+end
+terrain.pourChaqueCase = pourChaqueCase
 
 --------------------------------------------------------------------------------
 -- 2. INGESTION D'ECHANTILLONS
 --------------------------------------------------------------------------------
 
--- Eviction : on sacrifie les cases les moins etayees, puis les plus anciennes.
+--[[
+  EVICTION AMORTIE.
+  Chercher la pire case coute un parcours complet du modele. Le faire a chaque
+  nouvelle case, une fois le plafond atteint, revenait a payer ce parcours des
+  milliers de fois par minute des qu'une cible survolait un secteur inexplore.
+
+  On evince donc un LOT d'un coup - quelques pour cent du plafond - ce qui
+  amortit le parcours sur autant d'insertions suivantes, gratuites. Le critere
+  ne change pas : les cases les moins etayees partent en premier, puis les plus
+  anciennes.
+]]
 local function evincer(modele)
-  local pire, pireCle
-  for k, c in pairs(modele.cases) do
-    local note = c.poids * 1000 - (c.maj or 0)
-    if not pire or note < pire then pire, pireCle = note, k end
-  end
-  if pireCle then
-    modele.cases[pireCle] = nil
-    modele.nombreCases = modele.nombreCases - 1
+  local aRetirer = math.max(1, math.floor(modele.cellulesMax * 0.05))
+  local candidats = {}
+  pourChaqueCase(modele, function(cx, cz, cellule)
+    candidats[#candidats + 1] = { cx = cx, cz = cz,
+      note = cellule.poids * 1000 - (cellule.maj or 0) }
+  end)
+  table.sort(candidats, function(a, b) return a.note < b.note end)
+  for i = 1, math.min(aRetirer, #candidats) do
+    retirerCase(modele, candidats[i].cx, candidats[i].cz)
   end
 end
 
@@ -108,19 +154,20 @@ end
   une falaise, un mur ou un batiment - le systeme le signale plutot que de
   pretendre a une altitude unique.
 ]]
-function terrain.echantillonner(modele, x, y, z, source, instant)
+-- 'avecMotif' : meme raison que pour hauteurSol. Les releves arrivent en
+-- continu, le motif ne sert qu'au journal de mise au point.
+function terrain.echantillonner(modele, x, y, z, source, instant, avecMotif)
   if not (nombreValide(x) and nombreValide(y) and nombreValide(z)) then
     return nil, "coordonnees invalides"
   end
   local poids = terrain.POIDS_SOURCE[source] or 1
-  local k = cle(modele, x, z)
-  local c = modele.cases[k]
+  local cx, cz = coordonnees(modele, x, z)
+  local c = caseA(modele, cx, cz)
 
   if not c then
     if modele.nombreCases >= modele.cellulesMax then evincer(modele) end
     c = { y = y, poids = poids, n = 1, min = y, max = y, maj = instant or 0, source = source }
-    modele.cases[k] = c
-    modele.nombreCases = modele.nombreCases + 1
+    poserCase(modele, cx, cz, c)
   else
     local total = c.poids + poids
     c.y     = (c.y * c.poids + y * poids) / total
@@ -136,8 +183,9 @@ function terrain.echantillonner(modele, x, y, z, source, instant)
   end
 
   modele.echantillons = modele.echantillons + 1
-  return c, string.format("case %s : sol %.0f (%d releve(s), amplitude %.0f, source %s)",
-    k, c.y, c.n, c.max - c.min, tostring(c.source))
+  if not avecMotif then return c end
+  return c, string.format("case %d:%d : sol %.0f (%d releve(s), amplitude %.0f, source %s)",
+    cx, cz, c.y, c.n, c.max - c.min, tostring(c.source))
 end
 
 --------------------------------------------------------------------------------
@@ -152,13 +200,20 @@ end
   confiance < 0.5  -> deduite de cases voisines, a prendre avec precaution
   confiance >= 0.5 -> releve direct, plusieurs echantillons concordants
 ]]
-function terrain.hauteurSol(modele, x, z)
+--[[
+  'avecMotif' commande la construction du motif journalisable. Il est faux la
+  plupart du temps : le terrain est interroge pour CHAQUE contact a CHAQUE
+  balayage, alors que le motif ne sert qu'au journal, c'est-a-dire quand la
+  classification change. Formater une chaine des dizaines de fois par seconde
+  pour la jeter est le genre de gaspillage qui ne se voit pas et qui coute.
+]]
+function terrain.hauteurSol(modele, x, z, avecMotif)
   if not (nombreValide(x) and nombreValide(z)) then
-    return modele.altitudeDefaut, 0, "coordonnees invalides"
+    return modele.altitudeDefaut, 0, avecMotif and "coordonnees invalides" or nil
   end
 
-  local k, cx, cz = cle(modele, x, z)
-  local directe = modele.cases[k]
+  local cx, cz = coordonnees(modele, x, z)
+  local directe = caseA(modele, cx, cz)
   if directe then
     -- Un releve unique reste un indice ; trois releves concordants font une
     -- mesure. La confiance sature a 1 apres quelques observations.
@@ -168,8 +223,9 @@ function terrain.hauteurSol(modele, x, z)
       -- Falaise, mur ou batiment : on garde la mesure mais on baisse la garde.
       confiance = confiance * 0.6
     end
-    return directe.y, confiance, string.format(
-      "releve direct case %s (%d echantillon(s), amplitude %.0f)", k, directe.n, amplitude)
+    return directe.y, confiance, avecMotif and string.format(
+      "releve direct case %d:%d (%d echantillon(s), amplitude %.0f)",
+      cx, cz, directe.n, amplitude) or nil
   end
 
   -- Aucun releve ici : moyenne ponderee des cases voisines par anneaux
@@ -180,7 +236,7 @@ function terrain.hauteurSol(modele, x, z)
       for dz = -rayon, rayon do
         -- Seul l'anneau, pas l'interieur deja explore.
         if math.max(math.abs(dx), math.abs(dz)) == rayon then
-          local voisine = modele.cases[(cx + dx) .. ":" .. (cz + dz)]
+          local voisine = caseA(modele, cx + dx, cz + dz)
           if voisine then
             local p = voisine.poids / rayon
             somme = somme + voisine.y * p
@@ -195,12 +251,13 @@ function terrain.hauteurSol(modele, x, z)
       -- Plus on s'eloigne, moins on sait. Jamais au-dessus de 0.45 : une
       -- interpolation ne vaut pas un releve.
       local confiance = math.min(0.45, 0.45 / rayon)
-      return altitude, confiance, string.format(
-        "interpole depuis %d case(s) a %d case(s) de distance", trouvees, rayon)
+      return altitude, confiance, avecMotif and string.format(
+        "interpole depuis %d case(s) a %d case(s) de distance", trouvees, rayon) or nil
     end
   end
 
-  return modele.altitudeDefaut, 0, "aucun releve de terrain a proximite, altitude de repli"
+  return modele.altitudeDefaut, 0,
+    avecMotif and "aucun releve de terrain a proximite, altitude de repli" or nil
 end
 
 --------------------------------------------------------------------------------
@@ -219,7 +276,7 @@ function terrain.evaluerContact(modele, contact, config, zone)
   config = config or {}
   local seuil = nombreValide(config.hauteurAerienne) and config.hauteurAerienne or 25
 
-  local sol, confiance, motif = terrain.hauteurSol(modele, contact.x, contact.z)
+  local sol, confiance, motif = terrain.hauteurSol(modele, contact.x, contact.z, true)
 
   if confiance <= 0 then
     sol = (zone and nombreValide(zone.solY) and zone.solY)
@@ -292,33 +349,47 @@ function terrain.importer(modele, donnees)
   if type(donnees) ~= "table" or type(donnees.cases) ~= "table" then
     return false, "donnees de terrain illisibles"
   end
-  -- Une resolution differente rendrait toutes les cles fausses : on refuse
-  -- plutot que d'inventer une correspondance.
+  -- Une resolution differente rendrait toutes les coordonnees fausses : on
+  -- refuse plutot que d'inventer une correspondance.
   if nombreValide(donnees.resolution) and donnees.resolution ~= modele.resolution then
     return false, string.format("resolution incompatible (%s enregistree, %s configuree)",
       tostring(donnees.resolution), tostring(modele.resolution))
   end
-  local n = 0
-  for k, c in pairs(donnees.cases) do
+
+  local function restaurer(cx, cz, c)
     if type(c) == "table" and nombreValide(c.y) then
-      modele.cases[k] = {
+      poserCase(modele, cx, cz, {
         y = c.y, poids = c.poids or 1, n = c.n or 1,
-        min = c.min or c.y, max = c.max or c.y, maj = c.maj or 0, source = c.source or "import",
-      }
-      n = n + 1
+        min = c.min or c.y, max = c.max or c.y,
+        maj = c.maj or 0, source = c.source or "import",
+      })
     end
   end
-  modele.nombreCases  = n
-  modele.echantillons = donnees.echantillons or n
-  return true, string.format("%d case(s) de terrain restauree(s)", n)
+
+  modele.cases, modele.nombreCases = {}, 0
+  for cle, contenu in pairs(donnees.cases) do
+    if type(cle) == "number" and type(contenu) == "table" then
+      -- Format a deux niveaux : cases[cx][cz]
+      for cz, c in pairs(contenu) do restaurer(cle, cz, c) end
+    elseif type(cle) == "string" then
+      -- Format historique a cle textuelle "cx:cz" : relu sans broncher, pour
+      -- qu'une mise a jour du programme ne jette pas le relief deja appris.
+      local cx, cz = cle:match("^(-?%d+):(-?%d+)$")
+      if cx then restaurer(tonumber(cx), tonumber(cz), contenu) end
+    end
+  end
+
+  modele.echantillons = donnees.echantillons or modele.nombreCases
+  return true, string.format("%d case(s) de terrain restauree(s)", modele.nombreCases)
 end
 
 function terrain.statistiques(modele)
   local etayees, amplitudeMax = 0, 0
-  for _, c in pairs(modele.cases) do
+  pourChaqueCase(modele, function(_, _, c)
     if c.n >= 3 then etayees = etayees + 1 end
-    amplitudeMax = math.max(amplitudeMax, c.max - c.min)
-  end
+    local amplitude = c.max - c.min
+    if amplitude > amplitudeMax then amplitudeMax = amplitude end
+  end)
   return {
     cases        = modele.nombreCases,
     etayees      = etayees,

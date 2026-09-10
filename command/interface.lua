@@ -555,14 +555,40 @@ end
 --   decisions : ce qu'on voit est litteralement ce que le systeme applique.
 --------------------------------------------------------------------------------
 
-local function nouveauTampon(largeur, hauteur, fond)
-  local t = {}
-  for l = 1, hauteur do
-    local ligne = { ch = {}, fg = {}, bg = {} }
-    for c = 1, largeur do
-      ligne.ch[c], ligne.fg[c], ligne.bg[c] = " ", PALETTE.texte, fond
+--[[
+  TAMPONS D'AFFICHAGE REUTILISES.
+  Reallouer la trame entiere a chaque rafraichissement - plus de six mille
+  cases pour un moniteur 3x3, deux fois par seconde - revient a faire tourner
+  le ramasse-miettes en permanence pour redessiner la meme grille. Les tampons
+  sont donc conserves entre deux images et simplement reecrits ; ils ne sont
+  reconstruits que si les dimensions changent.
+  Un tampon par surface : le terminal et le moniteur n'ont pas la meme taille.
+]]
+local tampons = {}
+
+local function nouveauTampon(largeur, hauteur, fond, surface)
+  surface = surface or "terminal"
+  local t = tampons[surface]
+
+  if not t or t.largeur ~= largeur or t.hauteur ~= hauteur then
+    t = { largeur = largeur, hauteur = hauteur }
+    for l = 1, hauteur do
+      local ligne = { ch = {}, fg = {}, bg = {} }
+      for c = 1, largeur do
+        ligne.ch[c], ligne.fg[c], ligne.bg[c] = " ", PALETTE.texte, fond
+      end
+      t[l] = ligne
     end
-    t[l] = ligne
+    tampons[surface] = t
+    return t
+  end
+
+  for l = 1, hauteur do
+    local ligne = t[l]
+    local ch, fg, bg = ligne.ch, ligne.fg, ligne.bg
+    for c = 1, largeur do
+      ch[c], fg[c], bg[c] = " ", PALETTE.texte, fond
+    end
   end
   return t
 end
@@ -578,19 +604,29 @@ end
 
 -- Rendu ligne par ligne. term.blit fait le travail en un appel par ligne ;
 -- sans couleurs on retombe sur une ecriture simple.
+-- Tables de travail du rendu, reutilisees d'une ligne a l'autre et d'une image
+-- a l'autre : elles ne servent qu'a alimenter table.concat.
+local scratchFg, scratchBg = {}, {}
+
 local function rendreTampon(t, x0, y0)
-  for l = 1, #t do
+  local hauteur = t.hauteur or #t
+  local largeur = t.largeur
+  for l = 1, hauteur do
     local ligne = t[l]
     term.setCursorPos(x0, y0 + l - 1)
+    local n = largeur or #ligne.ch
     if ecran.couleur and term.blit then
-      local fgs, bgs = {}, {}
-      for c = 1, #ligne.ch do
-        fgs[c] = BLIT[ligne.fg[c]] or "0"
-        bgs[c] = BLIT[ligne.bg[c]] or "f"
+      local fg, bg = ligne.fg, ligne.bg
+      for c = 1, n do
+        scratchFg[c] = BLIT[fg[c]] or "0"
+        scratchBg[c] = BLIT[bg[c]] or "f"
       end
-      pcall(term.blit, table.concat(ligne.ch), table.concat(fgs), table.concat(bgs))
+      pcall(term.blit,
+        table.concat(ligne.ch, "", 1, n),
+        table.concat(scratchFg, "", 1, n),
+        table.concat(scratchBg, "", 1, n))
     else
-      term.write(table.concat(ligne.ch))
+      term.write(table.concat(ligne.ch, "", 1, n))
     end
   end
 end
@@ -624,7 +660,7 @@ local function dessinerCarte()
   rasterCache, nouveau = C.rasterCache(rasterCache, vue, zoneCarte.largeur, zoneCarte.hauteur,
     etat.zones, ctx.noyau, etat.versionZones, altitudeSonde)
 
-  local t = nouveauTampon(zoneCarte.largeur, zoneCarte.hauteur, PALETTE.fond)
+  local t = nouveauTampon(zoneCarte.largeur, zoneCarte.hauteur, PALETTE.fond, "terminal")
   for ligne = 1, zoneCarte.hauteur do
     for col = 1, zoneCarte.largeur do
       local classe = rasterCache.grille[ligne] and rasterCache.grille[ligne][col]
@@ -951,7 +987,7 @@ local function dessinerCarteMoniteur()
       zoneMoniteur.largeur, zoneMoniteur.hauteur,
       etat.zones, ctx.noyau, etat.versionZones, altitudeSonde)
 
-    local t = nouveauTampon(zoneMoniteur.largeur, zoneMoniteur.hauteur, PALETTE.fond)
+    local t = nouveauTampon(zoneMoniteur.largeur, zoneMoniteur.hauteur, PALETTE.fond, "moniteur")
     for ligne = 1, zoneMoniteur.hauteur do
       for col = 1, zoneMoniteur.largeur do
         local classe = rasterMoniteur.grille[ligne] and rasterMoniteur.grille[ligne][col]

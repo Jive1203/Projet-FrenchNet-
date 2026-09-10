@@ -953,6 +953,154 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 23 : la rasterisation optimisee dit EXACTEMENT la meme chose ==")
+do
+  local carte = dofile(RACINE .. "/command/carte.lua")
+
+  --[[
+    La rasterisation du fond de carte a ete reecrite : au lieu de tester chaque
+    case contre chaque zone, chaque zone est projetee en une boite englobante
+    et seules les cases qui y tombent sont testees, les zones etant peintes par
+    severite croissante.
+
+    C'est 22 fois plus rapide sur un moniteur 3x3 - mais une carte qui
+    montrerait autre chose que ce que la doctrine applique serait pire que pas
+    de carte du tout. On compare donc case par case avec la methode naive, qui
+    interroge le noyau pour chaque case.
+  ]]
+  local function rasteriserNaivement(vue, largeur, hauteur, zones, altitudeSonde)
+    local grille = {}
+    for ligne = 1, hauteur do
+      grille[ligne] = {}
+      for col = 1, largeur do
+        local x, z = carte.versMonde(vue, col, ligne, largeur, hauteur)
+        grille[ligne][col] = (noyau.zonePourPoint(zones, x, altitudeSonde, z))
+      end
+    end
+    return grille
+  end
+
+  -- Theatre volontairement retors : chevauchements, rectangle pivote, zone
+  -- inactive, zone a plafond, et une zone entierement hors champ.
+  local zones = {
+    { nom = "GRANDE", classe = "CHARLIE", forme = "rectangle", points = noyau.ordonnerCoins{
+        {x=-600,z=-600},{x=600,z=-600},{x=600,z=600},{x=-600,z=600} } },
+    { nom = "CERCLE", classe = "BRAVO", forme = "cercle", centre = {x=0,z=0}, rayon = 300 },
+    { nom = "LOSANGE", classe = "ALPHA", forme = "rectangle", points = noyau.ordonnerCoins{
+        {x=0,z=-200},{x=200,z=0},{x=0,z=200},{x=-200,z=0} } },
+    { nom = "COEUR", classe = "ROMEO", forme = "cercle", centre = {x=50,z=50}, rayon = 80 },
+    { nom = "PLAFOND", classe = "ROMEO", forme = "cercle", centre = {x=-300,z=-300},
+      rayon = 100, yMax = 50 },
+    { nom = "ETEINTE", classe = "ROMEO", forme = "cercle", centre = {x=0,z=0},
+      rayon = 500, actif = false },
+    { nom = "AILLEURS", classe = "ROMEO", forme = "cercle", centre = {x=90000,z=90000},
+      rayon = 400 },
+  }
+
+  local ecarts, cases = 0, 0
+  for _, echelle in ipairs({ 4, 16, 64, 256 }) do
+    for _, centre in ipairs({ {0,0}, {250,250}, {-350,-350}, {5000,5000} }) do
+      local vue = carte.nouvelle({ centreX = centre[1], centreZ = centre[2], echelle = echelle })
+      local largeur, hauteur = 51, 13
+      local attendu = rasteriserNaivement(vue, largeur, hauteur, zones, 100)
+      local obtenu  = carte.rasteriserZones(vue, largeur, hauteur, zones, noyau, 100)
+      for ligne = 1, hauteur do
+        for col = 1, largeur do
+          cases = cases + 1
+          if attendu[ligne][col] ~= obtenu[ligne][col] then
+            ecarts = ecarts + 1
+            if ecarts == 1 then
+              print(string.format("      premier ecart : echelle %d centre %d/%d case %d,%d : %s vs %s",
+                echelle, centre[1], centre[2], col, ligne,
+                tostring(attendu[ligne][col]), tostring(obtenu[ligne][col])))
+            end
+          end
+        end
+      end
+    end
+  end
+
+  verifier(string.format("identique a la methode naive sur %d cases, 4 echelles x 4 vues", cases),
+    ecarts == 0, ecarts .. " ecart(s)")
+
+  -- La boite englobante memorisee ne doit pas fausser un test d'appartenance.
+  local cercle = { nom = "C", classe = "ALPHA", forme = "cercle",
+    centre = { x = 0, z = 0 }, rayon = 100 }
+  verifier("boite englobante : point interieur toujours accepte",
+    noyau.pointDansZone(cercle, 50, 80, 50))
+  verifier("boite englobante : coin de la boite hors du cercle bien rejete",
+    not noyau.pointDansZone(cercle, 99, 80, 99))
+  verifier("boite englobante : point hors boite rejete sans calcul",
+    not noyau.pointDansZone(cercle, 5000, 80, 0))
+  verifier("boite englobante : le memo est bien pose sur la zone",
+    cercle._boite ~= nil and cercle._boite.xMax == 100)
+
+  -- Zone a plafond : la boite ne doit pas court-circuiter les bornes verticales.
+  local plafonnee = { nom = "P", classe = "ALPHA", forme = "cercle",
+    centre = { x = 0, z = 0 }, rayon = 100, yMax = 50 }
+  verifier("bornes verticales respectees malgre la boite",
+    noyau.pointDansZone(plafonnee, 10, 40, 10)
+    and not noyau.pointDansZone(plafonnee, 10, 200, 10))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 24 : le modele de terrain survit au changement de stockage ==")
+do
+  local terrain = dofile(RACINE .. "/command/terrain.lua")
+
+  -- Format historique a cle textuelle "cx:cz" : un terrain.dat deja sur disque
+  -- ne doit pas etre jete parce que le programme a change de representation.
+  local m = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  local ok, motif = terrain.importer(m, {
+    resolution = 16,
+    cases = { ["6:6"] = { y = 72, n = 4, poids = 4, min = 71, max = 73, source = "radar" } },
+  })
+  verifier("ancien format a cle textuelle relu", ok, tostring(motif))
+  local sol, confiance = terrain.hauteurSol(m, 100, 100)
+  verifier("le relief importe est bien retrouve", math.abs(sol - 72) < 0.1, tostring(sol))
+  verifier("et il porte sa confiance", confiance > 0.5, tostring(confiance))
+
+  -- Aller-retour export / import dans le nouveau format.
+  local m2 = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  terrain.echantillonner(m2, 100, 72, 100, "radar", 1)
+  terrain.echantillonner(m2, -500, 90, 300, "plateforme", 2)
+  local export = terrain.exporter(m2)
+  local m3 = terrain.nouveau({ resolution = 16, altitudeDefaut = 64 })
+  terrain.importer(m3, export)
+  verifier("aller-retour export/import : meme nombre de cases",
+    terrain.statistiques(m3).cases == terrain.statistiques(m2).cases)
+  verifier("aller-retour : altitude conservee en coordonnees negatives",
+    math.abs((terrain.hauteurSol(m3, -500, 300)) - 90) < 0.1,
+    tostring((terrain.hauteurSol(m3, -500, 300))))
+
+  -- Resolution incompatible : on refuse plutot que d'inventer.
+  local m4 = terrain.nouveau({ resolution = 8 })
+  local refuse = terrain.importer(m4, export)
+  verifier("resolution incompatible refusee", not refuse)
+
+  -- Eviction par lot : le plafond doit tenir, et les releves les mieux etayes
+  -- doivent survivre aux releves opportunistes.
+  local petit = terrain.nouveau({ resolution = 16, cellulesMax = 100 })
+  terrain.echantillonner(petit, 0, 200, 0, "radar", 1)
+  for i = 1, 400 do
+    terrain.echantillonner(petit, 1000 + i * 16, 70, 1000, "contact", i)
+  end
+  local stats = terrain.statistiques(petit)
+  verifier("le plafond de cases est respecte", stats.cases <= 100, tostring(stats.cases))
+  local solRadar = terrain.hauteurSol(petit, 0, 0)
+  verifier("le releve de station radar a survecu a l'eviction",
+    math.abs(solRadar - 200) < 0.1, tostring(solRadar))
+
+  -- Le motif n'est construit que sur demande : c'est ce qui evite de formater
+  -- une chaine pour chaque contact a chaque balayage.
+  local _, sansMotif = terrain.hauteurSol(m2, 100, 100)
+  local _, _, avecMotif = terrain.hauteurSol(m2, 100, 100, true)
+  verifier("motif absent par defaut", select(3, terrain.hauteurSol(m2, 100, 100)) == nil)
+  verifier("motif present sur demande", type(avecMotif) == "string", tostring(avecMotif))
+  verifier("l'altitude est la meme dans les deux cas", sansMotif ~= nil)
+end
+
+--------------------------------------------------------------------------------
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

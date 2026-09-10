@@ -208,15 +208,98 @@ end
 --    chaque rafraichissement.
 --------------------------------------------------------------------------------
 
+--[[
+  Boite englobante d'une zone, en coordonnees MONDE. Memorisee sur la zone
+  elle-meme : une zone n'est jamais modifiee en place, elle est remplacee, donc
+  le memo ne peut pas devenir faux.
+]]
+local function boiteMonde(zone)
+  if zone._boite then return zone._boite end
+  local boite
+  if zone.forme == "cercle" and zone.centre and zone.rayon then
+    boite = { xMin = zone.centre.x - zone.rayon, xMax = zone.centre.x + zone.rayon,
+              zMin = zone.centre.z - zone.rayon, zMax = zone.centre.z + zone.rayon }
+  elseif zone.forme == "rectangle" and type(zone.points) == "table" and #zone.points >= 3 then
+    local xMin, xMax = math.huge, -math.huge
+    local zMin, zMax = math.huge, -math.huge
+    for _, p in ipairs(zone.points) do
+      if p.x < xMin then xMin = p.x end
+      if p.x > xMax then xMax = p.x end
+      if p.z < zMin then zMin = p.z end
+      if p.z > zMax then zMax = p.z end
+    end
+    boite = { xMin = xMin, xMax = xMax, zMin = zMin, zMax = zMax }
+  else
+    return nil
+  end
+  zone._boite = boite
+  return boite
+end
+carte.boiteMonde = boiteMonde
+
+--[[
+  RASTERISATION DU FOND DE CARTE
+
+  Version naive : pour chaque case de l'ecran, demander sa classe au noyau, qui
+  teste la case contre CHAQUE zone. Cout : cases x zones x test de polygone.
+  Sur un moniteur 3x3 a l'echelle 0.5, cela fait 58 x 36 x 8 tests par
+  reconstruction - et en mode de suivi MENACE la vue bouge a chaque
+  rafraichissement, donc le cache ne sert a rien pendant un engagement, c'est-a-
+  dire exactement quand il faudrait que l'affichage reste fluide.
+
+  Version retenue : on inverse les boucles. Chaque zone est projetee en une
+  BOITE ENGLOBANTE a l'ecran, et on ne teste que les cases qui tombent dedans.
+  Une zone hors champ coute deux comparaisons ; une petite zone ne coute que sa
+  propre surface. Les zones sont peintes par SEVERITE CROISSANTE, si bien que la
+  plus stricte recouvre les autres : le resultat est identique, case par case, a
+  celui de noyau.zonePourPoint - ce qui est indispensable, la carte ne devant
+  jamais montrer autre chose que ce que la doctrine applique.
+]]
 function carte.rasteriserZones(vue, largeur, hauteur, zones, noyau, altitudeSonde)
   local grille = {}
-  for ligne = 1, hauteur do
-    grille[ligne] = {}
-    for col = 1, largeur do
-      local x, z = carte.versMonde(vue, col, ligne, largeur, hauteur)
-      grille[ligne][col] = (noyau.zonePourPoint(zones, x, altitudeSonde, z))
+  for ligne = 1, hauteur do grille[ligne] = {} end
+  if type(zones) ~= "table" or #zones == 0 then return grille end
+
+  -- Severite croissante : la plus stricte peint en dernier et l'emporte.
+  local ordonnees = {}
+  for _, zone in ipairs(zones) do
+    if zone.actif ~= false and noyau.SEVERITE[zone.classe] then
+      ordonnees[#ordonnees + 1] = zone
     end
   end
+  table.sort(ordonnees, function(a, b)
+    local sa, sb = noyau.SEVERITE[a.classe], noyau.SEVERITE[b.classe]
+    if sa ~= sb then return sa < sb end
+    return tostring(a.nom) < tostring(b.nom)   -- ordre stable
+  end)
+
+  for _, zone in ipairs(ordonnees) do
+    local boite = boiteMonde(zone)
+    if boite then
+      -- La projection est monotone sur les deux axes : projeter les deux coins
+      -- opposes suffit a encadrer la zone a l'ecran.
+      local colMin, ligneMin = carte.versEcran(vue, boite.xMin, boite.zMin, largeur, hauteur)
+      local colMax, ligneMax = carte.versEcran(vue, boite.xMax, boite.zMax, largeur, hauteur)
+
+      -- Une case de marge : la projection arrondit vers le bas.
+      colMin,   ligneMin   = math.max(1, colMin - 1),   math.max(1, ligneMin - 1)
+      colMax,   ligneMax   = math.min(largeur, colMax + 1), math.min(hauteur, ligneMax + 1)
+
+      if colMin <= colMax and ligneMin <= ligneMax then
+        local classe = zone.classe
+        for ligne = ligneMin, ligneMax do
+          local rangee = grille[ligne]
+          for col = colMin, colMax do
+            local x, z = carte.versMonde(vue, col, ligne, largeur, hauteur)
+            if noyau.pointDansZone(zone, x, altitudeSonde, z) then
+              rangee[col] = classe
+            end
+          end
+        end
+      end
+    end
+  end
+
   return grille
 end
 

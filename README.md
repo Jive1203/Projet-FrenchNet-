@@ -230,8 +230,9 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 ### Vérifier
 
 ```
-lua5.4 tests/test_command.lua           -- 229 vérifications : doctrine, terrain, carte, IFF
+lua5.4 tests/test_command.lua           -- 246 vérifications : doctrine, terrain, carte, IFF
 lua5.4 tests/test_command_runtime.lua   -- 121 vérifications : la chaîne complète, réseau simulé
+lua5.4 tests/bench.lua                  -- banc de mesure des chemins chauds
 ```
 
 ---
@@ -268,3 +269,4 @@ Consultable à l'écran (onglet **Journal**) ou dans `balise/balise.log` / `comm
 | `command/transpondeur.lua` | Émetteur de code, à poser sur chaque véhicule |
 | `tests/test_command.lua` | Banc d'essai de la doctrine (noyau pur) |
 | `tests/test_command_runtime.lua` | Banc d'essai de la chaîne complète (CraftOS émulé) |
+| `tests/bench.lua` | Banc de mesure des chemins chauds |

@@ -561,7 +561,23 @@ local function lireTable(chemin, etape)
 end
 
 local function enregistrerZones()
-  if ecrireTable(CHEMIN_ZONES, etat.zones, ETAPES.ENREGISTREMENT_ZONES) then
+  --[[
+    Les boites englobantes memorisees sur les zones (champ _boite, calcule
+    pour accelerer les tests d'appartenance) ne sont PAS enregistrees : une
+    geometrie modifiee a la main dans le fichier se retrouverait avec une
+    boite perimee, donc un test d'appartenance faux, donc une doctrine
+    appliquee sur la mauvaise zone. Elles se recalculent en une passe.
+  ]]
+  local propres = {}
+  for i, zone in ipairs(etat.zones) do
+    local copie = {}
+    for cle, valeur in pairs(zone) do
+      if cle ~= "_boite" then copie[cle] = valeur end
+    end
+    propres[i] = copie
+  end
+
+  if ecrireTable(CHEMIN_ZONES, propres, ETAPES.ENREGISTREMENT_ZONES) then
     info(ETAPES.ENREGISTREMENT_ZONES, string.format("%d zone(s) enregistree(s)", #etat.zones))
     return true
   end
@@ -914,10 +930,13 @@ local function alimenterTerrain(piste, maintenant)
     return
   end
 
+  local avecMotif = journal.seuilEcran <= 0 or journal.fichierActif
   local _, detail = terrain.echantillonner(etat.terrain, piste.x, piste.y, piste.z,
-    "contact", maintenant)
+    "contact", maintenant, avecMotif)
   etat.terrainSale = true
-  debug_(ETAPES.TERRAIN, string.format("sonde %s [%s] : %s", piste.nom, motif, tostring(detail)))
+  if detail then
+    debug_(ETAPES.TERRAIN, string.format("sonde %s [%s] : %s", piste.nom, motif, detail))
+  end
 end
 
 local function mettreAJourPistes(maintenant)
@@ -1316,7 +1335,7 @@ local function decider(piste, maintenant)
   -- Le modele de terrain observe fournit l'altitude reelle du sol sous la
   -- cible. C'est ce qui distingue un char sur une crete d'un aeronef en vol
   -- rasant, la ou une altitude de reference unique se trompe des deux cotes.
-  local sol, confianceSol, motifSol = terrain.hauteurSol(etat.terrain, piste.x, piste.z)
+  local sol, confianceSol = terrain.hauteurSol(etat.terrain, piste.x, piste.z)
   local solConnu = (confianceSol > 0) and sol or nil
   piste.solEstime, piste.confianceSol = sol, confianceSol
 
@@ -1324,8 +1343,6 @@ local function decider(piste, maintenant)
   piste.classeZone, piste.zone = classe, zone
 
   local categorie, motifCategorie = noyau.categoriser(piste, cfg, zone, solConnu)
-  motifCategorie = string.format("%s ; terrain : %s (confiance %.2f)",
-    motifCategorie, motifSol, confianceSol)
 
   local transpondeur, motifAppariement = transpondeurPourPiste(piste, maintenant)
   local codes = {
@@ -1363,9 +1380,13 @@ local function decider(piste, maintenant)
   piste.categorie, piste.iff = categorie, iff
 
   if changement then
+    -- Le detail du terrain n'est reconstruit QUE pour cette ligne de journal,
+    -- pas a chaque balayage de chaque contact.
+    local _, _, motifSol = terrain.hauteurSol(etat.terrain, piste.x, piste.z, true)
     info(ETAPES.CLASSIFICATION, string.format(
-      "cible %s classee %s [%s] ; IFF %s [%s ; %s]%s",
-      piste.nom, categorie, motifCategorie, iff, motifIff, motifAppariement, mentionMeta))
+      "cible %s classee %s [%s ; terrain : %s (confiance %.2f)] ; IFF %s [%s ; %s]%s",
+      piste.nom, categorie, motifCategorie, tostring(motifSol), confianceSol,
+      iff, motifIff, motifAppariement, mentionMeta))
     info(ETAPES.IDENTIFICATION, string.format(
       "cible %s : voie transpondeur %s [%s] / voie radar %s [%s] -> concordance %s",
       piste.nom,

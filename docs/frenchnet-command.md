@@ -957,7 +957,79 @@ impossible à arrêter, donc impossible à réparer.
 
 ---
 
-## 15. Limites connues
+## 15. Performances
+
+Le poste tourne sur un ordinateur CC: Tweaked, pas sur une machine de bureau :
+chaque milliseconde par tick compte, et le ramasse-miettes coûte souvent plus
+cher que le calcul. Un banc de mesure est fourni :
+
+```
+lua5.4 tests/bench.lua
+```
+
+Il chronomètre les chemins réellement chauds, avec des tailles réalistes, et
+affiche pour chacun le **temps par appel** et la **mémoire allouée**.
+
+### Ce que la mesure a montré
+
+Les optimisations ont été guidées par ce banc, pas par l'intuition — qui s'est
+d'ailleurs trompée deux fois (le tampon de journal, soupçonné, est négligeable ;
+le modèle de terrain, insoupçonné, était le pire de tous).
+
+| Chemin chaud | Avant | Après | Gain |
+|---|---|---|---|
+| `rasteriserZones` moniteur 3×3 (58×36) | 12,75 ms | 0,65 ms | **× 20** |
+| `rasteriserZones` terminal (51×11) | 3,85 ms | 0,32 ms | **× 12** |
+| `terrain.echantillonner` | 0,224 ms | 0,015 ms | **× 15** |
+| `terrain.hauteurSol` (relevé direct) | 0,0013 ms | 0,0004 ms | × 3, zéro allocation |
+| `noyau.zonePourPoint` (hors zone) | 0,0058 ms | 0,0037 ms | × 1,6 |
+| Tampon d'affichage 58×36 | 0,145 ms | 0,054 ms | × 3, zéro allocation |
+
+### Les quatre changements
+
+1. **Fond de carte par boîtes englobantes.** La version naïve testait chaque
+   case contre chaque zone. Chaque zone est désormais projetée en une boîte à
+   l'écran, seules les cases qui y tombent sont testées, et les zones sont
+   peintes par sévérité croissante — la plus stricte recouvre les autres. Une
+   zone hors champ coûte deux comparaisons.
+
+   C'était le vrai goulot : en mode de suivi `MENACE`, la vue bouge à chaque
+   rafraîchissement, donc le cache ne sert à rien **pendant un engagement** —
+   c'est-à-dire exactement quand l'affichage doit rester fluide.
+
+   > Une carte qui montrerait autre chose que ce que la doctrine applique
+   > serait pire que pas de carte. Le résultat est donc comparé **case par
+   > case** à la méthode naïve sur 2 652 cases, quatre échelles et quatre vues
+   > (test 23). Zéro écart.
+
+2. **Rejet rapide par boîte englobante** dans `noyau.pointDansZone` : quatre
+   comparaisons écartent la plupart des points sans lancer de rayon ni calculer
+   de racine. Profite aussi à chaque décision, pas seulement à la carte.
+
+3. **Terrain à grille deux niveaux** `cases[cx][cz]` au lieu d'une clé textuelle
+   `"cx:cz"` : plus d'allocation de chaîne à chaque lecture comme à chaque
+   écriture. L'**éviction** devient amortie — un lot de 5 % du plafond retiré
+   d'un coup, au lieu d'un parcours complet du modèle à chaque nouvelle case.
+   L'ancien format de `terrain.dat` reste relu : une mise à jour du programme
+   ne jette pas le relief déjà appris (test 24).
+
+4. **Chaînes de journal construites à la demande.** `hauteurSol` et
+   `echantillonner` formataient leur motif à chaque appel, alors qu'il ne sert
+   qu'au journal — soit des dizaines de chaînes par seconde construites pour
+   être jetées. Elles ne le sont plus que sur demande explicite. Les tampons
+   d'affichage sont de même conservés entre deux images au lieu d'être
+   réalloués.
+
+### Ce qui n'a pas été touché, et pourquoi
+
+`noyau.designer`, `evaluerDestruction`, l'appariement des transpondeurs et le
+tampon de journal ont été mesurés et laissés tels quels : ils coûtent entre
+0,001 et 0,02 ms et ne s'exécutent que quelques dizaines de fois par seconde.
+Les optimiser aurait complexifié le code pour un gain invisible.
+
+---
+
+## 16. Limites connues
 
 - **Le terrain n'est pas calculé depuis la seed, il est observé.** C'est un
   choix imposé par la plateforme (voir §6) et non un raccourci : au démarrage le

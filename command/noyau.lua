@@ -225,6 +225,34 @@ function noyau.pointDansZone(zone, x, y, z)
     if nombreValide(zone.yMax) and y > zone.yMax then return false end
   end
 
+  --[[
+    Rejet rapide par boite englobante, calculee une fois et memorisee sur la
+    zone. Quatre comparaisons ecartent l'immense majorite des points sans
+    lancer de rayon ni calculer de racine carree. Une zone n'est jamais
+    modifiee en place - elle est remplacee - donc le memo ne peut pas devenir
+    faux.
+  ]]
+  local boite = zone._boite
+  if not boite then
+    if zone.forme == "cercle" and zone.centre and nombreValide(zone.rayon) then
+      boite = { xMin = zone.centre.x - zone.rayon, xMax = zone.centre.x + zone.rayon,
+                zMin = zone.centre.z - zone.rayon, zMax = zone.centre.z + zone.rayon }
+    elseif zone.forme == "rectangle" and type(zone.points) == "table" and #zone.points >= 3 then
+      local xMin, xMax, zMin, zMax = math.huge, -math.huge, math.huge, -math.huge
+      for _, p in ipairs(zone.points) do
+        if p.x < xMin then xMin = p.x end
+        if p.x > xMax then xMax = p.x end
+        if p.z < zMin then zMin = p.z end
+        if p.z > zMax then zMax = p.z end
+      end
+      boite = { xMin = xMin, xMax = xMax, zMin = zMin, zMax = zMax }
+    end
+    zone._boite = boite
+  end
+  if boite and (x < boite.xMin or x > boite.xMax or z < boite.zMin or z > boite.zMax) then
+    return false
+  end
+
   if zone.forme == "cercle" then
     if not (zone.centre and nombreValide(zone.rayon)) then return false end
     return distance2D(x, z, zone.centre.x, zone.centre.z) <= zone.rayon
