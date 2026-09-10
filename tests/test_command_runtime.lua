@@ -943,6 +943,82 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 20 : mesures anti-saccade ==")
+do
+  --[[
+    Les trois causes de saccade cote serveur que le poste peut reellement
+    reduire sont ici verifiees, pas supposees :
+      - les ecritures disque du journal, groupees au lieu d'une ouverture de
+        fichier par ligne ;
+      - les ecritures sur le moniteur, differentielles au lieu d'un redessin
+        complet a chaque image - or chaque modification d'un moniteur est un
+        paquet envoye a tous les joueurs a portee ;
+      - les trames reseau inutiles.
+  ]]
+  preparer(ZONE_ALPHA, ETAT_GUERRE, SANS_RADAR_LOCAL
+    .. ' journalNiveauEcran = "DEBUG", journalNiveauFichier = "DEBUG",')
+  os.execute("cp " .. SRC .. "/interface.lua " .. BANC .. "/command/")
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local env, etat = craftos.creer({
+    racine = BANC, programme = "command/command.lua",
+    moniteur = { largeur = 3, hauteur = 3 },
+  })
+
+  -- Situation VOLONTAIREMENT STATIQUE : un contact immobile. C'est le cas le
+  -- plus frequent en exploitation, et celui ou un redessin complet a chaque
+  -- image est le plus gaspilleur.
+  craftos.programmerRednet(11, "frenchnet_radar", 2,
+    trameStation("RAD-NORD", { x = 0, y = 80, z = 0 }, 500,
+      function(t)
+        if t >= 4 then
+          return { { id = "ID:7", nom = "Statique", nature = "VEHICULE",
+                     x = 100, y = 150, z = 0 } }
+        end
+        return {}
+      end))
+  craftos.programmerRednet(22, "frenchnet_lanceur", 5,
+    trameLanceur("SAM-Est", { x = 150, y = 70, z = 0 }, 12, 600))
+
+  craftos.executer(BANC .. "/command/command.lua", 40)
+
+  ------------------------------------------------------------ journal disque
+  local journal = journalDisque()
+  local lignes = 0
+  for _ in journal:gmatch("[^\n]+") do lignes = lignes + 1 end
+  local ouvertures = (etat.ouverturesPar or {})["command/command.log"] or 0
+
+  verifier("le journal contient bien des lignes", lignes > 20, tostring(lignes))
+  verifier(string.format(
+    "%d ligne(s) de journal ecrites en %d ouverture(s) de fichier", lignes, ouvertures),
+    ouvertures > 0 and ouvertures < lignes / 3,
+    string.format("%d ouvertures pour %d lignes", ouvertures, lignes))
+
+  ------------------------------------------------------------ moniteur
+  local ecritures = #(etat.moniteurEcrit or {})
+  verifier("le moniteur a bien ete dessine au moins une fois", ecritures > 0)
+  -- 36 lignes redessinees a chaque image donneraient des milliers d'ecritures
+  -- sur quarante secondes. Le differentiel doit les faire s'effondrer.
+  verifier(string.format(
+    "situation statique : seulement %d ecriture(s) sur le moniteur", ecritures),
+    ecritures < 400, tostring(ecritures))
+
+  ------------------------------------------------------------ annonce du poste
+  local annonces = 0
+  for _, d in ipairs(etat.diffusions) do
+    if d.protocole == "frenchnet_annonce" then annonces = annonces + 1 end
+  end
+  verifier("le poste s'annonce pour que les stations cessent de diffuser",
+    annonces > 0, tostring(annonces))
+  verifier("l'annonce reste rare (une toutes les 30s par defaut)",
+    annonces <= 3, tostring(annonces))
+
+  local j = journalDisque()
+  verifier("le numero de l'ordinateur est journalise au demarrage",
+    j:find("Il s'annonce toutes les", 1, true) ~= nil)
+end
+
+--------------------------------------------------------------------------------
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))
 if echecs > 0 then os.exit(1) end
 os.exit(0)

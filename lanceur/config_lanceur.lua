@@ -54,14 +54,23 @@ return {
 
   ---------------------------------------------------------------- RESEAU ------
 
-  -- Periode d'emission, en secondes. Le poste considere une balise perimee
-  -- au-dela de sa propre 'validiteInventaire' (60 s par defaut).
+  -- Periode de RELEVE du stock, en secondes.
   intervalleSecondes = 5,
+
+  -- Periode de RAPPEL, quand rien ne change. La balise n'emet que sur
+  -- changement de stock ou de disponibilite ; ce rappel evite que le poste la
+  -- declare perimee (validiteInventaire, 60 s par defaut). Un tir fait partir
+  -- la trame immediatement.
+  rafraichissementPlein = 20,
 
   -- Protocole rednet. IDENTIQUE sur toutes les balises et sur le poste.
   protocoleLanceur = "frenchnet_lanceur",
 
-  -- Identifiant de l'ordinateur du poste de commandement. nil = diffusion.
+  -- Protocole sur lequel le poste s'annonce. La balise retient son numero et
+  -- lui parle ensuite directement au lieu de diffuser a tout le serveur.
+  protocoleAnnonce = "frenchnet_annonce",
+
+  -- Identifiant de l'ordinateur du poste. nil = decouverte automatique.
   idCommand = nil,
 
   ---------------------------------------------------------------- JOURNAL -----

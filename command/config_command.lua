@@ -39,6 +39,17 @@ return {
   ]]
   protocoleRadar = "frenchnet_radar",
 
+  --[[
+    ANNONCE DU POSTE.
+    Sans elle, chaque station et chaque balise DIFFUSE ses trames a la
+    cantonade, ce qui reveille tous les ordinateurs du serveur plusieurs fois
+    par seconde, concernes ou non. Le poste s'annonce donc periodiquement ; les
+    stations retiennent son numero et lui parlent ensuite directement.
+    Une annonce toutes les 30 s est negligeable ; ce qu'elle economise, non.
+  ]]
+  protocoleAnnonce = "frenchnet_annonce",
+  annonceSecondes  = 30,
+
   -- Duree sans trame au-dela de laquelle une station est declaree muette
   -- (secondes). Sa couverture est alors perdue, et le journal le dit.
   validiteStation = 15,
@@ -493,9 +504,28 @@ return {
 
   journalFichier     = true,
   journalTailleMax   = 131072,
+
   -- Verbosite ECRAN : "DEBUG" | "INFO" | "AVERT" | "ERREUR".
-  -- Le fichier journal enregistre toujours tout.
   journalNiveauEcran = "INFO",
+
+  -- Verbosite FICHIER, independante. Passer a "DEBUG" pour une mise au point,
+  -- revenir a "INFO" ensuite : une ligne qui n'interesse aucune des deux
+  -- sorties n'est meme pas construite.
+  journalNiveauFichier = "INFO",
+
+  --[[
+    ECRITURE GROUPEE.
+    Ouvrir, ecrire et fermer un fichier pour CHAQUE ligne est une operation
+    disque a chaque fois - une des causes de saccade les plus betes. Les
+    lignes sont donc ecrites par lots.
+      journalLot    : lignes accumulees avant ecriture forcee.
+      journalAgeMax : age maximal d'une ligne en attente, en secondes.
+    Une ligne ERREUR ou CRITIQUE part sur disque immediatement : c'est
+    precisement ce qu'on vient chercher dans un journal apres un incident.
+    Perte maximale en cas de coupure brutale : journalAgeMax secondes.
+  ]]
+  journalLot    = 24,
+  journalAgeMax = 5,
 
   -- Resume periodique d'etat dans le journal (secondes).
   battementSecondes  = 60,

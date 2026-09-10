@@ -43,6 +43,15 @@ local function makeFs(racine)
   function fs.delete(p) os.remove(reel(p)) end
   function fs.move(a, b) os.rename(reel(a), reel(b)) end
   function fs.open(p, mode)
+    -- Compteur d'ouvertures de fichier : ouvrir et fermer un fichier a chaque
+    -- ligne de journal est une operation disque a chaque fois, et l'une des
+    -- causes de saccade les plus faciles a supprimer. Le banc doit pouvoir le
+    -- verifier, pas seulement le supposer.
+    if etat then
+      etat.ouverturesFichier = (etat.ouverturesFichier or 0) + 1
+      etat.ouverturesPar = etat.ouverturesPar or {}
+      etat.ouverturesPar[p] = (etat.ouverturesPar[p] or 0) + 1
+    end
     local f = io.open(reel(p), mode)
     if not f then return nil end
     return {

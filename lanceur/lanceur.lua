@@ -34,6 +34,7 @@ local ETAPES = {
   DETECTION_STOCK   = "detection de l'inventaire de munitions",
   COMPTAGE          = "comptage des munitions",
   EMISSION          = "emission de la balise",
+  DECOUVERTE        = "decouverte du poste de commandement",
   TIR_DETECTE       = "tir detecte",
   REARMEMENT        = "rearmement detecte",
   RUPTURE_STOCK     = "rupture de stock",
@@ -120,7 +121,9 @@ local DEFAUTS = {
   munitionsMax      = nil,
   seuilAlerte       = 3,
   intervalleSecondes = 5,
+  rafraichissementPlein = 20,
   protocoleLanceur  = "frenchnet_lanceur",
+  protocoleAnnonce  = "frenchnet_annonce",
   idCommand         = nil,
   journalFichier    = true,
   journalNiveauEcran = "INFO",
@@ -128,7 +131,11 @@ local DEFAUTS = {
 }
 
 local cfg = {}
-local etat = { munitions = 0, tirs = 0, arret = false, emissions = 0, precedent = nil, inventaire = nil }
+local etat = {
+  munitions = 0, tirs = 0, arret = false, emissions = 0, precedent = nil, inventaire = nil,
+  dernierEnvoi = -1e9, dernierEtatEmis = nil, evitees = 0,
+  idCommandDecouvert = nil, decouverteA = -1e9,
+}
 
 local function chargerConfiguration()
   for k, v in pairs(DEFAUTS) do cfg[k] = v end
@@ -235,6 +242,37 @@ end
 --------------------------------------------------------------------------------
 -- Boucles
 --------------------------------------------------------------------------------
+--[[
+  Le poste de commandement s'annonce periodiquement : des qu'on connait son
+  numero, on lui parle directement au lieu de diffuser a tout le serveur.
+]]
+local function destinataire()
+  if type(cfg.idCommand) == "number" then return cfg.idCommand end
+  if etat.idCommandDecouvert and (os.clock() - etat.decouverteA) <= 120 then
+    return etat.idCommandDecouvert
+  end
+  return nil
+end
+
+local function ecouterAnnonces()
+  while not etat.arret do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] == "rednet_message" then
+      local expediteur, message, protocole = evenement[2], evenement[3], evenement[4]
+      if protocole == cfg.protocoleAnnonce and type(message) == "table"
+         and message.protocole == "FRENCHNET_COMMAND_ICI" then
+        if etat.idCommandDecouvert ~= expediteur then
+          info(ETAPES.DECOUVERTE, string.format(
+            "poste de commandement '%s' decouvert sur l'ordinateur %d : envoi direct",
+            tostring(message.identifiant), expediteur))
+        end
+        etat.idCommandDecouvert = expediteur
+        etat.decouverteA = os.clock()
+      end
+    end
+  end
+end
+
 local function diffuser()
   while not etat.arret do
     local avant = etat.munitions
@@ -274,19 +312,35 @@ local function diffuser()
       categories  = cfg.categoriesTraitees,
     }
 
-    local ok
-    if type(cfg.idCommand) == "number" then
-      ok = pcall(rednet.send, cfg.idCommand, trame, cfg.protocoleLanceur)
-    else
-      ok = pcall(rednet.broadcast, trame, cfg.protocoleLanceur)
-    end
+    --[[
+      Un stock qui ne bouge pas n'a pas besoin d'etre reannonce toutes les cinq
+      secondes. On n'emet que sur CHANGEMENT, plus un rappel periodique bien en
+      dessous du delai au-dela duquel le poste declare la balise perimee. Une
+      plateforme qui tire voit sa trame partir immediatement.
+    ]]
+    local maintenant = os.clock()
+    local empreinte = string.format("%d/%d/%s", etat.munitions, etat.tirs,
+      tostring(trame.disponible))
+    local doitEmettre = (empreinte ~= etat.dernierEtatEmis)
+      or (maintenant - etat.dernierEnvoi) >= (cfg.rafraichissementPlein or 20)
 
-    if ok then
-      etat.emissions = etat.emissions + 1
-      ecrire("DEBUG", ETAPES.EMISSION, string.format(
-        "balise %d : %d munition(s), %d tir(s)", etat.emissions, etat.munitions, etat.tirs))
+    if doitEmettre then
+      local cible = destinataire()
+      local ok
+      if cible then ok = pcall(rednet.send, cible, trame, cfg.protocoleLanceur)
+      else ok = pcall(rednet.broadcast, trame, cfg.protocoleLanceur) end
+
+      if ok then
+        etat.emissions = etat.emissions + 1
+        etat.dernierEnvoi = maintenant
+        etat.dernierEtatEmis = empreinte
+        ecrire("DEBUG", ETAPES.EMISSION, string.format(
+          "balise %d : %d munition(s), %d tir(s)", etat.emissions, etat.munitions, etat.tirs))
+      else
+        erreur(ETAPES.EMISSION, "transmission vers le poste de commandement impossible")
+      end
     else
-      erreur(ETAPES.EMISSION, "transmission vers le poste de commandement impossible")
+      etat.evitees = etat.evitees + 1
     end
 
     -- Affichage local, pour l'operateur sur place.
@@ -366,7 +420,7 @@ while true do
     info(ETAPES.OUVERTURE_REDNET, "rednet ouvert sur '" .. cote .. "'")
 
     detecterInventaire()
-    parallel.waitForAny(diffuser, clavier, terminaison)
+    parallel.waitForAny(diffuser, ecouterAnnonces, clavier, terminaison)
   end)
 
   if etat.arret then return end

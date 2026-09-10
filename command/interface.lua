@@ -608,27 +608,76 @@ end
 -- a l'autre : elles ne servent qu'a alimenter table.concat.
 local scratchFg, scratchBg = {}, {}
 
-local function rendreTampon(t, x0, y0)
+--[[
+  RENDU DIFFERENTIEL - la mesure anti-lag la plus importante du poste.
+
+  Un moniteur Minecraft n'est pas un ecran : chaque modification de son contenu
+  est un paquet envoye a TOUS les joueurs a portee. Redessiner les trente-six
+  lignes d'un 3x3 a chaque seconde, c'est envoyer trente-six lignes de texte a
+  tout le monde autour, en permanence - y compris quand rien n'a bouge, ce qui
+  est le cas la plupart du temps.
+
+  On compare donc chaque ligne a ce qui y est deja affiche, et on n'ecrit QUE
+  les lignes qui ont reellement change. Ciel vide et carte immobile : zero
+  ecriture, zero paquet. Un contact qui traverse : une ou deux lignes.
+]]
+local function rendreTampon(t, x0, y0, forcer)
   local hauteur = t.hauteur or #t
   local largeur = t.largeur
+  local couleur = ecran.couleur and term.blit
+  local precedent = t.precedent
+  if not precedent or forcer then
+    precedent = {}
+    t.precedent = precedent
+  end
+
+  local ecrites = 0
   for l = 1, hauteur do
     local ligne = t[l]
-    term.setCursorPos(x0, y0 + l - 1)
     local n = largeur or #ligne.ch
-    if ecran.couleur and term.blit then
+    local texte = table.concat(ligne.ch, "", 1, n)
+    local avant, arriere
+
+    if couleur then
       local fg, bg = ligne.fg, ligne.bg
       for c = 1, n do
         scratchFg[c] = BLIT[fg[c]] or "0"
         scratchBg[c] = BLIT[bg[c]] or "f"
       end
-      pcall(term.blit,
-        table.concat(ligne.ch, "", 1, n),
-        table.concat(scratchFg, "", 1, n),
-        table.concat(scratchBg, "", 1, n))
-    else
-      term.write(table.concat(ligne.ch, "", 1, n))
+      avant   = table.concat(scratchFg, "", 1, n)
+      arriere = table.concat(scratchBg, "", 1, n)
+    end
+
+    local memo = precedent[l]
+    local identique = memo and memo.texte == texte
+      and memo.avant == avant and memo.arriere == arriere
+
+    if not identique then
+      term.setCursorPos(x0, y0 + l - 1)
+      if couleur then
+        pcall(term.blit, texte, avant, arriere)
+      else
+        term.write(texte)
+      end
+      precedent[l] = { texte = texte, avant = avant, arriere = arriere }
+      ecrites = ecrites + 1
     end
   end
+  return ecrites
+end
+
+--[[
+  Meme principe pour les bandeaux de titre et d'etat : une bande reecrite a
+  l'identique reste un paquet envoye a tous les joueurs alentour.
+]]
+local bandesAffichees = {}
+
+local function bandeSiChangee(cle, y, texte, fg, bg)
+  local empreinte = tostring(texte) .. "\1" .. tostring(fg) .. "\1" .. tostring(bg)
+  if bandesAffichees[cle] == empreinte then return false end
+  bandesAffichees[cle] = empreinte
+  ecran.bande(y, texte, fg, bg)
+  return true
 end
 
 local function positionPoste()
@@ -660,6 +709,9 @@ local function dessinerCarte()
   rasterCache, nouveau = C.rasterCache(rasterCache, vue, zoneCarte.largeur, zoneCarte.hauteur,
     etat.zones, ctx.noyau, etat.versionZones, altitudeSonde)
 
+  -- Le terminal est integralement efface a chaque image par ecran.effacer :
+  -- son memo differentiel n'a plus de sens, on force la reecriture. Le
+  -- moniteur, lui, n'est jamais efface et beneficie pleinement du differentiel.
   local t = nouveauTampon(zoneCarte.largeur, zoneCarte.hauteur, PALETTE.fond, "terminal")
   for ligne = 1, zoneCarte.hauteur do
     for col = 1, zoneCarte.largeur do
@@ -716,7 +768,7 @@ local function dessinerCarte()
     end
   end
 
-  rendreTampon(t, zoneCarte.x, zoneCarte.y)
+  rendreTampon(t, zoneCarte.x, zoneCarte.y, true)
 
   --------------------------------------------------------------- ligne d'etat
   local ligneEtat = zoneCarte.y + zoneCarte.hauteur
@@ -979,7 +1031,7 @@ local function dessinerCarteMoniteur()
     local titre = string.format(" FRENCHNET %s  %s%s",
       ctx.cfg.identifiant, etat.mode,
       etat.alerteMax and "  *** ALERTE MAXIMALE ***" or "")
-    ecran.bande(1, titre, colors.white,
+    bandeSiChangee("moniteurTitre", 1, titre, colors.white,
       etat.alerteMax and PALETTE.alerte or (guerre and PALETTE.guerre or PALETTE.titre))
 
     local altitudeSonde = poste.y or 64
@@ -1032,13 +1084,13 @@ local function dessinerCarteMoniteur()
       end
     end
 
-    rendreTampon(t, zoneMoniteur.x, zoneMoniteur.y)
+    etat.lignesMoniteur = rendreTampon(t, zoneMoniteur.x, zoneMoniteur.y)
 
     local largeurMonde, hauteurMonde = C.etendue(vue,
       zoneMoniteur.largeur, zoneMoniteur.hauteur)
     local mentionAG = etat.nombreDemandesAG > 0
       and string.format("  %d AG A VALIDER", etat.nombreDemandesAG) or ""
-    ecran.bande(ecran.hauteur, string.format(
+    bandeSiChangee("moniteurEtat", ecran.hauteur, string.format(
       " %d b/car  %.0fx%.0f b  %s  %d/%d radar  %d contact(s)%s",
       C.echelle(vue), largeurMonde, hauteurMonde, vue.suivi,
       etat.stationsActives, etat.nombreStations, visibles, mentionAG),

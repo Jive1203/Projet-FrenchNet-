@@ -31,6 +31,8 @@ local ETAPES = {
   OUVERTURE_REDNET  = "ouverture rednet",
   DETECTION_RADAR   = "detection du radar",
   BALAYAGE          = "balayage radar",
+  CADENCE           = "cadence de balayage",
+  DECOUVERTE        = "decouverte du poste de commandement",
   REFERENTIEL       = "deduction du referentiel",
   EMISSION          = "emission vers le poste de commandement",
   BOUCLE            = "boucle principale",
@@ -148,7 +150,11 @@ local DEFAUTS = {
   peripheriqueRadar  = nil,
   coteModem          = nil,
   intervalleBalayage = 1,
+  intervalleRepos    = 3,
+  reposApres         = 10,
+  rafraichissementVide = 5,
   protocoleRadar     = "frenchnet_radar",
+  protocoleAnnonce   = "frenchnet_annonce",
   idCommand          = nil,
   journalNiveauEcran = "INFO",
   journalFichier     = true,
@@ -159,7 +165,12 @@ local DEFAUTS = {
 }
 
 local cfg = {}
-local etat = { relatives = nil, arret = false, trames = 0, contactsVus = 0, echecs = 0 }
+local etat = {
+  relatives = nil, arret = false, trames = 0, contactsVus = 0, echecs = 0,
+  dernierContact = -1e9, dernierEnvoi = -1e9, videPrecedent = true,
+  cadenceReduite = false, idCommandDecouvert = nil, decouverteA = -1e9,
+  balayages = 0, tramesEvitees = 0,
+}
 
 local function chargerConfiguration()
   for k, v in pairs(DEFAUTS) do cfg[k] = v end
@@ -269,11 +280,59 @@ end
 --------------------------------------------------------------------------------
 -- Boucle de balayage
 --------------------------------------------------------------------------------
+--[[
+  DESTINATAIRE DES TRAMES.
+  Une diffusion generale reveille TOUS les ordinateurs du serveur a chaque
+  trame : quatre stations a une trame par seconde, cela fait quatre reveils par
+  seconde sur chaque machine du monde, concernee ou non. Des que le poste de
+  commandement s'est annonce, on lui parle directement.
+]]
+local function destinataire()
+  if type(cfg.idCommand) == "number" then return cfg.idCommand end
+  if etat.idCommandDecouvert and (os.clock() - etat.decouverteA) <= 120 then
+    return etat.idCommandDecouvert
+  end
+  return nil
+end
+
+local function transmettre(trame)
+  local cible = destinataire()
+  if cible then
+    return (proteger(ETAPES.EMISSION, rednet.send, cible, trame, cfg.protocoleRadar))
+  end
+  return (proteger(ETAPES.EMISSION, rednet.broadcast, trame, cfg.protocoleRadar))
+end
+
+-- Ecoute des annonces du poste : on cesse de diffuser a la cantonade des
+-- qu'on sait a qui parler.
+local function ecouterAnnonces()
+  while not etat.arret do
+    local evenement = table.pack(os.pullEventRaw())
+    if evenement[1] == "rednet_message" then
+      local expediteur, message, protocole = evenement[2], evenement[3], evenement[4]
+      if protocole == cfg.protocoleAnnonce and type(message) == "table"
+         and message.protocole == "FRENCHNET_COMMAND_ICI" then
+        local nouveau = (etat.idCommandDecouvert ~= expediteur)
+        etat.idCommandDecouvert = expediteur
+        etat.decouverteA = os.clock()
+        if nouveau then
+          info(ETAPES.DECOUVERTE, string.format(
+            "poste de commandement '%s' decouvert sur l'ordinateur %d : les trames lui " ..
+            "seront envoyees directement, et non plus en diffusion generale",
+            tostring(message.identifiant), expediteur))
+        end
+      end
+    end
+  end
+end
+
 local function balayer()
   while not etat.arret do
+    local maintenant = os.clock()
     local bruts = scanner.collecter(radar, methodes, function(fn)
       return proteger(ETAPES.BALAYAGE, fn)
     end)
+    etat.balayages = etat.balayages + 1
 
     if etat.relatives == nil then
       if type(cfg.positionsRelatives) == "boolean" then
@@ -300,36 +359,82 @@ local function balayer()
       contacts  = contacts,
     }
 
-    local ok
-    if type(cfg.idCommand) == "number" then
-      ok = proteger(ETAPES.EMISSION, rednet.send, cfg.idCommand, trame, cfg.protocoleRadar)
-    else
-      ok = proteger(ETAPES.EMISSION, rednet.broadcast, trame, cfg.protocoleRadar)
-    end
+    --[[
+      TRAMES INUTILES SUPPRIMEES.
+      Un ciel vide n'a pas besoin d'etre annonce chaque seconde. Tant qu'il n'y
+      a rien et qu'il n'y avait rien, on n'emet que de loin en loin : assez
+      souvent pour que le poste ne declare pas la station muette, assez
+      rarement pour ne reveiller personne pour rien. Des qu'un contact apparait
+      ou disparait, la trame part immediatement.
+    ]]
+    local vide = (#contacts == 0)
+    local doitEmettre = (not vide)
+      or (vide ~= etat.videPrecedent)
+      or (maintenant - etat.dernierEnvoi) >= (cfg.rafraichissementVide or 5)
 
-    if ok then
-      etat.trames = etat.trames + 1
-      etat.contactsVus = etat.contactsVus + #contacts
-      etat.echecs = 0
-      ecrire("DEBUG", ETAPES.EMISSION, string.format("trame %d : %d contact(s) transmis",
-        etat.trames, #contacts))
-    else
-      etat.echecs = etat.echecs + 1
-      if etat.echecs == 1 or etat.echecs % 10 == 0 then
-        erreur(ETAPES.EMISSION, string.format(
-          "%d echec(s) consecutif(s) de transmission vers le poste de commandement", etat.echecs))
+    if not vide then etat.dernierContact = maintenant end
+    etat.videPrecedent = vide
+
+    if doitEmettre then
+      local ok = transmettre(trame)
+      if ok then
+        etat.trames = etat.trames + 1
+        etat.contactsVus = etat.contactsVus + #contacts
+        etat.echecs = 0
+        etat.dernierEnvoi = maintenant
+        ecrire("DEBUG", ETAPES.EMISSION, string.format("trame %d : %d contact(s) transmis",
+          etat.trames, #contacts))
+      else
+        etat.echecs = etat.echecs + 1
+        if etat.echecs == 1 or etat.echecs % 10 == 0 then
+          erreur(ETAPES.EMISSION, string.format(
+            "%d echec(s) consecutif(s) de transmission vers le poste de commandement",
+            etat.echecs))
+        end
       end
+    else
+      etat.tramesEvitees = etat.tramesEvitees + 1
     end
 
-    dormir(cfg.intervalleBalayage or 1)
+    --[[
+      CADENCE ADAPTATIVE.
+      Les methodes du radar s'executent sur le THREAD PRINCIPAL du serveur :
+      c'est de loin ce que cette station coute le plus cher au monde qui
+      l'heberge. Les appeler chaque seconde alors que rien ne vole depuis dix
+      minutes est du gaspillage pur.
+
+      Tant qu'un contact a ete vu recemment, la cadence reste pleine. Passe ce
+      delai, elle se detend. Le prix a payer est un retard de detection borne
+      par intervalleRepos, sur un ciel jusque-la desert : le reglage se fait en
+      connaissance de cause, et intervalleRepos = false le supprime.
+    ]]
+    local intervalle = cfg.intervalleBalayage or 1
+    if cfg.intervalleRepos and cfg.intervalleRepos > intervalle then
+      local calme = (maintenant - etat.dernierContact) > (cfg.reposApres or 10)
+      if calme ~= etat.cadenceReduite then
+        etat.cadenceReduite = calme
+        info(ETAPES.CADENCE, calme
+          and string.format("ciel calme depuis %ds : cadence detendue a %.1fs",
+            cfg.reposApres or 10, cfg.intervalleRepos)
+          or string.format("contact detecte : cadence pleine retablie a %.1fs", intervalle))
+      end
+      if calme then intervalle = cfg.intervalleRepos end
+    end
+
+    dormir(intervalle)
   end
 end
 
 local function battement()
   while not etat.arret do
     dormir(cfg.battementSecondes or 60)
-    info("battement", string.format("station %s : %d trame(s), %d contact(s) cumule(s), %d echec(s)",
-      cfg.identifiant, etat.trames, etat.contactsVus, etat.echecs))
+    info("battement", string.format(
+      "station %s : %d balayage(s), %d trame(s) emise(s), %d evitee(s), %d contact(s) cumule(s), " ..
+      "%d echec(s) | cadence %s | destinataire %s",
+      cfg.identifiant, etat.balayages, etat.trames, etat.tramesEvitees,
+      etat.contactsVus, etat.echecs,
+      etat.cadenceReduite and "detendue" or "pleine",
+      destinataire() and ("ordinateur " .. destinataire()) or "DIFFUSION GENERALE"))
   end
 end
 
@@ -368,7 +473,7 @@ while true do
     info(ETAPES.DEMARRAGE, string.format(
       "station %s operationnelle en X=%.0f Y=%.0f Z=%.0f, portee %.0f",
       cfg.identifiant, cfg.position.x, cfg.position.y, cfg.position.z, cfg.portee))
-    parallel.waitForAny(balayer, battement, terminaison)
+    parallel.waitForAny(balayer, ecouterAnnonces, battement, terminaison)
   end)
 
   if etat.arret then

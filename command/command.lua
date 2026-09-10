@@ -61,6 +61,7 @@ local ETAPES = {
   ALERTE_CONTROLEUR    = "alerte controleur humain",
   RECEPTION_TRANSPONDEUR = "reception d'un code transpondeur",
   RECEPTION_RADAR      = "reception d'une trame de station radar",
+  ANNONCE              = "annonce du poste de commandement",
   FUSION_PISTES        = "fusion des pistes multi-radars",
   RECEPTION_LANCEUR    = "reception d'une balise de lanceur",
   TERRAIN              = "modele de terrain",
@@ -132,12 +133,33 @@ end
 --    Format : [horodatage] [NIVEAU] [etape: <nom>] message
 --------------------------------------------------------------------------------
 
+--[[
+  JOURNAL A ECRITURE GROUPEE.
+
+  Ouvrir, ecrire et fermer un fichier pour CHAQUE ligne est une operation
+  disque a chaque fois. Avec une trentaine de contacts suivis et le niveau
+  DEBUG, cela faisait des dizaines d'ouvertures de fichier par seconde sur
+  l'ordinateur - une des causes de saccade les plus betes et les plus faciles
+  a supprimer.
+
+  Les lignes sont donc accumulees et ecrites par lots. Deux garde-fous :
+    - une ligne ERREUR ou CRITIQUE vide le tampon immediatement. Ce qui compte
+      dans un journal, c'est justement d'y retrouver ce qui a precede un
+      plantage ;
+    - le tampon est vide a chaque battement et a l'arret du poste.
+]]
 local journal = {
-  fichierActif = false,
-  seuilEcran   = 1,
-  tailleMax    = 128 * 1024,
-  tampon       = {},      -- derniers messages, pour l'ecran "journal" de l'interface
-  tamponMax    = 200,
+  fichierActif  = false,
+  seuilEcran    = 1,
+  seuilFichier  = 1,
+  tailleMax     = 128 * 1024,
+  tampon        = {},     -- derniers messages, pour l'ecran "journal" de l'interface
+  tamponMax     = 200,
+  enAttente     = {},     -- lignes pas encore ecrites sur disque
+  lotMax        = 24,     -- ecriture forcee au-dela de ce nombre de lignes
+  ageMax        = 5,      -- ecriture forcee au-dela de cet age, en secondes
+  attenteDepuis = nil,
+  ecrituresDisque = 0,
 }
 
 local NIVEAUX  = { DEBUG = 0, INFO = 1, AVERT = 2, ERREUR = 3, CRITIQUE = 4 }
@@ -160,15 +182,66 @@ function journal.rotation()
   fs.move(CHEMIN_JOURNAL, archive)
 end
 
+-- Ecrit sur disque tout ce qui attend, en UNE seule ouverture de fichier.
+function journal.vider()
+  local nombre = #journal.enAttente
+  if nombre == 0 or not journal.fichierActif then
+    journal.attenteDepuis = nil
+    return 0
+  end
+  pcall(function()
+    journal.rotation()
+    local f = fs.open(CHEMIN_JOURNAL, "a")
+    if f then
+      for i = 1, nombre do f.writeLine(journal.enAttente[i]) end
+      f.close()
+      journal.ecrituresDisque = journal.ecrituresDisque + 1
+    end
+  end)
+  journal.enAttente = {}
+  journal.attenteDepuis = nil
+  return nombre
+end
+
+--[[
+  Vidage sur ANCIENNETE, appele une fois par balayage.
+  Le groupement des ecritures fait gagner beaucoup de temps disque, mais il
+  cree un risque : si l'ordinateur est coupe net - chunk decharge, serveur qui
+  tombe - tout ce qui attend est perdu. Or c'est exactement ce qu'on vient
+  chercher dans un journal apres un incident.
+  La perte possible est donc bornee a quelques secondes, pas au prochain
+  battement qui peut etre a une minute.
+]]
+function journal.viderSiVieux(maintenant)
+  if not journal.attenteDepuis then return end
+  if (maintenant - journal.attenteDepuis) >= (journal.ageMax or 5) then
+    journal.vider()
+  end
+end
+
 function journal.ecrire(niveau, etape, message)
+  local rang = NIVEAUX[niveau] or 1
+  local versEcran  = rang >= journal.seuilEcran and not journal.ecranSilencieux
+  local versDisque = journal.fichierActif and rang >= journal.seuilFichier
+
+  -- Rien a en faire : on ne construit meme pas la chaine. Formater une ligne
+  -- pour la jeter aussitot est du travail pur perdu, et il y en a beaucoup.
+  if not (versEcran or versDisque) then return end
+
   local ligne = string.format("[%s] [%s] [etape: %s] %s",
     horodatage(), niveau, etape or "?", tostring(message))
 
-  -- Tampon memoire (consulte par l'interface).
-  journal.tampon[#journal.tampon + 1] = { niveau = niveau, texte = ligne }
-  while #journal.tampon > journal.tamponMax do table.remove(journal.tampon, 1) end
+  -- Tampon memoire (consulte par l'interface), en anneau : pas de decalage
+  -- de tableau a chaque ligne.
+  local tampon = journal.tampon
+  tampon[#tampon + 1] = { niveau = niveau, texte = ligne }
+  if #tampon > journal.tamponMax * 2 then
+    local garde = {}
+    for i = #tampon - journal.tamponMax + 1, #tampon do garde[#garde + 1] = tampon[i] end
+    journal.tampon = garde
+  end
 
-  if (NIVEAUX[niveau] or 1) >= journal.seuilEcran and not journal.ecranSilencieux then
+  if versEcran then
     pcall(function()
       if term.isColour and term.isColour() then term.setTextColour(COULEURS[niveau] or colors.white) end
       print(ligne)
@@ -176,12 +249,14 @@ function journal.ecrire(niveau, etape, message)
     end)
   end
 
-  if journal.fichierActif then
-    pcall(function()
-      journal.rotation()
-      local f = fs.open(CHEMIN_JOURNAL, "a")
-      if f then f.writeLine(ligne) f.close() end
-    end)
+  if versDisque then
+    journal.enAttente[#journal.enAttente + 1] = ligne
+    journal.attenteDepuis = journal.attenteDepuis or os.clock()
+    -- Une erreur part sur disque tout de suite : c'est precisement ce qu'on
+    -- vient chercher dans un journal apres un plantage.
+    if rang >= NIVEAUX.ERREUR or #journal.enAttente >= journal.lotMax then
+      journal.vider()
+    end
   end
 end
 
@@ -318,6 +393,8 @@ local DEFAUTS = {
   validiteStation          = 15,
   toleranceFusion          = 8,
   protocoleRadar           = "frenchnet_radar",
+  protocoleAnnonce         = "frenchnet_annonce",
+  annonceSecondes          = 30,
   protocoleLanceur         = "frenchnet_lanceur",
   terrainResolution        = 16,
   terrainRayonRecherche    = 3,
@@ -386,6 +463,9 @@ local DEFAUTS = {
   journalFichier           = true,
   journalTailleMax         = 131072,
   journalNiveauEcran       = "INFO",
+  journalNiveauFichier     = "INFO",
+  journalLot               = 24,
+  journalAgeMax            = 5,
   battementSecondes        = 60,
   erreursAvantReinit       = 5,
   redemarrageDelaiMin      = 3,
@@ -1968,6 +2048,7 @@ local function boucleRadar()
       end
     end
     proteger(ETAPES.EVALUATION_KILL, evaluerEngagements, maintenant)
+    journal.viderSiVieux(maintenant)
     dormir(cfg.intervalleBalayage or 1)
   end
 end
@@ -2069,6 +2150,26 @@ local function boucleReseau()
   end
 end
 
+--[[
+  ANNONCE DU POSTE.
+  Sans elle, chaque station et chaque balise DIFFUSE ses trames a la cantonade,
+  ce qui reveille tous les ordinateurs du serveur plusieurs fois par seconde,
+  qu'ils soient concernes ou non. Le poste s'annonce donc periodiquement ; les
+  stations retiennent son numero et lui parlent ensuite directement.
+
+  Une annonce toutes les trente secondes est negligeable ; ce qu'elle
+  economise ne l'est pas.
+]]
+local function boucleAnnonce()
+  while not etat.arret do
+    proteger(ETAPES.ANNONCE, rednet.broadcast, {
+      protocole = "FRENCHNET_COMMAND_ICI", version = PROTOCOLE_VERSION,
+      identifiant = cfg.identifiant,
+    }, cfg.protocoleAnnonce)
+    dormir(cfg.annonceSecondes or 30)
+  end
+end
+
 local function boucleBattement()
   while not etat.arret do
     dormir(cfg.battementSecondes or 60)
@@ -2100,6 +2201,7 @@ local function boucleBattement()
     -- Le modele de terrain n'est ecrit que s'il a change depuis la derniere
     -- sauvegarde : inutile de reecrire un fichier identique toutes les minutes.
     if etat.terrainSale then proteger(ETAPES.ENREGISTREMENT_TERRAIN, enregistrerTerrain) end
+    journal.vider()
 
     if etat.nombreStations > 0 and etat.stationsActives == 0 then
       alerterControleur("reseau radar entierement muet",
@@ -2158,6 +2260,9 @@ local function demarrer()
 
   journal.seuilEcran   = NIVEAUX[cfg.journalNiveauEcran] or 1
   journal.tailleMax    = cfg.journalTailleMax or (128 * 1024)
+  journal.seuilFichier = NIVEAUX[cfg.journalNiveauFichier] or NIVEAUX.INFO
+  journal.lotMax       = cfg.journalLot or 24
+  journal.ageMax       = cfg.journalAgeMax or 5
   journal.fichierActif = cfg.journalFichier ~= false
   if journal.fichierActif then
     info(ETAPES.INIT_JOURNAL, "journal fichier actif : " .. CHEMIN_JOURNAL)
@@ -2192,6 +2297,11 @@ local function demarrer()
   info(ETAPES.DEMARRAGE, string.format(
     "en attente du reseau : stations radar sur '%s', balises de lanceur sur '%s'",
     cfg.protocoleRadar, cfg.protocoleLanceur))
+  info(ETAPES.ANNONCE, string.format(
+    "ce poste est l'ordinateur %d. Il s'annonce toutes les %ds sur '%s' : les stations " ..
+    "et les balises lui parleront directement au lieu de diffuser a tout le serveur. " ..
+    "Vous pouvez aussi figer ce numero dans leur champ idCommand.",
+    os.getComputerID(), cfg.annonceSecondes or 30, cfg.protocoleAnnonce))
   return true
 end
 
@@ -2207,7 +2317,7 @@ local function executer()
     if ok and type(module) == "table" then interface = module end
   end
 
-  local boucles = { boucleRadar, boucleReseau, boucleBattement, boucleTerminate }
+  local boucles = { boucleRadar, boucleReseau, boucleAnnonce, boucleBattement, boucleTerminate }
 
   if interface then
     journal.ecranSilencieux = true -- l'interface prend la main sur l'affichage
@@ -2255,12 +2365,14 @@ while true do
 
   if etat.arret then
     info(ETAPES.ARRET, "arret propre du poste de commandement")
+    journal.vider()
     return
   end
 
   if not ok then
     critique(ETAPES.BOUCLE_PRINCIPALE, string.format(
       "le poste s'est interrompu : %s", tostring(err)))
+    journal.vider()
   else
     avert(ETAPES.BOUCLE_PRINCIPALE, "la boucle principale s'est terminee sans erreur, relance")
   end

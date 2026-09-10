@@ -43,12 +43,45 @@ return {
   -- la fenetre de crash de 3 s du poste central.
   intervalleBalayage = 1,
 
+  --[[
+    CADENCE ADAPTATIVE - le reglage anti-saccade le plus efficace.
+
+    Les methodes du radar s'executent sur le THREAD PRINCIPAL du serveur :
+    c'est, de loin, ce que cette station coute le plus cher au monde qui
+    l'heberge. Les appeler chaque seconde alors que rien ne vole depuis dix
+    minutes est du gaspillage pur.
+
+    Passe 'reposApres' secondes sans le moindre contact, la cadence se detend a
+    'intervalleRepos'. Elle revient a pleine vitesse des le premier echo.
+
+    LE PRIX A PAYER : sur un ciel jusque-la desert, un intrus peut mettre
+    jusqu'a 'intervalleRepos' de plus a etre vu. Reglez en connaissance de
+    cause. intervalleRepos = false supprime la detente et garde la pleine
+    cadence en permanence.
+  ]]
+  intervalleRepos = 3,
+  reposApres      = 10,
+
+  -- Un ciel vide n'a pas besoin d'etre annonce chaque seconde. Tant qu'il n'y
+  -- a rien et qu'il n'y avait rien, la station n'emet que toutes les N
+  -- secondes - assez souvent pour que le poste ne la declare pas muette
+  -- (validiteStation, 15 s par defaut), assez rarement pour ne reveiller
+  -- personne pour rien. Tout changement part immediatement.
+  rafraichissementVide = 5,
+
   -- Protocole rednet vers le poste de commandement. Doit etre IDENTIQUE sur
   -- toutes les stations et sur le poste.
   protocoleRadar = "frenchnet_radar",
 
-  -- Identifiant de l'ordinateur du poste de commandement. nil = diffusion.
-  -- Renseigner rend l'envoi cible et allege le reseau.
+  -- Protocole sur lequel le poste s'annonce. La station retient son numero et
+  -- lui parle ensuite DIRECTEMENT au lieu de diffuser a tout le serveur - une
+  -- diffusion reveille chaque ordinateur du monde, concerne ou non.
+  protocoleAnnonce = "frenchnet_annonce",
+
+  -- Identifiant de l'ordinateur du poste de commandement.
+  -- nil = decouverte automatique par l'annonce ci-dessus, avec repli en
+  -- diffusion generale tant que le poste ne s'est pas manifeste.
+  -- Le renseigner supprime meme ce repli.
   idCommand = nil,
 
   ---------------------------------------------------------------- JOURNAL -----

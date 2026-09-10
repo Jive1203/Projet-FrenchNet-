@@ -214,6 +214,19 @@ Les valeurs changées sont enregistrées dans `etat.dat` et **priment sur `confi
 
 **`Ctrl+T` ne stoppe plus le poste** : il demande le mot de passe console. Sortir de l'interface donne accès à un shell, donc à tous les fichiers du poste. Chaque tentative est journalisée, trois échecs lèvent une alerte. Mot de passe oublié → maintenez `Ctrl+T` **pendant le démarrage**, avant que le programme n'installe son gestionnaire.
 
+### Charge serveur
+
+Quatre mesures visent les vraies causes de saccade CC:Tweaked, pas le temps CPU Lua :
+
+| Cause | Mesure | Effet mesuré |
+|---|---|---|
+| Appels radar sur le **thread principal du serveur** | cadence adaptative quand le ciel est vide | ÷ 3 |
+| Chaque `broadcast` **réveille tous les ordinateurs** | le poste s'annonce, les stations lui parlent en direct | 0 réveil inutile |
+| Chaque changement de moniteur = **paquet à tous les joueurs à portée** | seules les lignes modifiées sont réécrites | 50 écritures au lieu de ~3 000 sur 40 s |
+| Chaque ligne de journal = **une ouverture de fichier** | écriture par lots | 38 lignes en 5 ouvertures |
+
+> ⚠ La cadence adaptative se paie : sur un ciel jusque-là désert, un intrus peut mettre jusqu'à 3 s de plus à être vu. `intervalleRepos = false` la supprime.
+
 ### Terrain
 
 Le système **apprend** le relief au lieu de le calculer : reconstituer la génération de Minecraft depuis la seed est hors de portée d'un ordinateur CC: Tweaked, et ignorerait de toute façon tout ce que les joueurs ont construit. Chaque station radar, chaque lanceur et chaque joueur qui marche est une sonde d'altitude. Le modèle survit aux redémarrages et devient plus fin avec le temps.
@@ -231,7 +244,7 @@ Sinon, réémission d'un ordre de tir, **3 tentatives maximum** avant alerte d'u
 
 ```
 lua5.4 tests/test_command.lua           -- 246 vérifications : doctrine, terrain, carte, IFF
-lua5.4 tests/test_command_runtime.lua   -- 121 vérifications : la chaîne complète, réseau simulé
+lua5.4 tests/test_command_runtime.lua   -- 128 vérifications : la chaîne complète, réseau simulé
 lua5.4 tests/bench.lua                  -- banc de mesure des chemins chauds
 ```
 

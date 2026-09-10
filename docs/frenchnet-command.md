@@ -782,7 +782,7 @@ l'interface. La liste complète est en tête de `command/command.lua`, table
 
 ```
 lua5.4 tests/test_command.lua          # 229 vérifications — doctrine, terrain, carte, IFF
-lua5.4 tests/test_command_runtime.lua  # 121 vérifications — la chaîne complète
+lua5.4 tests/test_command_runtime.lua  # 128 vérifications — la chaîne complète
 ```
 
 **`test_command.lua` — le noyau de décision**, sans Minecraft : les 24 cases de
@@ -1019,6 +1019,56 @@ le modèle de terrain, insoupçonné, était le pire de tous).
    être jetées. Elles ne le sont plus que sur demande explicite. Les tampons
    d'affichage sont de même conservés entre deux images au lieu d'être
    réalloués.
+
+### Réduire le lag du serveur, pas seulement le temps Lua
+
+Les gains ci-dessus concernent le **temps CPU dans Lua**. Ce n'est pas ce qui
+fait ramer un serveur Minecraft. Les vraies causes sont ailleurs, et quatre
+mesures les visent directement.
+
+| Cause de lag | Mesure | Effet mesuré |
+|---|---|---|
+| Appels radar sur le **thread principal du serveur** | cadence adaptative | ÷ 3 sur ciel désert |
+| Chaque `broadcast` **réveille tous les ordinateurs** | annonce + envoi ciblé | 0 réveil inutile |
+| Chaque changement de moniteur = **paquet à tous les joueurs à portée** | rendu différentiel | 50 écritures au lieu de ~3 000 sur 40 s |
+| Chaque ligne de journal = **une ouverture de fichier** | écriture groupée | 38 lignes en 5 ouvertures |
+
+**1. Cadence radar adaptative.** Les méthodes du radar s'exécutent sur le thread
+principal du serveur — c'est de loin ce qu'une station coûte le plus cher au
+monde qui l'héberge. Passé `reposApres` secondes sans le moindre contact, la
+cadence passe de 1 s à `intervalleRepos` (3 s). Elle revient à pleine vitesse au
+premier écho.
+
+> **Le prix à payer, dit franchement** : sur un ciel jusque-là désert, un intrus
+> peut mettre jusqu'à 3 s de plus à être vu. `intervalleRepos = false` supprime
+> la détente si votre théâtre ne le tolère pas.
+
+**2. Fin des diffusions générales.** Un `rednet.broadcast` réveille **tous** les
+ordinateurs du serveur, concernés ou non. Quatre stations à 1 Hz, c'est quatre
+réveils par seconde sur chaque machine du monde. Le poste s'annonce donc toutes
+les 30 s sur `frenchnet_annonce` ; stations et balises retiennent son numéro et
+lui parlent **directement**. Le numéro du poste est journalisé au démarrage pour
+qui préfère le figer dans `idCommand`.
+
+**3. Trames inutiles supprimées.** Une station au-dessus d'un ciel vide n'émet
+plus qu'une trame toutes les 5 s au lieu d'une par seconde — assez pour ne pas
+être déclarée muette, assez peu pour ne réveiller personne. Une balise de
+lanceur n'émet plus que sur **changement de stock**, avec un rappel toutes les
+20 s. Tout changement part immédiatement.
+
+**4. Rendu différentiel du moniteur.** Un moniteur Minecraft n'est pas un
+écran : chaque modification est un paquet envoyé à tous les joueurs à portée.
+Redessiner 36 lignes chaque seconde, c'est inonder le voisinage en permanence,
+y compris quand rien ne bouge — le cas le plus fréquent. Chaque ligne est donc
+comparée à ce qui est déjà affiché, et seules celles qui ont changé sont
+réécrites. Les bandeaux de titre et d'état suivent la même règle.
+
+**5. Journal à écriture groupée.** Les lignes sont accumulées et écrites par
+lots. Deux garde-fous : une ligne `ERREUR` ou `CRITIQUE` part immédiatement —
+c'est justement ce qu'on cherche après un incident — et rien n'attend plus de
+`journalAgeMax` (5 s), ce qui borne la perte en cas de coupure brutale. Un
+niveau `journalNiveauFichier` distinct permet de ne pas écrire le `DEBUG` du
+tout ; une ligne qui n'intéresse aucune sortie n'est même pas construite.
 
 ### Ce qui n'a pas été touché, et pourquoi
 
