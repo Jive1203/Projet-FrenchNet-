@@ -1,6 +1,15 @@
--- Mini-emulateur CraftOS pour tester balise.lua hors du jeu.
--- Fournit : fs, term, colors, peripheral, rednet, gps, parallel, sleep,
--- os.pullEvent/startTimer/clock/day/time/epoch, textutils, shell.
+-- Mini-emulateur CraftOS pour tester balise.lua et ads.lua hors du jeu.
+-- Fournit : fs, term, colors, peripheral, redstone, rednet, gps, parallel,
+-- sleep, os.pullEvent/queueEvent/startTimer/clock/day/time/epoch, textutils,
+-- shell.
+--
+-- Peripheriques simules, tous optionnels :
+--   options.radar   = fonction(horloge) -> liste de contacts bruts
+--                     (simule Create Radars ; methode 'getEntities' par defaut)
+--   options.pilote  = true ou table d'etat initial { cap =, altitude =, gaz = }
+--                     (simule l'interface de pilotage Create Aeronautics)
+-- Sans ces options, l'emulateur se comporte exactement comme avant : un seul
+-- modem Ender sur la face 'back'.
 
 local M = {}
 
@@ -142,15 +151,120 @@ function M.creer(options)
     end,
   }
 
-  local peripheralMock = {
-    getNames = function() return etat.modemPresent and { "back" } or {} end,
-    getType = function(n) return (etat.modemPresent and n == "back") and "modem" or nil end,
-    isPresent = function(n) return etat.modemPresent and n == "back" end,
-    wrap = function(n) return (etat.modemPresent and n == "back") and modem or nil end,
-    hasType = function(n, t)
+  -- Registre des peripheriques annexes (radar, pilote, largueurs...).
+  -- Le modem reste traite a part : sa presence est pilotee par etat.modemPresent,
+  -- que les tests de la balise manipulent en cours de route.
+  etat.peripheriques = {}
+
+  local function ajouterPeripherique(nom, typePeriph, objet)
+    etat.peripheriques[nom] = { type = typePeriph, objet = objet }
+    return objet
+  end
+  M.ajouterPeripherique = ajouterPeripherique
+
+  ------------------------------------------------------- radar (Create Radars)
+  if options.radar then
+    local methode = options.radarMethode or "getEntities"
+    local radar = {}
+    radar[methode] = function()
+      etat.scansRadar = (etat.scansRadar or 0) + 1
+      if etat.radarEnPanne then error("radar hors service", 0) end
+      local contacts = options.radar(etat.horloge)
+      return contacts or {}
+    end
+    radar.getRange = function() return options.radarPortee or 256 end
+    ajouterPeripherique(options.radarNom or "create_radars:radar_0",
+      options.radarType or "radar", radar)
+  end
+
+  --------------------------------------------- pilote (Create Aeronautics-like)
+  if options.pilote then
+    local depart = (type(options.pilote) == "table") and options.pilote or {}
+    etat.navire = {
+      cap = depart.cap or 0, altitude = depart.altitude or 150,
+      gaz = depart.gaz or 0.5,
+      x = depart.x or 0, y = depart.altitude or 150, z = depart.z or 0,
+    }
+    etat.consignes = {}
+    local function noter(nom, valeur)
+      etat.consignes[#etat.consignes + 1] = { commande = nom, valeur = valeur, t = etat.horloge }
+    end
+    local pilote = {
+      setYaw = function(v) etat.navire.cap = v noter("cap", v) return true end,
+      setTargetAltitude = function(v)
+        etat.navire.altitude = v etat.navire.y = v noter("altitude", v) return true
+      end,
+      setThrottle = function(v) etat.navire.gaz = v noter("gaz", v) return true end,
+      getYaw = function() return etat.navire.cap end,
+      getAltitude = function() return etat.navire.altitude end,
+      getThrottle = function() return etat.navire.gaz end,
+      getPosition = function()
+        return { x = etat.navire.x, y = etat.navire.y, z = etat.navire.z }
+      end,
+    }
+    ajouterPeripherique(options.piloteNom or "aeronautics:helm_0",
+      options.piloteType or "aircraft_controller", pilote)
+  end
+
+  local function entree(nom)
+    if nom == "back" then
       if not etat.modemPresent then return nil end
-      return t == "modem" or t == "ender_modem"
+      return { type = "modem", objet = modem }
+    end
+    return etat.peripheriques[nom]
+  end
+
+  local peripheralMock = {
+    getNames = function()
+      local noms = {}
+      if etat.modemPresent then noms[#noms + 1] = "back" end
+      local autres = {}
+      for nom in pairs(etat.peripheriques) do autres[#autres + 1] = nom end
+      table.sort(autres)
+      for _, nom in ipairs(autres) do noms[#noms + 1] = nom end
+      return noms
     end,
+    getType = function(n)
+      local e = entree(n)
+      return e and e.type or nil
+    end,
+    isPresent = function(n) return entree(n) ~= nil end,
+    wrap = function(n)
+      local e = entree(n)
+      return e and e.objet or nil
+    end,
+    hasType = function(n, t)
+      local e = entree(n)
+      if not e then return nil end
+      if e.type == "modem" then return t == "modem" or t == "ender_modem" end
+      return e.type == t
+    end,
+    getMethods = function(n)
+      local e = entree(n)
+      if not e or type(e.objet) ~= "table" then return {} end
+      local noms = {}
+      for cle, valeur in pairs(e.objet) do
+        if type(valeur) == "function" then noms[#noms + 1] = cle end
+      end
+      table.sort(noms)
+      return noms
+    end,
+  }
+
+  ------------------------------------------------------------------- redstone
+  -- Les sorties sont historisees : c'est ainsi que les tests verifient qu'un
+  -- leurre a bien ete largue et qu'une impulsion a bien ete refermee.
+  etat.redstone = {}
+  etat.impulsionsRedstone = {}
+  local redstoneMock = {
+    setOutput = function(cote, valeur)
+      etat.redstone[cote] = valeur and true or false
+      etat.impulsionsRedstone[#etat.impulsionsRedstone + 1] =
+        { cote = cote, valeur = valeur and true or false, t = etat.horloge }
+    end,
+    getOutput = function(cote) return etat.redstone[cote] == true end,
+    getInput = function() return false end,
+    getSides = function() return { "top", "bottom", "left", "right", "front", "back" } end,
   }
 
   ----------------------------------------------------------------------- rednet
@@ -169,6 +283,9 @@ function M.creer(options)
     if not etat.rednetOuvert then error("No open side", 0) end
     etat.envois[#etat.envois + 1] =
       { destinataire = destinataire, message = msg, protocole = proto, t = etat.horloge }
+    -- rednet.send renvoie true en cas de succes sous CC: Tweaked : un appelant
+    -- qui teste ce retour doit voir la meme chose sur le banc qu'en jeu.
+    return true
   end
   rednet.receive = function(proto, timeout)
     local minuteur = timeout and osMock.startTimer(timeout) or nil
@@ -234,6 +351,8 @@ function M.creer(options)
   env.fs = fs
   env.os = osMock
   env.peripheral = peripheralMock
+  env.redstone = redstoneMock
+  env.rs = redstoneMock
   env.rednet = rednet
   env.gps = gps
   env.parallel = parallel
@@ -245,7 +364,9 @@ function M.creer(options)
     formatTime = function() return "06:00" end,
     serialise = function(t) return tostring(t) end,
   }
-  env.shell = { getRunningProgram = function() return "balise/balise.lua" end }
+  env.shell = { getRunningProgram = function()
+    return options.programme or "balise/balise.lua"
+  end }
   env.write = function(s) io.write(tostring(s)) end
   env.printError = function(s) print("ERR " .. tostring(s)) end
   env.print = function(...)
