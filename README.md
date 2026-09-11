@@ -4,7 +4,16 @@
 |---|---|---|
 | **Balises GPS** | Constellation GPS fixe pour tout le serveur | [docs/guide-complet.md](docs/guide-complet.md) |
 | **FrenchNet Command** | Défense aérienne autonome, identification ami-ennemi | [docs/frenchnet-command.md](docs/frenchnet-command.md) |
-| **Doomsday Ship** | Système embarqué du ballon (phase 1) | [docs/doomsday-ship.md](docs/doomsday-ship.md) |
+| **Doomsday Ship** | Système embarqué du ballon (phases 1 à 4) | [docs/doomsday-ship.md](docs/doomsday-ship.md) |
+| **Mise à jour** | Tenir tous les postes à jour sans aller les chercher | [docs/mise-a-jour.md](docs/mise-a-jour.md) |
+
+> ⚙️ **Mise à jour automatique.** Après la première installation, chaque poste
+> se tient à jour seul : `startup.lua` lance `update` avant le programme, au
+> seul moment où rien n'est engagé. `update restaurer` ramène la version
+> précédente. **Lisez [docs/mise-a-jour.md](docs/mise-a-jour.md) avant de
+> l'activer** : c'est un canal d'exécution de code à distance vers chaque
+> ordinateur du serveur, et les configurations locales ne sont jamais écrasées
+> précisément parce qu'elles contiennent vos codes et votre mot de passe.
 
 > 📋 **[docs/api_notes.md](docs/api_notes.md)** — audit des API réellement présentes dans ce dépôt. À lire avant toute intégration : quatre des modules souvent supposés existants (autopilote, Fire Control, ADS, solveur balistique) **n'y sont pas**.
 

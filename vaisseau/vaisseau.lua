@@ -499,6 +499,35 @@ local function mesuresCourantes()
 end
 
 --[[
+  VERROU D'OCCUPATION, pour la mise a jour automatique.
+  A bord, « occupe » veut dire : une menace est classee, ou une alarme est
+  active. Basculer une version a ce moment-la eteindrait l'ecran et la sirene
+  au seul instant ou l'equipage s'en sert.
+  Ecrit sur changement, ou toutes les 10 secondes : chaque ecriture est une
+  ouverture de fichier.
+]]
+local CHEMIN_OCCUPATION = "/.maj/occupation.dat"
+local occupationPrecedente, occupationEcriteA = nil, -1e9
+
+local function declarerOccupation(maintenant)
+  local occupe = (etat.menace or 0) >= 2 or next(etat.alarmesActives) ~= nil
+  if occupe == occupationPrecedente and (maintenant - occupationEcriteA) < 10 then return end
+  occupationPrecedente, occupationEcriteA = occupe, maintenant
+
+  pcall(function()
+    if not fs.exists("/.maj") then fs.makeDir("/.maj") end
+    local f = fs.open(CHEMIN_OCCUPATION, "w")
+    if not f then return end
+    local motif = occupe
+      and (((etat.menace or 0) >= 2) and "menace classee" or "alarme active")
+      or "veille"
+    f.write(("{ instant = %d, occupe = %s, motif = %q }"):format(
+      math.floor((os.epoch("utc") or 0) / 1000), occupe and "true" or "false", motif))
+    f.close()
+  end)
+end
+
+--[[
   Pose et levee d'alarme, en un seul endroit.
   Trois destinataires, parce qu'ils n'atteignent pas les memes gens : l'ecran
   (celui qui regarde), le son (celui qui ne regarde pas) et le journal (celui
@@ -548,6 +577,7 @@ local function boucleMesures()
     -- que si sa.lua est a bord, et la page alertes doit rester juste sans lui.
     etat.contexte.alarmesActives = alarmesEnCours()
     etat.contexte.maintenant = maintenant
+    declarerOccupation(maintenant)
 
     -- Vidange a l'age : sans elle, un poste calme garderait ses dernieres
     -- lignes en memoire jusqu'au lot suivant, et les perdrait a la panne.

@@ -31,7 +31,9 @@ local function makeFs(racine)
   function fs.exists(p)
     local f = io.open(reel(p), "r")
     if f then f:close() return true end
-    return false
+    -- Un dossier n'est pas toujours ouvrable en lecture : on le teste a part,
+    -- sinon 'exists' ment sur tout dossier et makeDir n'est jamais appele.
+    return fs.isDir(p)
   end
   function fs.getSize(p)
     local f = io.open(reel(p), "r")
@@ -40,8 +42,39 @@ local function makeFs(racine)
     f:close()
     return n
   end
-  function fs.delete(p) os.remove(reel(p)) end
-  function fs.move(a, b) os.rename(reel(a), reel(b)) end
+  --[[
+    makeDir / isDir / list / delete recursif : presents dans CC, absents ici
+    jusqu'a present. Leur absence faisait echouer toute ecriture dans un
+    sous-dossier neuf - et la mise a jour ne fait que cela, puisqu'elle
+    prepare les fichiers a cote avant de les basculer.
+    Le banc tourne sur des chemins de /tmp : passer par le shell est sans
+    risque ici, et evite une dependance a lfs.
+  ]]
+  local function echapper(c) return "'" .. tostring(c):gsub("'", "'\\''") .. "'" end
+
+  function fs.isDir(p)
+    return os.execute("test -d " .. echapper(reel(p))) == true
+  end
+  function fs.makeDir(p)
+    os.execute("mkdir -p " .. echapper(reel(p)))
+  end
+  function fs.list(p)
+    local liste = {}
+    local tuyau = io.popen("ls -1 " .. echapper(reel(p)) .. " 2>/dev/null")
+    if not tuyau then return liste end
+    for ligne in tuyau:lines() do liste[#liste + 1] = ligne end
+    tuyau:close()
+    table.sort(liste)
+    return liste
+  end
+  function fs.delete(p)
+    -- CC efface un dossier et son contenu ; os.remove seul ne le peut pas.
+    os.execute("rm -rf " .. echapper(reel(p)))
+  end
+  function fs.move(a, b)
+    fs.makeDir(fs.getDir(b))
+    os.rename(reel(a), reel(b))
+  end
   function fs.open(p, mode)
     -- Compteur d'ouvertures de fichier : ouvrir et fermer un fichier a chaque
     -- ligne de journal est une operation disque a chaque fois, et l'une des
@@ -51,6 +84,10 @@ local function makeFs(racine)
       etat.ouverturesFichier = (etat.ouverturesFichier or 0) + 1
       etat.ouverturesPar = etat.ouverturesPar or {}
       etat.ouverturesPar[p] = (etat.ouverturesPar[p] or 0) + 1
+    end
+    if mode and mode:find("w") or (mode and mode:find("a")) then
+      local dossier = fs.getDir(p)
+      if dossier ~= "" then fs.makeDir(dossier) end
     end
     local f = io.open(reel(p), mode)
     if not f then return nil end
@@ -121,6 +158,7 @@ function M.creer(options)
     sorties = {},
     diffusions = {},
     envois = {},
+    requetes = {},
     transmissions = {},
     modemPresent = true,
     rednetOuvert = false,
@@ -527,6 +565,32 @@ function M.creer(options)
     end,
   }
 
+  --[[
+    http, seulement si le banc en fournit un. Laisser 'http' a nil est le cas
+    par defaut, et c'est fidele : beaucoup de serveurs le desactivent, et tout
+    ce depot doit fonctionner sans.
+      options.http = { ["chemin/fichier.lua"] = "contenu", ... }
+    Les requetes sont enregistrees dans etat.requetes, ce qui permet de
+    verifier qu'un poste ne martele pas le depot.
+  ]]
+  if options.http then
+    local base = options.urlBase or "http://depot"
+    env.http = {
+      get = function(url)
+        etat.requetes[#etat.requetes + 1] = { url = url, t = etat.horloge }
+        if options.httpPanne then return nil, options.httpPanne end
+        local chemin = tostring(url):sub(#base + 2)
+        local contenu = options.http[chemin]
+        if not contenu then return nil, "404" end
+        return { readAll = function() return contenu end,
+                 getResponseCode = function() return 200 end,
+                 close = function() end }
+      end,
+      post = function() return nil, "non simule" end,
+      checkURL = function() return true end,
+    }
+  end
+
   -- dofile : les pages du systeme embarque chargent leurs widgets avec, et
   -- sans lui elles echouaient toutes en silence dans l'emulateur.
   env.dofile = function(chemin)
@@ -573,12 +637,18 @@ end
 
 --------------------------------------------------------------------- execution
 -- Execute le programme jusqu'a epuisement du temps virtuel alloue.
-function M.executer(chemin, secondes)
+--[[
+  'args' : les arguments de ligne de commande du programme, ceux que CC livre
+  dans '...'. Sans eux, impossible d'eprouver 'update restaurer' ou
+  'diagnostic sauver' - c'est-a-dire precisement les commandes qu'on tape le
+  jour ou quelque chose va mal.
+]]
+function M.executer(chemin, secondes, args)
   local source = io.open(chemin, "r"):read("a")
   local morceau = assert(load(source, "@" .. chemin, "t", env))
   local principal = coroutine.create(morceau)
 
-  local ev = { n = 0 }
+  local ev = args and table.pack(table.unpack(args)) or { n = 0 }
   local motif
   while coroutine.status(principal) ~= "dead" do
     local ok, err = coroutine.resume(principal, table.unpack(ev, 1, ev.n))

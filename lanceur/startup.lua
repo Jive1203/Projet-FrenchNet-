@@ -34,6 +34,33 @@ if fs.exists(MARQUEUR_ARRET) then
   pcall(fs.delete, MARQUEUR_ARRET)
 end
 
+
+--------------------------------------------------------------------------------
+-- MISE A JOUR, AVANT LE LANCEMENT
+--   C'est le seul moment ou une bascule ne peut pas interrompre un engagement :
+--   au demarrage, rien n'est engage, par construction. 'update' redemarre
+--   l'ordinateur s'il a installe quelque chose, et ce lanceur repasse alors ici
+--   sans rien trouver a faire.
+--   Une mise a jour qui echoue ne doit JAMAIS empecher le poste de demarrer :
+--   un poste a jour qui ne defend rien est moins utile qu'un poste en retard
+--   qui defend.
+--------------------------------------------------------------------------------
+
+local CHEMIN_MAJ = "/maj/update.lua"
+if fs.exists(CHEMIN_MAJ) then
+  local okCfg, cfgMaj = pcall(function()
+    local f = loadfile("/maj/config_maj.lua")
+    return f and f() or {}
+  end)
+  if okCfg and type(cfgMaj) == "table" and cfgMaj.auDemarrage ~= false then
+    print("[LANCEUR] Verification des mises a jour...")
+    local okMaj, errMaj = pcall(shell.run, CHEMIN_MAJ)
+    if not okMaj then
+      print("[LANCEUR] Mise a jour ignoree : " .. tostring(errMaj))
+    end
+  end
+end
+
 print("[LANCEUR] Demarrage de la balise de lanceur...")
 shell.run(CHEMIN_COMMAND)
 

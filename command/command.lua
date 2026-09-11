@@ -2038,6 +2038,44 @@ actions.ETAPES = ETAPES
 -- 17. BOUCLES
 --------------------------------------------------------------------------------
 
+--[[
+  VERROU D'OCCUPATION, pour la mise a jour automatique.
+  Le poste declare « je conduis un engagement ». maj/update.lua le lit avant de
+  basculer une nouvelle version : redemarrer un poste de defense au moment ou
+  il conduit un tir est la seule facon de transformer une mise a jour en perte
+  de materiel.
+
+  L'horodatage est indispensable : sans lui, un poste qui plante laisserait un
+  verrou eternel et bloquerait justement la mise a jour qui repare.
+
+  Ecrit seulement quand l'etat CHANGE, ou toutes les 10 secondes. Chaque
+  ecriture est une ouverture de fichier, et cette boucle tourne chaque seconde.
+]]
+local CHEMIN_OCCUPATION = "/.maj/occupation.dat"
+local occupationPrecedente, occupationEcriteA = nil, -1e9
+
+local function declarerOccupation(maintenant)
+  local engagees = 0
+  for _, p in pairs(etat.pistes) do
+    if p.engagement and p.engagement.actif then engagees = engagees + 1 end
+  end
+  local occupe = engagees > 0 or etat.alerteMax == true
+  if occupe == occupationPrecedente and (maintenant - occupationEcriteA) < 10 then return end
+  occupationPrecedente, occupationEcriteA = occupe, maintenant
+
+  pcall(function()
+    if not fs.exists("/.maj") then fs.makeDir("/.maj") end
+    local f = fs.open(CHEMIN_OCCUPATION, "w")
+    if not f then return end
+    local motif = occupe
+      and ((engagees > 0) and (engagees .. " engagement(s) en cours") or "alerte maximale")
+      or "aucun engagement"
+    f.write(("{ instant = %d, occupe = %s, motif = %q }"):format(
+      math.floor((os.epoch("utc") or 0) / 1000), occupe and "true" or "false", motif))
+    f.close()
+  end)
+end
+
 local function boucleRadar()
   while not etat.arret do
     local maintenant = os.clock()
@@ -2048,6 +2086,7 @@ local function boucleRadar()
       end
     end
     proteger(ETAPES.EVALUATION_KILL, evaluerEngagements, maintenant)
+    declarerOccupation(maintenant)
     journal.viderSiVieux(maintenant)
     dormir(cfg.intervalleBalayage or 1)
   end
