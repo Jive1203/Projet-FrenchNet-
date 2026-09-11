@@ -120,6 +120,7 @@ function M.creer(options)
     horloge = 0,
     sorties = {},
     diffusions = {},
+    envois = {},
     transmissions = {},
     modemPresent = true,
     rednetOuvert = false,
@@ -233,39 +234,68 @@ function M.creer(options)
     etat.moniteur = moniteur
   end
 
+  --[[
+    Peripheriques libres, en plus des trois cables en dur ci-dessus.
+      options.peripheriques = { ["speaker_0"] = { type = "speaker",
+                                                  methodes = { playNote = fn } } }
+    Sans cela, impossible d'eprouver hors du jeu un systeme qui lit des coffres
+    ou fait sonner un haut-parleur : ce sont justement les parties dont on veut
+    savoir si elles sont branchees.
+  ]]
+  local extras = options.peripheriques or {}
+  local nomsExtras = {}
+  for nom in pairs(extras) do nomsExtras[#nomsExtras + 1] = nom end
+  table.sort(nomsExtras)
+
   local function presents()
     local noms = {}
     if etat.modemPresent then noms[#noms + 1] = "back" end
     if radar then noms[#noms + 1] = "top" end
     if moniteur then noms[#noms + 1] = "right" end
+    for _, nom in ipairs(nomsExtras) do noms[#noms + 1] = nom end
     return noms
   end
 
   local peripheralMock = {
     getNames = presents,
     getType = function(n)
+      if extras[n] then return extras[n].type or "peripheral" end
       if n == "back" then return etat.modemPresent and "modem" or nil end
       if n == "top" and radar then return "createradars:radar" end
       if n == "right" and moniteur then return "monitor" end
       return nil
     end,
     isPresent = function(n)
+      if extras[n] then return true end
       if n == "back" then return etat.modemPresent end
       if n == "right" then return moniteur ~= nil end
       return n == "top" and radar ~= nil
     end,
     wrap = function(n)
+      if extras[n] then return extras[n].methodes end
       if n == "back" then return etat.modemPresent and modem or nil end
       if n == "top" then return radar end
       if n == "right" then return moniteur end
       return nil
     end,
     hasType = function(n, t)
+      if extras[n] then return extras[n].type == t end
       if n == "top" and radar then return t == "peripheral" or t:find("radar", 1, true) ~= nil end
       if not etat.modemPresent then return nil end
       return t == "modem" or t == "ender_modem"
     end,
   }
+
+  -- peripheral.call, absent jusqu'ici : le HAL, les soutes et l'avertisseur
+  -- sonore passent tous par lui. Sans lui, toute mesure serait declaree
+  -- indisponible dans l'emulateur et le banc ne prouverait rien.
+  peripheralMock.call = function(n, methode, ...)
+    local enveloppe = peripheralMock.wrap(n)
+    if type(enveloppe) ~= "table" or type(enveloppe[methode]) ~= "function" then
+      error(("no such method %s on %s"):format(tostring(methode), tostring(n)), 0)
+    end
+    return enveloppe[methode](...)
+  end
 
   ----------------------------------------------------------------------- rednet
   local rednet = {}
@@ -278,6 +308,12 @@ function M.creer(options)
     if etat.echecBroadcast then error("Network is unreachable", 0) end
     if not etat.rednetOuvert then error("No open side", 0) end
     etat.diffusions[#etat.diffusions + 1] = { message = msg, protocole = proto, t = etat.horloge }
+  end
+  rednet.send = function(destinataire, msg, proto)
+    if not etat.rednetOuvert then error("No open side", 0) end
+    etat.envois[#etat.envois + 1] =
+      { destinataire = destinataire, message = msg, protocole = proto, t = etat.horloge }
+    return true
   end
   rednet.receive = function(proto, timeout)
     local minuteur = timeout and osMock.startTimer(timeout) or nil
@@ -430,6 +466,73 @@ function M.creer(options)
     local source = f:read("a")
     f:close()
     return load(source, "@" .. chemin, "t", env)
+  end
+
+  --[[
+    window.create, absent jusqu'ici. Tout le framework MFD repose dessus : sans
+    lui, l'affichage du systeme embarque n'avait jamais ete execute une seule
+    fois, et le banc ne prouvait rien de ce qui se dessine.
+
+    Fidele sur ce qui compte pour le code teste : getSize rend la taille de la
+    fenetre et non celle de l'ecran (une page qui lirait la taille de l'ecran
+    deborderait sur sa voisine), setVisible est compte (c'est le mecanisme
+    anti-lag : on accumule les ecritures et on ne pousse qu'une image), et les
+    ecritures sont enregistrees pour pouvoir etre comptees.
+  ]]
+  env.window = {
+    create = function(parent, x, y, larg, haut, visible)
+      local f = { x = x, y = y, larg = larg, haut = haut,
+                  visible = visible ~= false, ecritures = 0, bascules = 0 }
+      etat.fenetres = etat.fenetres or {}
+      etat.fenetres[#etat.fenetres + 1] = f
+      local function bornee(cx, cy) return cx >= 1 and cx <= larg and cy >= 1 and cy <= haut end
+      local cx, cy = 1, 1
+      return {
+        getSize = function() return larg, haut end,
+        getPosition = function() return f.x, f.y end,
+        setVisible = function(v) f.visible = v f.bascules = f.bascules + 1 end,
+        isVisible = function() return f.visible end,
+        redraw = function() end,
+        reposition = function(nx, ny, nl, nh)
+          f.x, f.y = nx, ny
+          if nl then larg, f.larg = nl, nl end
+          if nh then haut, f.haut = nh, nh end
+        end,
+        setCursorPos = function(a, b) cx, cy = a, b end,
+        getCursorPos = function() return cx, cy end,
+        setCursorBlink = function() end,
+        clear = function() f.efface = (f.efface or 0) + 1 end,
+        clearLine = function() end,
+        scroll = function() end,
+        setTextColour = function() end, setTextColor = function() end,
+        setBackgroundColour = function() end, setBackgroundColor = function() end,
+        getTextColour = function() return 1 end, getTextColor = function() return 1 end,
+        getBackgroundColour = function() return 32768 end,
+        getBackgroundColor = function() return 32768 end,
+        isColour = function() return true end, isColor = function() return true end,
+        write = function(texte)
+          f.ecritures = f.ecritures + 1
+          if bornee(cx, cy) then
+            etat.fenetreEcrit = etat.fenetreEcrit or {}
+            etat.fenetreEcrit[#etat.fenetreEcrit + 1] = tostring(texte)
+          end
+          cx = cx + #tostring(texte)
+        end,
+        blit = function(texte)
+          f.ecritures = f.ecritures + 1
+          etat.fenetreEcrit = etat.fenetreEcrit or {}
+          etat.fenetreEcrit[#etat.fenetreEcrit + 1] = tostring(texte)
+        end,
+      }
+    end,
+  }
+
+  -- dofile : les pages du systeme embarque chargent leurs widgets avec, et
+  -- sans lui elles echouaient toutes en silence dans l'emulateur.
+  env.dofile = function(chemin)
+    local f, err = env.loadfile(chemin)
+    if not f then error(err or ("cannot open " .. tostring(chemin)), 0) end
+    return f()
   end
 
   -- Table 'keys' minimale et saisie clavier simulee : l'interface de controle

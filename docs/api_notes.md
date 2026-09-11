@@ -218,6 +218,33 @@ sol avec ses propres contacts radar (section 6 du cahier des charges).
 **Le ballon doit émettre cette trame**, sans quoi le poste au sol le classera
 INCONNU — avec les conséquences prévues par la doctrine de zone.
 
+### 3.3 bis — `frenchnet_musique` (introduit par la phase 4)
+
+Protocole **nouveau**, défini par ce dépôt et par personne d'autre. Il n'existe
+que parce que `http` peut être coupé par l'administrateur du serveur : un
+ordinateur extérieur interroge alors le relais et pousse le titre au ballon.
+
+```lua
+{ protocole = "FRENCHNET_MUSIQUE", titre = , artiste = , album = ,
+  duree = , position = }
+```
+
+Aucun flux audio ne circule : un moniteur CC n'a pas de décodeur, et chaque
+caractère modifié est un paquet réseau. On affiche un titre, on ne joue pas un
+son.
+
+### 3.3 ter — ce qui N'EXISTE PAS : la diffusion des zones
+
+Il n'y a **aucun protocole** par lequel le poste au sol transmettrait ses zones
+— vérifié dans `command/command.lua`, qui ne les émet jamais. Le ballon les lit
+donc dans sa propre configuration (`zones` de `config_vaisseau.lua`), et
+l'annonce au démarrage quand elles manquent.
+
+C'est une duplication assumée, pas un oubli : inventer un protocole ici
+signifierait modifier le poste au sol, ce que cette phase ne fait pas. Le coût
+est réel — deux copies des zones peuvent diverger — et il est écrit dans la
+configuration du ballon pour que personne ne le découvre en vol.
+
 ### 3.4 Annonce du poste — `frenchnet_annonce`
 
 ```lua
@@ -277,8 +304,9 @@ n'est pas lisible depuis CC: Tweaked. À écrire côté serveur.
 | Liaison FrenchNet (position + contacts) | **Oui** — protocoles §3.1 et §3.3 documentés |
 | Sélection d'arme / tir | **Non** — Fire Control Embarqué absent |
 | Chaffs / flares | **Non** — ADS absent |
-| Inventaire armement | Structure oui, alimentation non (dépend du Fire Control Embarqué) |
-| Relais musique HTTP | **À vérifier sur le serveur** — voir §5 |
+| Inventaire armement | **Oui pour les soutes**, non pour les culasses. L'API d'inventaire de CC (`list`, `size`, `getItemDetail`) est documentée et stable : compter un coffre ne demande aucune supposition. Ce qui est **prêt au tir** dépend du Fire Control Embarqué, et reste `INDISPO`. Les deux comptes ne sont jamais confondus à l'écran. |
+| Avertisseur sonore | **Oui** — `speaker.playNote` est une API CC documentée, rien à deviner |
+| Relais musique HTTP | **À vérifier sur le serveur** — voir §5 ; repli rednet documenté en §3.3 bis |
 
 ### Le même piège que Create Radars, et il n'est pas théorique
 

@@ -11,7 +11,10 @@
   minuteur ne verifiera jamais le reacteur.
 --------------------------------------------------------------------------------]]
 
-local W = dofile("/vaisseau/widgets.lua")
+-- Le repertoire d'installation est pose par vaisseau.lua : un ballon installe
+-- ailleurs que dans /vaisseau chargeait jusqu'ici des pages sans widgets, donc
+-- aucune page du tout. Le repli garde le cas ou la page est ouverte seule.
+local W = dofile((_G.VAISSEAU_REPERTOIRE or "/vaisseau") .. "/widgets.lua")
 
 local page = { titre = "PROPULSION", periode = 1 }
 
@@ -26,7 +29,7 @@ end
 function page.dessiner(fenetre, ctx)
   local largeur, hauteur = fenetre.getSize()
   local hal, cfg = ctx.hal, ctx.config
-  local s = (cfg.seuils and cfg.seuils.propulsion) or {}
+  local s = (cfg.seuilsPages and cfg.seuilsPages.propulsion) or {}
 
   W.effacer(fenetre)
   W.entete(fenetre, "PROPULSION", ctx.etat and ctx.etat.mode or nil)

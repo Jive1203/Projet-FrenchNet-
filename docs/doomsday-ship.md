@@ -1,4 +1,4 @@
-# Doomsday Ship — système embarqué (Phase 1)
+# Doomsday Ship — système embarqué (Phases 1 à 4)
 
 Système informatique du ballon lourd, pour **AERONAUTICS WARFARE**
 (Create Aeronautics / Avionics, NeoForge 1.21.1, CC: Tweaked).
@@ -10,10 +10,11 @@ Système informatique du ballon lourd, pour **AERONAUTICS WARFARE**
 
 ---
 
-## 1. Ce que la Phase 1 livre
+## 1. Ce qui est livré
 
 | Composant | Fichier | État |
 |---|---|---|
+| **Phase 1** | | |
 | Framework MFD | `vaisseau/mfd.lua` | complet |
 | Couche matérielle (HAL) | `vaisseau/hal.lua` | complet, découverte par méthode |
 | Surveillance et alarmes | `vaisseau/surveillance.lua` | complet |
@@ -22,13 +23,32 @@ Système informatique du ballon lourd, pour **AERONAUTICS WARFARE**
 | Page Propulsion / Énergie | `vaisseau/pages/propulsion.lua` | rendu complet, **données selon HAL** |
 | Page Portance / Enveloppe | `vaisseau/pages/portance.lua` | rendu complet, **données selon HAL** |
 | Page Carte / Waypoints | `vaisseau/pages/navigation.lua` | rendu complet, **envoi autopilote bloqué** |
+| **Phase 2** | | |
+| Conscience de situation | `vaisseau/sa.lua` | complet |
+| Page SA (situation tactique) | `vaisseau/pages/sa.lua` | complet |
+| Page Liaison | `vaisseau/pages/liaison.lua` | complet |
+| Radar du bord → FrenchNet | `vaisseau/vaisseau.lua` | complet |
+| **Phase 3** | | |
+| Recensement des soutes | `vaisseau/inventaire.lua` | complet |
+| Page EW (détection) | `vaisseau/pages/ew.lua` | détection complète, **largage bloqué** |
+| Page Armement | `vaisseau/pages/armement.lua` | affichage complet, **tir bloqué** |
+| **Phase 4** | | |
+| Avertisseur sonore | `vaisseau/audio.lua` | complet |
+| Page Alertes | `vaisseau/pages/alertes.lua` | complet |
+| Relais « now playing » | `vaisseau/musique.lua` | complet, **HTTP selon serveur** |
+| | | |
 | Programme principal | `vaisseau/vaisseau.lua` | complet |
 | Diagnostic de bord | `vaisseau/diagnostic.lua` | complet |
 
-**Non livré, et pourquoi** : l'envoi de route à l'autopilote et le largage de
-ballast (modules absents). Les valeurs réelles de propulsion et de portance
-dépendent de l'API de Create Aeronautics, **que je ne connais pas** — le
-diagnostic est l'outil qui la révélera.
+**Non livré, et pourquoi** : le tir, le largage de leurres, l'envoi de route à
+l'autopilote et le largage de ballast. Les trois modules dont ils dépendent —
+autopilote, Fire Control Embarqué, ADS — **n'existent pas dans le dépôt**. Les
+pages correspondantes sont complètes à l'affichage et **inertes à la commande**,
+et elles l'annoncent en clair. Aucun appel n'est simulé.
+
+Les valeurs réelles de propulsion et de portance dépendent de l'API de Create
+Aeronautics, **que je ne connais pas** — le diagnostic est l'outil qui la
+révélera.
 
 ---
 
@@ -50,15 +70,29 @@ wget <depot>/vaisseau/config_vaisseau.lua   vaisseau/config_vaisseau.lua
 wget <depot>/vaisseau/pages/propulsion.lua  vaisseau/pages/propulsion.lua
 wget <depot>/vaisseau/pages/portance.lua    vaisseau/pages/portance.lua
 wget <depot>/vaisseau/pages/navigation.lua  vaisseau/pages/navigation.lua
+wget <depot>/vaisseau/sa.lua                vaisseau/sa.lua
+wget <depot>/vaisseau/inventaire.lua        vaisseau/inventaire.lua
+wget <depot>/vaisseau/audio.lua             vaisseau/audio.lua
+wget <depot>/vaisseau/musique.lua           vaisseau/musique.lua
+wget <depot>/vaisseau/pages/sa.lua          vaisseau/pages/sa.lua
+wget <depot>/vaisseau/pages/ew.lua          vaisseau/pages/ew.lua
+wget <depot>/vaisseau/pages/armement.lua    vaisseau/pages/armement.lua
+wget <depot>/vaisseau/pages/liaison.lua     vaisseau/pages/liaison.lua
+wget <depot>/vaisseau/pages/alertes.lua     vaisseau/pages/alertes.lua
 wget <depot>/command/carte.lua              vaisseau/carte.lua
 wget <depot>/command/noyau.lua              vaisseau/noyau.lua
+wget <depot>/command/scanner.lua            vaisseau/scanner.lua
 wget <depot>/vaisseau/startup.lua           startup.lua
 ```
 
-`carte.lua` et `noyau.lua` sont les modules de FrenchNet Command, réutilisés
-**verbatim** : la page Navigation et, en phase 2, la page SA/EW s'en servent.
-Deux cartes ou deux IFF divergeraient au premier changement, et l'équipage ne
-saurait plus laquelle croire.
+Le répertoire d'installation n'est plus imposé : `vaisseau.lua` publie le sien
+et les pages chargent leurs modules relativement à lui.
+
+`carte.lua`, `noyau.lua` et `scanner.lua` sont les modules de FrenchNet
+Command, réutilisés **verbatim** : les pages Navigation et SA s'en servent, et
+le radar du bord aussi. Deux cartes, deux IFF ou deux détections de radar
+divergeraient au premier changement, et l'équipage ne saurait plus laquelle
+croire — pire, l'équipage lirait « rouge » là où le contrôleur lit « vert ».
 
 ### Premier geste à bord
 
@@ -239,8 +273,15 @@ déclaré. Le système le dit en clair.
 ## 8. Tests
 
 ```
-lua5.4 tests/test_vaisseau.lua    # 67 vérifications
+lua5.4 tests/test_vaisseau.lua          # 176 vérifications (modules et pages)
+lua5.4 tests/test_vaisseau_runtime.lua  #  30 vérifications (système complet)
 ```
+
+`test_vaisseau_runtime.lua` démarre le système **entier** dans l'émulateur et
+vérifie le câblage : périphériques découverts, huit pages enregistrées, trames
+émises et reçues, alarmes posées et **sonnées**. Il a immédiatement trouvé cinq
+défauts que les tests unitaires ne pouvaient pas voir — dont des pages qui ne
+se chargeaient pas du tout et un transpondeur perdu en silence.
 
 Ce que le banc vérifie en priorité n'est **pas** que le système marche quand
 tout va bien, mais qu'il **dit la vérité quand quelque chose manque** :
@@ -255,16 +296,28 @@ tout va bien, mais qu'il **dit la vérité quand quelque chose manque** :
 
 ---
 
-## 9. Phases suivantes
+## 9. Ce qui reste bloqué, et par quoi
 
-| Phase | Contenu | Dépendance bloquante |
+| Attendu | Bloqué par | Comportement actuel |
 |---|---|---|
-| 2 | SA/EW, liaison FrenchNet, page Liaison | aucune — `noyau.lua` suffit pour l'IFF |
-| 3 | Armement, inventaire, ADS embarqué | **Fire Control Embarqué et ADS absents** |
-| 4 | TV/alertes, audio, relais musique | **HTTP sortant à vérifier** sur le serveur |
+| Envoi de route à l'autopilote | `autopilote.lua` absent | refus motivé, affiché |
+| Largage de ballast | `autopilote.lua` absent | refus motivé, affiché |
+| Sélection d'arme et tir | `fire_control.lua` absent | page complète, **inerte** |
+| Munitions en culasse | `fire_control.lua` absent | `INDISPO` — le compte **en soute** est affiché à part |
+| Largage de chaffs / flares | `ads.lua` absent | page complète, **inerte** |
+| Stock de leurres prêts | `ads.lua` absent | compte **en soute** affiché, marqué « PAS prêt au largage » |
+| Relais musique par HTTP | config du serveur | repli `RESEAU`, sinon `AUCUN` — le mode est toujours affiché |
 
-La phase 3 ne peut pas commencer tant que le Fire Control Embarqué et l'ADS
-n'existent pas dans le dépôt. La phase 2, si.
+Le jour où l'un de ces modules arrive, il y a **un seul fichier à modifier** :
+`vaisseau/liaisons.lua`, et les fonctions à écrire y sont déjà nommées.
+
+### Zones du théâtre : pas de protocole, donc pas de magie
+
+Le poste au sol **ne diffuse pas ses zones** — vérifié dans `command.lua`,
+aucun protocole ne s'en charge. Le ballon les lit donc dans
+`config_vaisseau.lua`, et le système le dit au démarrage quand elles manquent.
+Sans elles, la carte du bord n'a pas de fond et la doctrine de zone ne
+s'applique pas à bord.
 
 ### Vidéo temps réel : non
 

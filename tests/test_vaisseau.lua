@@ -480,7 +480,7 @@ end
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
-print("\n== TEST 7 : les trois pages dessinent sans mentir ==")
+print("\n== TEST 7 : les huit pages dessinent sans mentir ==")
 do
   --[[
     Les pages n'etaient couvertes par rien. Or ce sont elles qui traduisent un
@@ -506,8 +506,10 @@ do
   dofile = function(chemin) return vraiDofile(resoudre(chemin)) end
   loadfile = function(chemin) return vraiLoadfile(resoudre(chemin)) end
 
+  local TOUTES = { "propulsion", "portance", "navigation",
+                   "sa", "ew", "armement", "liaison", "alertes" }
   local pages = {}
-  for _, nom in ipairs({ "propulsion", "portance", "navigation" }) do
+  for _, nom in ipairs(TOUTES) do
     pages[nom] = vraiDofile(RACINE .. "/vaisseau/pages/" .. nom .. ".lua")
   end
 
@@ -536,12 +538,37 @@ do
 
   local liaisonsModule = dofile(RACINE .. "/vaisseau/liaisons.lua")
 
-  local function contexte(hal)
+  -- Contexte complet : c'est celui que vaisseau.lua construit, avec les modules
+  -- des phases 2 a 4. Les pages doivent aussi tenir SANS eux (ctx.sa = nil),
+  -- ce que le cas "phase 1 seule" ci-dessous verifie.
+  local saModule  = dofile(RACINE .. "/vaisseau/sa.lua")
+  local invModule = dofile(RACINE .. "/vaisseau/inventaire.lua")
+  local audModule = dofile(RACINE .. "/vaisseau/audio.lua")
+  local musModule = dofile(RACINE .. "/vaisseau/musique.lua")
+
+  local function contexte(hal, nu)
     local lien = liaisonsModule.nouveau({}, function() end, function() return nil end)
     lien:charger()
-    return { config = {}, hal = hal, liaisons = lien, journal = function() end,
-             etat = { mode = "VEILLE" }, position = { x = 120, y = 180, z = -60 },
-             waypoints = {}, zones = zonesEssai, propulsion = {} }
+    local ctx = { config = {}, hal = hal, liaisons = lien, journal = function() end,
+                  etat = { mode = "VEILLE" }, position = { x = 120, y = 180, z = -60 },
+                  waypoints = {}, zones = zonesEssai, propulsion = {},
+                  alarmesActives = {}, maintenant = 0 }
+    if nu then return ctx end
+
+    local S = saModule.nouveau({}, noyauEssai, function() end)
+    S:integrerRadar({ protocole = "FRENCHNET_RADAR", station = "RAD-01",
+      x = 0, y = 64, z = 0, portee = 512, contacts = {
+        { id = "M1", nature = "MISSILE", x = 180, y = 180, z = -60 },
+        { id = "V1", nom = "Raider", nature = "VEHICULE", x = 400, y = 100, z = 0 },
+        { id = "I1", nom = "Fantassin", nature = "JOUEUR", x = 130, y = 70, z = -50 },
+      } }, 0, "SOL")
+    ctx.sa, ctx.sa_module = S, saModule
+    ctx.sa_pistes, ctx.sa_menace = S:evaluer(ctx.position, 0)
+    ctx.inventaire = invModule.nouveau({}, fauxPeripheriques({}), function() end)
+    ctx.audio = audModule.nouveau({}, fauxPeripheriques({}), function() end)
+    ctx.musique = musModule.nouveau({}, nil, function() end)
+    ctx.alarmesActives = { { cle = "x", niveau = "CRITIQUE", titre = "PERTE DE PORTANCE" } }
+    return ctx
   end
 
   --[[
@@ -549,7 +576,7 @@ do
     large et sur une fenetre etroite. Les quatre combinaisons doivent dessiner
     sans erreur, parce qu'aucune d'elles n'est improbable a bord.
   ]]
-  for _, nom in ipairs({ "propulsion", "portance", "navigation" }) do
+  for _, nom in ipairs(TOUTES) do
     local page = pages[nom]
     verifier(nom .. " : le module se charge", type(page) == "table")
     for _, cas in ipairs({ { "capteurs muets", halMuet }, { "capteurs actifs", halPlein } }) do
@@ -561,6 +588,17 @@ do
           nom, taille[1], taille[2], cas[1]), ok, tostring(err))
       end
     end
+
+    --[[
+      PHASE 1 SEULE. Un ballon qui n'a pas copie sa.lua, inventaire.lua,
+      audio.lua ni musique.lua doit quand meme voler : les pages doivent se
+      dessiner avec un contexte nu, pas exploser. Une page qui plante fige
+      l'ecran sur des chiffres perimes, ce qui est pire que pas d'ecran.
+    ]]
+    local nu = contexte(halPlein, true)
+    if page.init then pcall(page.init, nu) end
+    local okNu, errNu = pcall(page.dessiner, fenetre(51, 19), nu)
+    verifier(nom .. " : dessine sans les modules des phases 2-4", okNu, tostring(errNu))
   end
 
   -- La page navigation a bien trouve la carte : sinon le test ci-dessus
@@ -621,7 +659,328 @@ do
   pages.navigation.clic(ctxNav)
   egal("navigation : la selection boucle", ctxNav.navigation.actif, 1)
 
+  --[[
+    EW : LARGAGE DE LEURRES SANS ADS. C'est le point ou mentir couterait le
+    plus cher de tout le systeme - un equipage qui croit avoir largue ne
+    manoeuvre pas, et prend le missile.
+  ]]
+  local ditEw = {}
+  local ctxEw = contexte(halPlein)
+  ctxEw.journal = function(_, _, m) ditEw[#ditEw + 1] = m end
+  pages.ew.clic(ctxEw)
+  verifier("ew : le largage sans ADS est refuse, pas simule",
+    #ditEw == 1 and ditEw[1]:find("IMPOSSIBLE", 1, true) ~= nil, table.concat(ditEw, " | "))
+
+  --[[
+    ARMEMENT. Deux refus distincts, et les deux comptent :
+      - sans cible selectionnee, un « tirer sur quelque chose » implicite est
+        exactement le genre d'ordre qui touche un allie ;
+      - sur une cible qui porte un code allie, le garde-fou local double celui
+        du sol. Refuser ici coute une ligne, laisser passer coute un allie.
+  ]]
+  local ditArm = {}
+  local ctxArm = contexte(halPlein)
+  ctxArm.journal = function(_, _, m) ditArm[#ditArm + 1] = m end
+  ctxArm.sa_selection = nil
+  pages.armement.clic(ctxArm)
+  verifier("armement : sans cible, l'ordre ne part pas",
+    #ditArm == 1 and ditArm[1]:find("aucune cible", 1, true) ~= nil,
+    table.concat(ditArm, " | "))
+
+  ditArm = {}
+  ctxArm.sa_selection = 1
+  ctxArm.sa_pistes[1].allieManuel = true
+  pages.armement.clic(ctxArm)
+  verifier("armement : un allie n'est jamais engage",
+    #ditArm == 1 and ditArm[1]:find("REFUSE", 1, true) ~= nil, table.concat(ditArm, " | "))
+
+  ditArm = {}
+  ctxArm.sa_pistes[1].allieManuel = nil
+  ctxArm.sa_pistes[1].iff = "INCONNU"
+  pages.armement.clic(ctxArm)
+  verifier("armement : cible valide mais Fire Control absent -> refus motive",
+    #ditArm == 1 and ditArm[1]:find("IMPOSSIBLE", 1, true) ~= nil,
+    table.concat(ditArm, " | "))
+
+  --[[
+    SA : le clic ne declare un allie que sur la LIGNE d'un contact deja
+    selectionne. Declarer un allie par megarde en cliquant sur la carte serait
+    la pire des ergonomies pour un geste aussi lourd de consequences.
+  ]]
+  local ctxSa = contexte(halPlein)
+  pages.sa.init(ctxSa)
+  pages.sa.dessiner(fenetre(51, 19), ctxSa)
+  local ligne, index
+  for l, i in pairs(ctxSa.sa_lignes or {}) do
+    if not ligne or l < ligne then ligne, index = l, i end
+  end
+  verifier("sa : la liste sait sur quelle ligne est chaque contact", ligne ~= nil)
+
+  pages.sa.clic(ctxSa, 1, ligne)            -- a gauche de la liste : hors zone
+  verifier("sa : un clic sur la carte ne selectionne rien", ctxSa.sa_selection == nil)
+
+  pages.sa.clic(ctxSa, ctxSa.sa_listeX, ligne)
+  egal("sa : un clic sur la ligne selectionne le contact", ctxSa.sa_selection, index)
+  pages.sa.clic(ctxSa, ctxSa.sa_listeX, ligne)
+  verifier("sa : un second clic declare l'allie",
+    ctxSa.sa.alliesManuels[ctxSa.sa_pistes[index].cle] == true)
+  pages.sa.clic(ctxSa, ctxSa.sa_listeX, ligne)
+  verifier("sa : un troisieme le retire",
+    ctxSa.sa.alliesManuels[ctxSa.sa_pistes[index].cle] == nil)
+
+  -- Alertes : le clic coupe le son, temporairement seulement.
+  local ctxAl = contexte(halPlein)
+  ctxAl.maintenant = 500
+  pages.alertes.clic(ctxAl)
+  verifier("alertes : le clic coupe le son", ctxAl.audio:silencieux(500) == true)
+  verifier("mais le silence expire", ctxAl.audio:silencieux(500 + 9999) == false)
+
   dofile, loadfile = vraiDofile, vraiLoadfile
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 8 : SA/EW, fusion, IFF et menace ==")
+do
+  local noyau  = dofile(RACINE .. "/command/noyau.lua")
+  local saMod  = dofile(RACINE .. "/vaisseau/sa.lua")
+
+  local dits = {}
+  local S = saMod.nouveau({
+    codes = { codeAllie = "ALLIE7", codeGeneral = "GEN42" },
+  }, noyau, function(_, _, m) dits[#dits + 1] = m end)
+
+  local origine = { x = 0, y = 200, z = 0 }
+
+  local function trame(station, contacts)
+    return { protocole = "FRENCHNET_RADAR", station = station,
+             x = 0, y = 64, z = 0, portee = 512, contacts = contacts }
+  end
+
+  --[[
+    FUSION. Deux stations qui voient le meme engin doivent produire UNE piste.
+    Deux pistes pour un engin afficheraient deux menaces la ou il n'y en a
+    qu'une, et l'equipage doublerait la riposte.
+  ]]
+  S:integrerRadar(trame("RAD-01", {
+    { id = "ID:42", nom = "Raider-7", nature = "VEHICULE", x = 500, y = 210, z = 0 } }), 0, "SOL")
+  S:integrerRadar(trame("RAD-02", {
+    { id = "ID:42", nom = "Raider-7", nature = "VEHICULE", x = 500, y = 210, z = 0 } }), 0, "SOL")
+  egal("deux stations, un seul engin -> une piste", #S:evaluer(origine, 0), 1)
+
+  --[[
+    RAPPROCHEMENT. Avec un seul releve il vaut nil, JAMAIS zero : « pas encore
+    mesure » n'est pas « stable », et c'est sur cette nuance que se decide un
+    largage de leurres.
+  ]]
+  local seul = S:evaluer(origine, 0)[1]
+  verifier("un seul releve : rapprochement inconnu, pas nul",
+    seul.rapprochement == nil, tostring(seul.rapprochement))
+
+  S:integrerRadar(trame("RAD-01", {
+    { id = "ID:42", nom = "Raider-7", nature = "VEHICULE", x = 400, y = 210, z = 0 } }), 2, "SOL")
+  local apres = S:evaluer(origine, 2)[1]
+  -- 49.99 et non 50 : la distance est en TROIS dimensions, et le contact est
+  -- 10 blocs plus haut que le ballon. C'est voulu - un engin qui passe au
+  -- dessus n'est pas a la meme distance qu'un engin au meme niveau.
+  verifier("deux releves : rapprochement mesure",
+    apres.rapprochement and math.abs(apres.rapprochement - 50) < 0.1,
+    tostring(apres.rapprochement))
+  egal("cap boussole : plein est", math.floor(apres.cap + 0.5), 90)
+
+  --[[
+    LE POINT QUI COMPTE POUR L'EW : la menace se juge au TEMPS AVANT CONTACT,
+    pas a la distance. 400 blocs a 50 b/s, c'est huit secondes.
+  ]]
+  egal("400 b en rapprochement rapide -> ATTENTION", apres.menaceNom, "ATTENTION")
+
+  local loin = saMod.nouveau({}, noyau, function() end)
+  loin:integrerRadar(trame("R", { { id = "A", nature = "VEHICULE", x = 400, y = 200, z = 0 } }), 0, "SOL")
+  loin:integrerRadar(trame("R", { { id = "A", nature = "VEHICULE", x = 405, y = 200, z = 0 } }), 2, "SOL")
+  egal("400 b en eloignement -> VEILLE seulement",
+    loin:evaluer(origine, 2)[1].menaceNom, "VEILLE")
+
+  --[[
+    IFF. Le code allie est reconnu par la MEME bibliotheque qu'au sol. Un
+    equipage qui lit rouge la ou le controleur lit vert ne se comprend pas par
+    radio - il n'y a donc qu'un seul IFF, appele des deux cotes.
+  ]]
+  S:integrerRadar(trame("RAD-01", {
+    { id = "ID:9", nom = "Ami-1", nature = "VEHICULE", x = 100, y = 205, z = 0 } }), 2, "SOL")
+  S:integrerTranspondeur({ identifiant = "Ami-1", code = "ALLIE7" }, 2)
+  local ami
+  for _, p in ipairs(S:evaluer(origine, 2)) do if p.nom == "Ami-1" then ami = p end end
+  egal("code allie reconnu", ami.iff, "ALLIE")
+  egal("un allie n'est jamais une menace", ami.menaceNom, "AUCUNE")
+
+  -- Sans code, la regle cardinale tient : INCONNU. Aucun nom ne rattrape un
+  -- transpondeur muet.
+  local muet
+  for _, p in ipairs(S:evaluer(origine, 2)) do if p.nom == "Raider-7" then muet = p end end
+  egal("sans code : INCONNU", muet.iff, "INCONNU")
+
+  --[[
+    MISSILE. Il n'a pas d'intention a deviner, seulement une trajectoire, et le
+    doute penche du cote de l'alerte : un missile proche dont on ignore le
+    rapprochement est IMMINENT, pas « a surveiller ».
+  ]]
+  local ew = saMod.nouveau({}, noyau, function() end)
+  ew:integrerRadar(trame("R", { { id = "M1", nature = "MISSILE", x = 150, y = 200, z = 0 } }), 0, "SOL")
+  local _, pire = ew:evaluer(origine, 0)
+  egal("missile proche, rapprochement inconnu -> IMMINENTE",
+    saMod.NOM_MENACE[pire], "IMMINENTE")
+
+  --[[
+    DECLARATION MANUELLE D'ALLIE. C'est la seule facon de couvrir un ami dont
+    le transpondeur est detruit. Decision humaine : journalisee, et revocable
+    du meme geste.
+  ]]
+  local avant = #dits
+  S:declarerAllie(muet.cle, true)
+  verifier("la declaration manuelle est journalisee", #dits > avant)
+  local redit
+  for _, p in ipairs(S:evaluer(origine, 2)) do if p.cle == muet.cle then redit = p end end
+  egal("l'allie declare passe ALLIE", redit.iff, "ALLIE")
+  S:declarerAllie(muet.cle, false)
+  for _, p in ipairs(S:evaluer(origine, 2)) do if p.cle == muet.cle then redit = p end end
+  egal("et la declaration se retire du meme geste", redit.iff, "INCONNU")
+
+  --[[
+    PEREMPTION. Une piste qu'on ne voit plus est OUBLIEE, jamais declaree
+    detruite : la confirmation de destruction se fait au sol, avec l'enveloppe
+    fiable des stations. Ici, ce serait un kill invente.
+  ]]
+  local oubliees = S:purger(1000)
+  verifier("les pistes perimees sont oubliees", oubliees > 0, tostring(oubliees))
+  egal("et il n'en reste aucune", #S:evaluer(origine, 1000), 0)
+
+  -- Trame vide ou malformee : ignoree sans exploser.
+  local ok = pcall(function()
+    S:integrerRadar(nil, 0, "SOL")
+    S:integrerRadar({ protocole = "FRENCHNET_RADAR" }, 0, "SOL")
+    S:integrerRadar(trame("R", { { nature = "ENTITE" } }), 0, "SOL")   -- sans position
+  end)
+  verifier("une trame malformee est ignoree, pas fatale", ok)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 9 : soutes, audio et relais musique ==")
+do
+  local invMod     = dofile(RACINE .. "/vaisseau/inventaire.lua")
+  local audioMod   = dofile(RACINE .. "/vaisseau/audio.lua")
+  local musiqueMod = dofile(RACINE .. "/vaisseau/musique.lua")
+
+  ------------------------------------------------------------------- soutes
+  local coffres = fauxPeripheriques({
+    ["chest_0"] = { types = { "minecraft:chest" }, methodes = {
+      size = function() return 27 end,
+      list = function() return {
+        [1] = { name = "createbigcannons:autocannon_cartridge", count = 64 },
+        [3] = { name = "minecraft:gunpowder", count = 32 },
+      } end } },
+    -- Un modem filaire expose un list() sans rapport : il ne doit PAS etre
+    -- compte comme soute, sinon le total devient n'importe quoi.
+    ["modem_0"] = { types = { "modem" }, methodes = {
+      list = function() return { "chest_0" } end } },
+  })
+  local I = invMod.nouveau({}, coffres, function() end)
+  egal("un modem n'est pas une soute", I:decouvrir(), 1)
+  I:recenser(0)
+  egal("la poudre est comptee", I:compter("poudre"), 96)
+
+  --[[
+    LE POINT QUI COMPTE : une famille jamais vue rend nil, pas zero. « Aucun
+    leurre a bord » et « je ne sais pas reconnaitre vos leurres » appellent des
+    gestes opposes - manoeuvrer, ou corriger la configuration.
+  ]]
+  verifier("famille absente : nil, pas zero", I:compter("leurres") == nil,
+    tostring(I:compter("leurres")))
+
+  local principaux = I:principaux(2)
+  egal("les principaux sont tries par quantite", principaux[1].quantite, 64)
+  egal("nom court lisible", invMod.nomCourt("minecraft:iron_ingot"), "iron ingot")
+
+  -- Aucune soute : ce n'est pas une erreur, c'est un cablage a faire.
+  local vide = invMod.nouveau({}, fauxPeripheriques({}), function() end)
+  egal("sans coffre : aucune soute", vide:decouvrir(), 0)
+  verifier("et aucun compte invente", vide:compter("obus") == nil)
+
+  -------------------------------------------------------------------- audio
+  local jouees = {}
+  local hp = fauxPeripheriques({
+    ["speaker_0"] = { types = { "speaker" }, methodes = {
+      playNote = function(i, v, p) jouees[#jouees + 1] = { i, v, p } return true end } },
+  })
+  local A = audioMod.nouveau({}, hp, function() end)
+  egal("le haut-parleur est trouve par sa methode", A:decouvrir(), 1)
+
+  A:signaler("CRITIQUE", 0)
+  A:jouerPas(0)
+  verifier("une note part", #jouees == 1, tostring(#jouees))
+
+  --[[
+    Une alarme MOINS grave ne remplace pas une plus grave en cours : on
+    n'interrompt pas une sirene de perte de portance pour annoncer une
+    batterie faible.
+  ]]
+  local ok = A:signaler("ATTENTION", 0)
+  verifier("une alarme moins grave ne prend pas la main", ok == false)
+  egal("la critique tient", A.actif, "CRITIQUE")
+
+  --[[
+    LE SILENCE EXPIRE. Un ballon muet pour le reste de la partie n'entendrait
+    pas la prochaine alarme - c'est le pire resultat possible pour un
+    avertisseur.
+  ]]
+  A:silencier(60, 100)
+  verifier("silence demande : plus une note", A:jouerPas(101) == false)
+  verifier("et il est annonce comme temporaire", (select(2, A:silencieux(101))):find("restantes", 1, true) ~= nil)
+  verifier("passe le delai, le son revient", A:silencieux(200) == false)
+
+  local sansHp = audioMod.nouveau({}, fauxPeripheriques({}), function() end)
+  sansHp:decouvrir()
+  sansHp:signaler("CRITIQUE", 0)
+  verifier("sans haut-parleur : pas d'erreur, pas de note", sansHp:jouerPas(0) == false)
+
+  ------------------------------------------------------------------ musique
+  --[[
+    HTTP peut etre coupe par l'administrateur du serveur, et aucun code ne
+    contourne cela. Le module doit DIRE dans quel mode il est, jamais afficher
+    un titre vide comme si le relais repondait.
+  ]]
+  local sansHttp = musiqueMod.nouveau({}, nil, function() end)
+  egal("sans HTTP : repli reseau annonce", sansHttp:mode(), "RESEAU")
+  local piste, motif = sansHttp:etat(0)
+  verifier("et aucun titre invente", piste == nil and type(motif) == "string", tostring(motif))
+
+  verifier("une trame reseau alimente l'affichage",
+    sansHttp:recevoirTrame({ protocole = "FRENCHNET_MUSIQUE", titre = "Ride of the Valkyries",
+                             artiste = "Wagner" }, 10))
+  egal("le titre est retenu", sansHttp:etat(10).titre, "Ride of the Valkyries")
+  egal("avec sa source", sansHttp:etat(10).source, "RESEAU")
+
+  --[[
+    PEREMPTION. Un titre fige depuis une heure se lit comme un relais qui
+    marche, alors qu'il est mort. Passe le delai, il disparait.
+  ]]
+  local vieux, motifVieux = sansHttp:etat(10 + 3600)
+  verifier("un titre trop vieux est oublie", vieux == nil)
+  verifier("et le motif le dit", tostring(motifVieux):find("muet", 1, true) ~= nil,
+    tostring(motifVieux))
+
+  -- Avec HTTP : relais injoignable -> echec motive, pas de titre.
+  local M = musiqueMod.nouveau({ urlRelais = "http://exemple/nowplaying" },
+    { get = function() error("connexion refusee") end }, function() end)
+  egal("avec URL et HTTP : mode HTTP", M:mode(), "HTTP")
+  local okI, motifI = M:interroger(0)
+  verifier("relais injoignable : echec motive", okI == false and
+    tostring(motifI):find("injoignable", 1, true) ~= nil, tostring(motifI))
+
+  local bon = musiqueMod.nouveau({ urlRelais = "http://exemple/nowplaying" }, {
+    get = function() return { readAll = function() return '{"titre":"Erika"}' end,
+                              close = function() end } end },
+    function() end, function(corps) return { titre = corps:match('"titre":"(.-)"') } end)
+  verifier("reponse lisible : titre retenu", bon:interroger(0))
+  egal("et sa source est HTTP", bon:etat(0).source, "HTTP")
 end
 
 print(string.format("\n===== %d verification(s), %d echec(s) =====", total, echecs))

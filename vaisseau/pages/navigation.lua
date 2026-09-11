@@ -15,22 +15,27 @@
   page de navigation.
 --------------------------------------------------------------------------------]]
 
-local W = dofile("/vaisseau/widgets.lua")
+-- Le repertoire d'installation est pose par vaisseau.lua : un ballon installe
+-- ailleurs que dans /vaisseau chargeait jusqu'ici des pages sans widgets, donc
+-- aucune page du tout. Le repli garde le cas ou la page est ouverte seule.
+local W = dofile((_G.VAISSEAU_REPERTOIRE or "/vaisseau") .. "/widgets.lua")
 
 local page = { titre = "NAVIGATION", periode = 1 }
 
 local carte, noyau   -- charges paresseusement : la page reste utilisable sans
 
+local RACINE = _G.VAISSEAU_REPERTOIRE or "/vaisseau"
+
 local function charger(chemin)
-  local f = loadfile(chemin)
+  local f = loadfile(RACINE .. chemin)
   if not f then return nil end
   local ok, module = pcall(f)
   if ok then return module end
 end
 
 function page.init(ctx)
-  carte = charger("/vaisseau/carte.lua")
-  noyau = charger("/vaisseau/noyau.lua")
+  carte = charger("/carte.lua")
+  noyau = charger("/noyau.lua")
 
   ctx.navigation = ctx.navigation or {}
   ctx.waypoints = ctx.waypoints or {}

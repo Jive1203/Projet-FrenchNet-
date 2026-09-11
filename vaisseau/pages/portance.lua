@@ -9,14 +9,17 @@
   poussee ne remonte pas un ballon, larguer du ballast si.
 --------------------------------------------------------------------------------]]
 
-local W = dofile("/vaisseau/widgets.lua")
+-- Le repertoire d'installation est pose par vaisseau.lua : un ballon installe
+-- ailleurs que dans /vaisseau chargeait jusqu'ici des pages sans widgets, donc
+-- aucune page du tout. Le repli garde le cas ou la page est ouverte seule.
+local W = dofile((_G.VAISSEAU_REPERTOIRE or "/vaisseau") .. "/widgets.lua")
 
 local page = { titre = "PORTANCE", periode = 1 }
 
 function page.dessiner(fenetre, ctx)
   local largeur, hauteur = fenetre.getSize()
   local hal, cfg = ctx.hal, ctx.config
-  local s = (cfg.seuils and cfg.seuils.portance) or {}
+  local s = (cfg.seuilsPages and cfg.seuilsPages.portance) or {}
 
   W.effacer(fenetre)
   W.entete(fenetre, "PORTANCE / ENVELOPPE")
