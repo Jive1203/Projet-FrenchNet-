@@ -24,7 +24,7 @@
 --------------------------------------------------------------------------------]]
 
 local DEPOT    = "Jive1203/Projet-FrenchNet-"
-local BRANCHE  = "claude/interceptor-ship-onboard-system-uca5no"
+local BRANCHE  = "doomsday-ship-system"
 local BASE     = "https://raw.githubusercontent.com/"
 
 -- Chaque entree : { chemin dans le depot, chemin sur l'ordinateur, config ? }

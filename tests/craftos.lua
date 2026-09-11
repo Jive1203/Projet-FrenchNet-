@@ -337,8 +337,26 @@ function M.creer(options)
   end
 
   local nomsExtras = {}
-  for nom in pairs(extras) do nomsExtras[#nomsExtras + 1] = nom end
-  table.sort(nomsExtras)
+  local function recenserExtras()
+    nomsExtras = {}
+    for nom in pairs(extras) do nomsExtras[#nomsExtras + 1] = nom end
+    table.sort(nomsExtras)
+  end
+  recenserExtras()
+
+  --- Branche un peripherique APRES la creation du banc. Un scenario peut
+  --- vouloir poser un largueur ou un haut-parleur en cours de route, ou en
+  --- arracher un pour verifier que le systeme le signale au lieu de planter.
+  function M.ajouterPeripherique(nom, typePeripherique, methodes)
+    extras[nom] = { type = typePeripherique or "peripheral", methodes = methodes or {} }
+    recenserExtras()
+    return methodes
+  end
+
+  function M.retirerPeripherique(nom)
+    extras[nom] = nil
+    recenserExtras()
+  end
 
   local function presents()
     local noms = {}
