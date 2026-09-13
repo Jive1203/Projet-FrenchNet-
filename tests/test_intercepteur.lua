@@ -174,6 +174,23 @@ local function preparer(config, options)
   os.execute("cp " .. RACINE .. "/autopilote/config_vehicule.lua "
     .. BANC .. "/autopilote/")
 
+  -- Vehicule SORTI DU HANGAR, dont personne n'a encore trouve le cablage : tous
+  -- les axes a "aucun". C'est l'etat d'un navire neuf tant que 'calibrer' n'est
+  -- pas passe.
+  if options.sansCablage then
+    local h = io.open(BANC .. "/autopilote/config_vehicule.lua", "r")
+    local source = h:read("a")
+    h:close()
+    source = source:gsub("    axes = {.-\n    },\n", [==[    axes = {
+      avance   = { mode = "aucun" }, vertical = { mode = "aucun" },
+      lacet    = { mode = "aucun" }, lateral  = { mode = "aucun" },
+    },
+]==], 1)
+    h = io.open(BANC .. "/autopilote/config_vehicule.lua", "w")
+    h:write(source)
+    h:close()
+  end
+
   -- La station de ravitaillement est une constante de reseau exigee par le
   -- module d'autopilote : elle doit exister meme sur un banc.
   f = io.open(BANC .. "/autopilote/ravitaillement.lua", "w")
@@ -276,7 +293,12 @@ local function monter(config, options)
 
   -- Sorties moteur simulees : le VRAI module d'autopilote pilote le modele
   -- physique du banc au lieu de peripheriques inexistants.
-  env.__FRENCHNET_BANC = { commandes = banc.bancVol.pilote() }
+  --
+  -- 'sorteesReelles' s'en passe : c'est le seul moyen d'eprouver le controle de
+  -- cablage, qui ne concerne justement pas un navire aux sorties injectees.
+  if not options.sortiesReelles then
+    env.__FRENCHNET_BANC = { commandes = banc.bancVol.pilote() }
+  end
 
   return banc, env, etat, monde
 end
@@ -415,6 +437,24 @@ do
   verifier("aucun plantage du superviseur", motif == "LIMITE_TEMPS", tostring(motif))
   verifier("refus explicite de decoller", (contient(sorties, "Le navire ne decolle pas")))
   verifier("emplacements explores listes", (contient(sorties, "Emplacements explores")))
+  verifier("redemarrage automatique malgre tout",
+    (contient(sorties, "redemarrage automatique")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 6 bis : aucun axe cable - le navire refuse de decoller ==")
+do
+  -- Un intercepteur dont le cablage n'a pas ete trouve accepterait ses
+  -- scrambles, calculerait ses commandes, les enverrait sur des faces qui ne
+  -- menent nulle part, et resterait au sol pendant que la cible passe.
+  local banc, env, etat = monter(ARSENAL_STANDARD(),
+    { sansCablage = true, sortiesReelles = true })
+  local motif = executer(banc, 120)
+  local sorties = etat.sorties
+  verifier("aucun plantage du superviseur", motif == "LIMITE_TEMPS", tostring(motif))
+  verifier("refus explicite", (contient(sorties, "aucun axe n'est cable")))
+  verifier("l'outil qui repare est nomme", (contient(sorties, "calibrer")))
+  verifier("l'ordre des operations est donne", (contient(sorties, "cablage")))
   verifier("redemarrage automatique malgre tout",
     (contient(sorties, "redemarrage automatique")))
 end

@@ -18,8 +18,14 @@ liaisons.MODULES = {
   autopilote = {
     chemin = "/vaisseau/autopilote.lua",
     role = "tenue de cap, suivi de route, envoi de waypoints",
-    besoins = { "definirRoute", "etat", "engager", "desengager" },
-    pages = { "navigation" } },
+    -- 'largerBallast' etait appele par la page PORTANCE sans figurer ici : le
+    -- controle de conformite ne pouvait donc pas le reclamer, et un module
+    -- incomplet serait passe pour conforme jusqu'au premier clic de l'equipage.
+    -- 'pas' est le cycle d'asservissement : sans lui, le module accepterait des
+    -- routes sans jamais recevoir de temps de calcul pour les voler.
+    besoins = { "definirRoute", "etat", "engager", "desengager",
+                "largerBallast", "pas" },
+    pages = { "navigation", "portance" } },
   fireControl = {
     chemin = "/vaisseau/fire_control.lua",
     role = "selection d'arme et execution du tir (AAA, MS-GA, ML-GA, M-GG, Artillery)",

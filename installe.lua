@@ -51,13 +51,19 @@ local JEUX = {
       { "autopilote/ravitaillement.lua",   "/autopilote/ravitaillement.lua", config = true },
       { "autopilote/interface.lua",        "/autopilote/interface.lua" },
       { "autopilote/cablage.lua",          "/autopilote/cablage.lua" },
+      { "autopilote/calibration.lua",      "/autopilote/calibration.lua" },
+      { "autopilote/calibrer.lua",         "/autopilote/calibrer.lua" },
+      { "autopilote/peripheriques.lua",    "/autopilote/peripheriques.lua" },
+      { "autopilote/classer.lua",          "/autopilote/classer.lua" },
       { "autopilote/carburant.lua",        "/autopilote/carburant.lua" },
       { "autopilote/exemple_mission.lua",  "/autopilote/exemple_mission.lua" },
       { "autopilote/startup.lua",          "/startup.lua" },
     },
     suite = {
+      "classer          -- classer les peripheriques que le systeme ne connait pas",
+      "calibrer         -- trouve seul quelle face commande quel axe (en vol, degage)",
+      "cablage          -- verifie le SENS de chaque axe, pilotage manuel",
       "interface        -- reglage du vehicule a l'ecran",
-      "cablage          -- verification du cablage, pilotage manuel",
     },
   },
 
@@ -71,6 +77,10 @@ local JEUX = {
       { "autopilote/ravitaillement.lua",         "/autopilote/ravitaillement.lua", config = true },
       { "autopilote/interface.lua",              "/autopilote/interface.lua" },
       { "autopilote/cablage.lua",                "/autopilote/cablage.lua" },
+      { "autopilote/calibration.lua",            "/autopilote/calibration.lua" },
+      { "autopilote/calibrer.lua",               "/autopilote/calibrer.lua" },
+      { "autopilote/peripheriques.lua",          "/autopilote/peripheriques.lua" },
+      { "autopilote/classer.lua",                "/autopilote/classer.lua" },
 
       -- Systeme d'interception.
       { "intercepteur/intercepteur.lua",         "/intercepteur/intercepteur.lua" },
@@ -90,8 +100,10 @@ local JEUX = {
       { "systeme/startup.lua",                   "/startup.lua" },
     },
     suite = {
+      "classer          -- classer les peripheriques inconnus (armement compris)",
+      "calibrer         -- trouve seul quelle face commande quel axe",
       "interface        -- reglage du vehicule (gabarit, moteurs, gains PID)",
-      "cablage          -- verification du cablage, pilotage manuel",
+      "cablage          -- verification du SENS des axes, pilotage manuel",
       "systeme/os       -- systeme de bord : page Armement pour declarer les armes",
       "edit intercepteur/config_intercepteur.lua   -- identifiant et points de retour",
     },

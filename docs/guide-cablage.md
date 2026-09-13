@@ -30,6 +30,8 @@ Trois couches, trois responsabilités :
 
 **C'est la troisième couche que ce guide couvre.** Les deux premières sont livrées et testées ; la troisième dépend de la façon dont votre véhicule est construit, et c'est vous qui la posez.
 
+> **Vous n'êtes plus obligé de la déclarer à la main.** `calibrer` essaie les faces une par une, mesure ce que le véhicule fait, et écrit la table `sorties.axes` lui-même — satellites compris. Voir **[Guide de calibration](guide-calibration.md)**. Ce guide-ci reste la référence de ce que chaque mode signifie, et de ce qu'il faut brancher derrière le signal.
+
 ---
 
 ## 2. Matériel par véhicule
@@ -208,7 +210,16 @@ Repère, nez en avant : **x = tribord, y = haut, z = avant**. Un ordinateur plac
 
 ### Étape 3 — Déclarer le câblage
 
-Sections *Sorties avance / vertical / lacet / lateral* : pour chaque axe, le mode et les faces. `S` pour enregistrer, `Q` pour quitter.
+**Le plus simple : le faire trouver.** Véhicule en vol stationnaire, dégagé :
+
+```
+classer     -- si des périphériques sont inconnus du système
+calibrer    -- essaie les faces une par une et écrit sorties.axes
+```
+
+Voir le **[Guide de calibration](guide-calibration.md)**. Passez ensuite à l'étape 6 : `calibrer` trouve les faces, l'œil de l'opérateur confirme le sens.
+
+**À la main**, si vous préférez ou si la calibration ne peut pas aboutir (pas de GPS, véhicule non volant) : sections *Sorties avance / vertical / lacet / lateral* dans `interface`, pour chaque axe le mode et les faces. `S` pour enregistrer, `Q` pour quitter.
 
 ### Étape 4 — Vérifier le signal, véhicule à l'arrêt
 

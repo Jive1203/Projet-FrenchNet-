@@ -14,6 +14,7 @@ réunis sur une seule branche.
 | **ADS** | Contre-mesures embarquées : leurres et évasion sur détection de missile | [guide](docs/guide-ads.md) |
 | **Mise à jour** | Diffusion des mises à jour à tous les postes du réseau | [guide](docs/mise-a-jour.md) |
 | **Câblage** | Brancher un ordinateur sur un véhicule et le faire bouger | [guide](docs/guide-cablage.md) |
+| **Calibration** | Trouver **seul** quelle face redstone commande quel axe | [guide](docs/guide-calibration.md) |
 | **Installation** | Poser les fichiers sur les ordinateurs, et dépannage | [guide](docs/guide-installation.md) |
 
 ---
@@ -43,6 +44,10 @@ Deux règles de conception traversent tout le dépôt, et expliquent la plupart 
 **Le sol classifie, le bord exécute.** FrenchNet Command connaît les zones et les classes Charlie / Bravo / Alpha / Roméo. Le navire intercepteur, lui, n'en sait **rien** : il reçoit deux ordres, `SCRAMBLE` et `FEU`, et rien d'autre. Un ordre qui contiendrait malgré tout un champ de zone ou de classe se le voit retirer, et le fait est journalisé — c'est le signe visible qu'un couplage se réintroduit.
 
 **On appelle, on ne réécrit pas.** Le module d'autopilote est la seule loi de vol du dépôt. L'intercepteur, l'ADS et le vaisseau l'appellent ; aucun ne réimplémente d'asservissement.
+
+**On refuse plutôt que d'obéir sans bouger.** Tous les vaisseaux se dirigent par courants de redstone, et rien ne dit d'avance quelle face commande quel axe. Un véhicule dont le câblage n'a pas été trouvé accepterait ses ordres, calculerait ses commandes, les enverrait sur des faces qui ne mènent nulle part — et la panne se chercherait longtemps du mauvais côté. Les trois systèmes qui demandent un autopilote le disent donc au démarrage, et nomment l'outil qui répare : [`calibrer`](docs/guide-calibration.md).
+
+**On ne devine jamais ce qu'est un bloc inconnu.** La calibration envoie du courant dans des sorties pour voir ce qui bouge : sur un bloc non identifié, cela peut déclencher un canon. Tout périphérique que le système ne reconnaît pas part en quarantaine, et un opérateur lui attribue une **classe** — qui n'est pas une étiquette, mais l'autorisation de remplir une case précise de la configuration.
 
 ---
 
@@ -86,6 +91,20 @@ parallel.waitForAny(ap.executer, mission)
 
 📖 [guide](docs/guide-autopilote.md) · [câblage](docs/guide-cablage.md)
 
+### Calibration du câblage
+
+Les vaisseaux se dirigent par courants de redstone, et l'autopilote ne sait pas d'avance quelle face commande quoi. `calibrer` le cherche : il essaie les sorties **une par une** — neutraliser, mesurer à l'arrêt, une impulsion, mesurer de nouveau — et déduit la table des axes du déplacement observé au GPS. Faces locales puis faces des **satellites**, par rangs de coût croissant, et il s'arrête dès que les axes essentiels sont acquis.
+
+Le lacet est l'angle mort du GPS : il donne un point, jamais un cap. Trois cas, et l'outil dit lequel est le vôtre — capteur de cap présent, ordinateur décalé du centre (la rotation promène alors le point GPS sur un **cercle**, dont le centre trahit le vrai nez du vaisseau), ou lacet non observable, et il le déclare au lieu de prétendre que les faces sont inertes.
+
+```
+classer     -- identifier les blocs que le système ne connaît pas
+calibrer    -- trouver quelle face commande quel axe (en vol, dégagé)
+cablage     -- vérifier le sens de chaque axe, à l'œil
+```
+
+📖 [guide](docs/guide-calibration.md)
+
 ### Navire intercepteur de scramble
 
 **Interception prédictive** — il résout le temps de vol et vise la position *future* de la cible, pas sa position actuelle.
@@ -111,6 +130,8 @@ Sur **chaque navire**. Le radar de bord est surveillé en continu ; dès qu'un *
 ### Vaisseau doomsday
 
 Vaisseau lourd et son poste de contrôle : HAL matériel, soutes, diagnostic, avertisseur sonore.
+
+Son autopilote **existe désormais** : `vaisseau/autopilote.lua` remplit la case que la couture d'intégration réservait et qui était vide — la page NAVIGATION construisait des routes que personne ne volait. L'adaptateur ne contient aucune loi de pilotage, il traduit vers le module standard, et **refuse** tout ce qu'il ne peut pas tenir : module non installé, aucun axe câblé, ballast non déclaré.
 
 📖 [guide](docs/doomsday-ship.md)
 

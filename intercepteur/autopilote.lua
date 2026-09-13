@@ -192,6 +192,41 @@ local function lierStandard(moduleAp, chemin, config)
     configVehicule.mission.reprendreApresRedemarrage = false
   end
 
+  ------------------------------------------------------------------- cablage
+  -- Le navire se dirige par courants de redstone, et rien ne dit d'avance
+  -- quelle face commande quel axe. Un intercepteur dont aucun axe n'est cable
+  -- accepterait ses scrambles, calculerait ses commandes, les enverrait sur des
+  -- faces qui ne menent nulle part -- et resterait au sol pendant que la cible
+  -- passe. Autant le dire au hangar plutot qu'en alerte.
+  --
+  -- Le banc d'essai injecte ses propres sorties : la verification ne le
+  -- concerne pas.
+  local bancInjecte = rawget(_G, "__FRENCHNET_BANC")
+  if not (type(bancInjecte) == "table" and bancInjecte.commandes) then
+    local axes = (configVehicule.sorties or {}).axes or {}
+    local cables, manquants = 0, {}
+    for _, nomAxe in ipairs({ "avance", "vertical", "lacet" }) do
+      local reglageAxe = axes[nomAxe]
+      if reglageAxe and (reglageAxe.mode or "aucun") ~= "aucun" then
+        cables = cables + 1
+      else
+        manquants[#manquants + 1] = nomAxe
+      end
+    end
+
+    if cables == 0 then
+      error("aucun axe n'est cable dans " .. cheminVehicule .. " : le navire "
+        .. "obeirait a tout sans jamais bouger. Lancez 'calibrer' -- il essaie "
+        .. "les faces une par une et trouve seul quelle face commande quel axe "
+        .. "-- puis 'cablage' pour en verifier le sens.", 0)
+    end
+    if #manquants > 0 then
+      journal.avert(E.LIAISON_AUTOPILOTE, "axe(s) non cable(s) : "
+        .. table.concat(manquants, ", ") .. " -- le navire ne pourra pas "
+        .. "corriger ces degres de liberte. 'calibrer' les cherchera pour vous.")
+    end
+  end
+
   ------------------------------------------------------------------- instance
   -- Point d'injection reserve aux BANCS D'ESSAI. Un banc hors du jeu y depose
   -- un pilote de sorties simule, ce qui permet de rejouer une mission complete

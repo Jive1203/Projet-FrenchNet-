@@ -11,8 +11,8 @@
 ----------------------------------------------------------------------------]]
 
 return {
-  version = "1.0.0",
-  genere  = "2026-09-11",
+  version = "1.0.1",
+  genere  = "2026-09-13",
   postes = {
     balise = { fichiers = {
       { chemin = "balise/balise.lua", somme = 1465246662, taille = 34219 },
@@ -63,10 +63,10 @@ return {
       { chemin = "maj/config_maj.lua", somme = 3084821908, taille = 4705, siAbsent = true },
     } },
     vaisseau = { fichiers = {
-      { chemin = "vaisseau/vaisseau.lua", somme = 3557197294, taille = 34224 },
+      { chemin = "vaisseau/vaisseau.lua", somme = 2584220737, taille = 35416 },
       { chemin = "vaisseau/mfd.lua", somme = 3517456106, taille = 11723 },
       { chemin = "vaisseau/hal.lua", somme = 3904346860, taille = 8481 },
-      { chemin = "vaisseau/liaisons.lua", somme = 2746599202, taille = 6269 },
+      { chemin = "vaisseau/liaisons.lua", somme = 1800492969, taille = 6708 },
       { chemin = "vaisseau/surveillance.lua", somme = 215051101, taille = 6115 },
       { chemin = "vaisseau/widgets.lua", somme = 4086572184, taille = 4172 },
       { chemin = "vaisseau/sa.lua", somme = 161377817, taille = 12409 },
@@ -85,7 +85,16 @@ return {
       { chemin = "command/noyau.lua", cible = "/vaisseau/noyau.lua", somme = 3271321214, taille = 47966 },
       { chemin = "command/carte.lua", cible = "/vaisseau/carte.lua", somme = 1145651875, taille = 16585 },
       { chemin = "command/scanner.lua", cible = "/vaisseau/scanner.lua", somme = 4183380518, taille = 18078 },
-      { chemin = "vaisseau/config_vaisseau.lua", somme = 2508566430, taille = 12626, siAbsent = true },
+      { chemin = "vaisseau/autopilote.lua", somme = 2900278338, taille = 14756 },
+      { chemin = "autopilote/autopilote.lua", somme = 1406969702, taille = 131474 },
+      { chemin = "autopilote/config_vehicule.lua", somme = 1270448757, taille = 19382, siAbsent = true },
+      { chemin = "autopilote/ravitaillement.lua", somme = 1468099928, taille = 1243, siAbsent = true },
+      { chemin = "autopilote/calibration.lua", somme = 4223300130, taille = 55122 },
+      { chemin = "autopilote/calibrer.lua", somme = 1349872238, taille = 10874 },
+      { chemin = "autopilote/peripheriques.lua", somme = 1989367290, taille = 23698 },
+      { chemin = "autopilote/classer.lua", somme = 4195533059, taille = 12301 },
+      { chemin = "autopilote/cablage.lua", somme = 1791328380, taille = 13903 },
+      { chemin = "vaisseau/config_vaisseau.lua", somme = 1652067526, taille = 13301, siAbsent = true },
       { chemin = "vaisseau/startup.lua", cible = "/startup.lua", somme = 3855266758, taille = 3097 },
       { chemin = "maj/maj.lua", somme = 3426157212, taille = 23898 },
       { chemin = "maj/update.lua", somme = 632284915, taille = 12184 },

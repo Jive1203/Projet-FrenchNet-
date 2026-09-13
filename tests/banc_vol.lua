@@ -564,13 +564,20 @@ function M.creer(options)
 
   -- dofile passe par le systeme de fichiers simule ET par l'environnement
   -- simule : c'est ainsi que interface.lua charge autopilote.lua pendant les essais.
-  env.dofile = function(chemin)
+  -- loadfile rend le morceau SANS l'executer, et nil + message si le fichier
+  -- manque : c'est ainsi que la couture d'integration du ballon teste la
+  -- presence d'un module exterieur.
+  env.loadfile = function(chemin)
     local fichier = env.fs.open(chemin, "r")
-    if not fichier then error("dofile : fichier introuvable " .. tostring(chemin), 0) end
+    if not fichier then return nil, "fichier introuvable : " .. tostring(chemin) end
     local source = fichier.readAll()
     fichier.close()
-    local morceau, err = load(source, "@" .. chemin, "t", env)
-    if not morceau then error(err, 0) end
+    return load(source, "@" .. chemin, "t", env)
+  end
+
+  env.dofile = function(chemin)
+    local morceau, err = env.loadfile(chemin)
+    if not morceau then error("dofile : " .. tostring(err), 0) end
     return morceau()
   end
   env.write = function() end

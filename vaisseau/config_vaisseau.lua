@@ -91,14 +91,28 @@ return {
 
   ------------------------------------------------------------- INTEGRATIONS --
 
-  -- Chemins des modules exterieurs. AUCUN n'est present dans le depot au
-  -- moment ou ceci est ecrit (voir docs/api_notes.md) : les pages afficheront
-  -- leur absence au lieu de simuler.
+  -- Chemins des modules exterieurs. L'AUTOPILOTE EXISTE DESORMAIS : c'est un
+  -- adaptateur vers le module standard /autopilote/autopilote.lua, qui doit
+  -- donc etre installe lui aussi (poste 'vehicule' de l'installateur). Les
+  -- deux autres restent absents du depot (voir docs/api_notes.md) et leurs
+  -- pages afficheront leur absence au lieu de simuler.
   chemins = {
     autopilote  = "/vaisseau/autopilote.lua",
     fireControl = "/vaisseau/fire_control.lua",
     ads         = "/vaisseau/ads.lua",
   },
+
+  --[[
+    BALLAST.
+    Aucune notion de ballast n'existe dans le module d'autopilote standard :
+    c'est un mecanisme propre a ce ballon. Il se commande par une impulsion
+    redstone sur la face declaree ici, et c'est la page PORTANCE qui la
+    declenche au clic.
+
+    Laisse a nil, le largage est REFUSE avec son motif. C'est voulu : un
+    equipage qui croit avoir largue continue de descendre en pensant remonter.
+  ]]
+  ballast = nil,   -- exemple : { cote = "back", duree = 0.5, niveau = 15 }
 
   ------------------------------------------------------------------ SEUILS ---
 

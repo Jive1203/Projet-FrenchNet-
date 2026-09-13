@@ -783,6 +783,35 @@ local function boucleBattement()
   end
 end
 
+--[[
+  ASSERVISSEMENT DE L'AUTOPILOTE.
+  Le module d'autopilote est appele par la couture d'integration, jamais
+  ordonnance par elle : il n'a pas de fil d'execution a lui. Sans cette boucle,
+  la page NAVIGATION transmettrait des routes que personne ne volerait -- ce
+  qui serait pire que l'absence d'autopilote, parce que l'equipage y croirait.
+
+  La boucle n'est armee que si le module est reellement present et conforme.
+]]
+local function boucleAutopilote()
+  local periode = 0.25
+  local module = liaisons and liaisons:module("autopilote")
+  if type(module) == "table" then
+    periode = tonumber(module.periode) or periode
+    -- Les refus de l'autopilote partent dans le journal de bord, la ou
+    -- l'equipage les cherchera.
+    if type(module.journaliserAvec) == "function" then
+      pcall(module.journaliserAvec, ecrire)
+    end
+  end
+
+  while not etat.arret do
+    -- 'pas' rend false quand l'autopilote n'est pas engage : c'est le cas
+    -- normal au sol, et il ne doit surtout pas noyer le journal.
+    liaisons:appeler("autopilote", "pas")
+    dormir(periode)
+  end
+end
+
 local function boucleTerminate()
   while true do
     if os.pullEventRaw("terminate") == "terminate" then
@@ -834,6 +863,8 @@ while true do
     armer(inventaire ~= nil, boucleInventaire, "soutes")
     armer(audio ~= nil, boucleAudio, "audio")
     armer(musique ~= nil and http ~= nil, boucleMusique, "musique")
+    armer(liaisons ~= nil and liaisons:disponible("autopilote"),
+      boucleAutopilote, "autopilote")
 
     -- Silence apres l'armement : sans cela, la liste des boucles reellement
     -- armees - l'information qui dit ce que ce ballon sait faire - n'allait

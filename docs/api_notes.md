@@ -30,12 +30,21 @@ sortants de FrenchNet Command** (`command/config_command.lua:271`,
 `command/command.lua:1234-1248`) : Command **émet vers** un Fire Control qui
 n'est pas dans ce dépôt.
 
-> **Ce que cela implique, sans détour.** Toute page du Doomsday Ship qui doit
-> commander l'autopilote, tirer, ou larguer des contre-mesures ne peut PAS être
-> intégrée aujourd'hui. Elle est écrite avec une **couture d'adaptation
-> explicite** (`vaisseau/liaisons.lua`) qui journalise « module absent » au lieu
-> de faire semblant. Dès que le module existe, une seule fonction est à écrire
-> par intégration.
+> **Ce que cela impliquait, sans détour.** Toute page du Doomsday Ship qui doit
+> commander l'autopilote, tirer, ou larguer des contre-mesures était écrite avec
+> une **couture d'adaptation explicite** (`vaisseau/liaisons.lua`) qui
+> journalise « module absent » au lieu de faire semblant.
+>
+> **L'autopilote, lui, n'est plus absent.** `vaisseau/autopilote.lua` remplit
+> désormais sa case : il ne contient aucune loi de pilotage, il traduit vers le
+> module standard `autopilote/autopilote.lua`. Les pages NAVIGATION et PORTANCE
+> sont donc intégrées. Le Fire Control Embarqué et l'ADS restent absents, et
+> leurs pages continuent d'afficher leur absence.
+>
+> La couture n'a pas changé de philosophie pour autant : l'adaptateur **refuse**
+> tout ce qu'il ne peut pas tenir — module standard non installé, aucun axe
+> câblé, ballast non déclaré — et dit pourquoi, plutôt que d'accepter une route
+> que le ballon ne suivra jamais.
 
 Si ces modules existent ailleurs — autre dépôt, disquette en jeu, autre
 branche non poussée — il faut les rendre visibles ici avant de parler
@@ -298,7 +307,7 @@ n'est pas lisible depuis CC: Tweaked. À écrire côté serveur.
 |---|---|
 | Framework MFD, fenêtres, pages | **Oui** — API CC: Tweaked pure |
 | Page Carte / rendu | **Oui** — `carte.lua` réutilisable |
-| Envoi de waypoints à l'autopilote | **Non** — module absent |
+| Envoi de waypoints à l'autopilote | **Oui** — `vaisseau/autopilote.lua` traduit vers le module standard. Refusé tant qu'aucun axe n'est câblé, et le refus nomme `calibrer` |
 | Pages Propulsion / Portance | **Rendu oui, données non** — API Create Aeronautics inconnue |
 | IFF « réutiliser FrenchNet Command » | **Oui**, en bibliothèque locale (`noyau.lua`), pas en service réseau |
 | Liaison FrenchNet (position + contacts) | **Oui** — protocoles §3.1 et §3.3 documentés |
@@ -355,7 +364,11 @@ supprimé. C'est une décision d'administrateur serveur, pas de code.
 pages, layout persisté), HAL de découverte, diagnostic, pages Propulsion,
 Portance/Enveloppe et Carte/Waypoints, magasin de waypoints persisté.
 
-**Non livré, et pourquoi** : l'envoi des waypoints à l'autopilote (module
-absent), les valeurs réelles de propulsion et de portance (API du mod inconnue —
-le diagnostic est l'outil qui les révélera). Les pages affichent
-« donnée indisponible » plutôt qu'un chiffre inventé.
+**Livré depuis** : l'envoi des waypoints à l'autopilote et le largage de
+ballast, via `vaisseau/autopilote.lua`. Le câblage redstone du ballon n'est plus
+à déclarer à la main : `calibrer` essaie les faces une par une et en déduit
+quel axe chacune commande.
+
+**Non livré, et pourquoi** : les valeurs réelles de propulsion et de portance
+(API du mod inconnue — le diagnostic est l'outil qui les révélera). Les pages
+affichent « donnée indisponible » plutôt qu'un chiffre inventé.

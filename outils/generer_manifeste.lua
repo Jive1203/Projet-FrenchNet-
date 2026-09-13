@@ -88,6 +88,25 @@ local POSTES = {
     { chemin = "command/noyau.lua",   cible = "/vaisseau/noyau.lua" },
     { chemin = "command/carte.lua",   cible = "/vaisseau/carte.lua" },
     { chemin = "command/scanner.lua", cible = "/vaisseau/scanner.lua" },
+
+    -- AUTOPILOTE DU BALLON. L'adaptateur ne contient aucune loi de pilotage :
+    -- il traduit vers le module standard, qui doit donc voyager avec lui. Sans
+    -- le module, la page NAVIGATION retrouverait son autopilote absent.
+    { chemin = "vaisseau/autopilote.lua" },
+    { chemin = "autopilote/autopilote.lua" },
+    { chemin = "autopilote/config_vehicule.lua", siAbsent = true },
+    { chemin = "autopilote/ravitaillement.lua", siAbsent = true },
+
+    -- Mise en service du cablage. Le ballon se dirige a la redstone comme tous
+    -- les vaisseaux du serveur, et personne ne sait d'avance quelle face
+    -- commande quoi : 'calibrer' le trouve, 'classer' identifie les blocs que
+    -- le systeme ne connait pas, 'cablage' verifie le sens des axes.
+    { chemin = "autopilote/calibration.lua" },
+    { chemin = "autopilote/calibrer.lua" },
+    { chemin = "autopilote/peripheriques.lua" },
+    { chemin = "autopilote/classer.lua" },
+    { chemin = "autopilote/cablage.lua" },
+
     { chemin = "vaisseau/config_vaisseau.lua", siAbsent = true },
     { chemin = "vaisseau/startup.lua", cible = "/startup.lua" },
   }),
