@@ -1476,6 +1476,38 @@ function autopilote.nouveau(options)
   local sorties = creerSorties(config, journal, options.commandes)
   journal.info(ETAPES.INIT_SORTIES, "sorties moteur de type '" .. tostring(sorties.type) .. "'")
 
+  -- Un vehicule dont aucun axe n'est cable obeit a tout et ne bouge jamais : il
+  -- accepte les missions, calcule ses commandes, les envoie sur des faces qui
+  -- ne mènent nulle part, et l'operateur cherche la panne dans le pilotage. On
+  -- le dit donc tout de suite, et on nomme l'outil qui repare.
+  if sorties.type ~= "injecte" then
+    local cablables, cables = { "avance", "vertical", "lacet" }, {}
+    for _, nomAxe in ipairs(cablables) do
+      local reglageAxe = ((config.sorties or {}).axes or {})[nomAxe]
+      if reglageAxe and (reglageAxe.mode or "aucun") ~= "aucun" then
+        cables[#cables + 1] = nomAxe
+      end
+    end
+    if #cables == 0 then
+      journal.erreur(ETAPES.INIT_SORTIES,
+        "AUCUN AXE N'EST CABLE : le vehicule acceptera ses ordres sans jamais "
+        .. "bouger. Lancez 'calibrer' pour que l'autopilote trouve seul quelle "
+        .. "face commande quel axe, ou renseignez sorties.axes a la main.")
+    elseif #cables < #cablables then
+      local manquants = {}
+      for _, nomAxe in ipairs(cablables) do
+        local reglageAxe = ((config.sorties or {}).axes or {})[nomAxe]
+        if not (reglageAxe and (reglageAxe.mode or "aucun") ~= "aucun") then
+          manquants[#manquants + 1] = nomAxe
+        end
+      end
+      journal.avert(ETAPES.INIT_SORTIES, "axe(s) non cable(s) : "
+        .. table.concat(manquants, ", ")
+        .. " -- le vehicule ne pourra pas corriger ces degres de liberte. "
+        .. "'calibrer' les cherchera pour vous.")
+    end
+  end
+
   local capteurCap = creerCapteurCap(config, journal)
   if type(options.cap) == "function" then
     -- Capteur de cap fourni par le programme appelant : priorite absolue.

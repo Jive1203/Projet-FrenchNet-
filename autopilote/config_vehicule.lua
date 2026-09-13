@@ -301,6 +301,41 @@ return {
     },
   },
 
+  ---------------------------------------------------------------- CALIBRATION --
+  -- Reglages de l'outil 'calibrer', qui trouve SEUL quelle face commande quel
+  -- axe et reecrit la table 'sorties.axes' ci-dessus. A ne toucher que si la
+  -- calibration se trompe : les valeurs conviennent a un dirigeable moyen.
+
+  calibration = {
+    niveauEssai   = 15,   -- niveau redstone applique pendant un essai
+    impulsion     = 3.0,  -- duree d'activation d'une face, en secondes.
+                          -- Trop court : l'effet se perd dans le bruit GPS.
+                          -- Trop long : le vehicule part loin, et une rotation
+                          -- depasse le demi-tour, ce qui brouille son sens.
+    stabilisation = 2.0,  -- pas d'attente entre deux mesures d'immobilite
+    attenteMax    = 20.0, -- attente maximale d'immobilite avant de mesurer
+    seuilBruit    = 1.2,  -- blocs : en deca, c'est du bruit de trilateration
+    seuilCap      = 6.0,  -- degres : en deca, le cap n'a pas bouge
+    seuilRotation = 0.25, -- sinus de l'angle entre deux deplacements successifs
+    rayonSecurite = 250,  -- blocs : au-dela, arret et coupure generale
+    recentrer     = true, -- repousser en sens inverse pour limiter la derive
+    arretAnticipe = true, -- stopper des que les axes essentiels sont acquis
+    delaiSatellites = 6,  -- duree d'ecoute des annonces de satellites
+  },
+
+  -------------------------------------------------------------- PERIPHERIQUES --
+  -- La calibration envoie du courant dans des sorties pour voir ce qui bouge.
+  -- Tant qu'un bloc du bord n'est pas identifie, la manoeuvre peut tout aussi
+  -- bien declencher un canon. Le programme 'classer' sert a leur attribuer une
+  -- classe a la main.
+
+  peripheriques = {
+    -- true  : la calibration REFUSE de demarrer tant qu'un peripherique n'est
+    --         pas classe. C'est le reglage sur.
+    -- false : les inconnus sont seulement signales, et leurs faces evitees.
+    exigerClassement = true,
+  },
+
   ------------------------------------------------------------------ CARBURANT --
   -- Surveillance du reservoir et ravitaillement automatique. La position de la
   -- station n'est PAS ici : c'est la constante verrouillee de ravitaillement.lua.

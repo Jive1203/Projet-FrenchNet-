@@ -262,12 +262,149 @@ function M.creer(options)
     end,
   }
 
+  ------------------------------------------------------------ cablage reel
+  -- Par defaut la redstone du banc est PASSIVE : les essais posent
+  -- directement etat.vehicule.commandes. Pour eprouver la calibration il faut
+  -- l'inverse -- un cablage cache que le programme doit retrouver tout seul.
+  -- 'options.cablageReel' le fournit :
+  --
+  --   cablageReel = {
+  --     front      = { axe = "avance",   signe =  1 },
+  --     top        = { axe = "vertical", signe =  1 },
+  --     ["#7:left"]= { axe = "lacet",    signe = -1 },   -- face d'un satellite
+  --   }
+  --
+  -- Absent, le banc se comporte exactement comme avant.
+  etat.faces = {}          -- [cle de face] = niveau redstone ; "back" ou "#7:top"
+  etat.cablageReel = options.cablageReel
+  etat.trames = {}         -- trames recues par les satellites simules
+
+  local function recalculerCommandes()
+    if not etat.cablageReel then return end
+    local commandes = { avance = 0, vertical = 0, lacet = 0, lateral = 0 }
+    for cle, definition in pairs(etat.cablageReel) do
+      local niveau    = etat.faces[cle] or 0
+      local neutre    = definition.neutre or 0
+      local amplitude = definition.amplitude or (15 - neutre)
+      if amplitude ~= 0 then
+        local valeur = ((niveau - neutre) / amplitude) * (definition.signe or 1)
+        local axe = definition.axe
+        commandes[axe] = borner((commandes[axe] or 0) + valeur, -1, 1)
+      end
+    end
+    etat.vehicule.commandes = commandes
+  end
+  etat.recalculerCommandes = recalculerCommandes
+
+  local function poserFace(cle, valeur)
+    etat.faces[cle] = valeur
+    recalculerCommandes()
+  end
+
   local redstoneMock = {
-    setAnalogOutput = function(cote, valeur) etat.redstone[cote] = valeur end,
+    setAnalogOutput = function(cote, valeur)
+      etat.redstone[cote] = valeur
+      poserFace(cote, valeur)
+    end,
     getAnalogOutput = function(cote) return etat.redstone[cote] or 0 end,
-    setOutput = function(cote, actif) etat.redstone[cote] = actif and 15 or 0 end,
+    setOutput = function(cote, actif)
+      etat.redstone[cote] = actif and 15 or 0
+      poserFace(cote, actif and 15 or 0)
+    end,
     getOutput = function(cote) return (etat.redstone[cote] or 0) > 0 end,
+    getAnalogInput = function(cote) return etat.entrees and etat.entrees[cote] or 0 end,
+    getInput = function(cote) return (etat.entrees and etat.entrees[cote] or 0) > 0 end,
   }
+
+  ------------------------------------------------------------- satellites
+  -- Ordinateurs de sortie deportes simules. Ils appliquent les trames
+  -- 'FRENCHNET_SORTIE' sur leurs propres faces, accusent reception, et
+  -- s'annoncent quand la ligne est silencieuse -- comme les vrais.
+  etat.satellites = {}
+  for ordinateur, definition in pairs(options.satellites or {}) do
+    local autorisees = {}
+    for _, cote in ipairs(definition.cotes or { "top", "bottom", "left", "right", "front", "back" }) do
+      autorisees[cote] = true
+    end
+    etat.satellites[ordinateur] = {
+      identifiant = definition.identifiant or ("SAT-" .. ordinateur),
+      cotes       = definition.cotes or { "top", "bottom", "left", "right", "front", "back" },
+      autorisees  = autorisees,
+      vehicule    = definition.vehicule,
+      trames      = 0,
+    }
+  end
+
+  local fileRednet = {}
+  local tourAnnonce = 0
+
+  local rednetMock = {}
+  function rednetMock.open() etat.rednetOuvert = true end
+  function rednetMock.close() etat.rednetOuvert = false end
+  function rednetMock.isOpen() return etat.rednetOuvert ~= false end
+
+  function rednetMock.send(destinataire, message, protocole)
+    local satellite = etat.satellites[destinataire]
+    if not (satellite and type(message) == "table") then return true end
+    etat.trames[#etat.trames + 1] =
+      { destinataire = destinataire, message = message, t = etat.horloge }
+
+    if message.protocole == "FRENCHNET_SORTIE" then
+      -- Un satellite refuse les trames d'un autre vehicule : c'est ce qui
+      -- empeche deux appareils cote a cote de se commander l'un l'autre.
+      if satellite.vehicule and message.vehicule
+         and satellite.vehicule ~= message.vehicule then
+        return true
+      end
+      satellite.trames = satellite.trames + 1
+      for cote, niveau in pairs(message.sorties or {}) do
+        if satellite.autorisees[cote] then
+          poserFace("#" .. destinataire .. ":" .. cote, niveau)
+        end
+      end
+      fileRednet[#fileRednet + 1] = { destinataire, {
+        protocole   = "FRENCHNET_SORTIE_ACK",
+        identifiant = satellite.identifiant,
+        vehicule    = message.vehicule,
+        sequence    = message.sequence,
+        cotes       = satellite.cotes,
+        entrees     = {},
+      }, protocole }
+    end
+    return true
+  end
+
+  function rednetMock.broadcast(message, protocole)
+    for ordinateur in pairs(etat.satellites) do
+      rednetMock.send(ordinateur, message, protocole)
+    end
+    return true
+  end
+
+  function rednetMock.receive(protocole, delai)
+    if #fileRednet > 0 then
+      local trame = table.remove(fileRednet, 1)
+      return trame[1], trame[2], trame[3]
+    end
+    -- Ligne silencieuse : les satellites s'annoncent a tour de role.
+    local ordinateurs = {}
+    for ordinateur in pairs(etat.satellites) do ordinateurs[#ordinateurs + 1] = ordinateur end
+    table.sort(ordinateurs)
+    if #ordinateurs > 0 then
+      avancerSimulation(math.min(delai or 1, 1))
+      tourAnnonce = tourAnnonce % #ordinateurs + 1
+      local ordinateur = ordinateurs[tourAnnonce]
+      local satellite = etat.satellites[ordinateur]
+      return ordinateur, {
+        protocole   = "FRENCHNET_SORTIE_ANNONCE",
+        identifiant = satellite.identifiant,
+        vehicule    = satellite.vehicule,
+        cotes       = satellite.cotes,
+      }, protocole
+    end
+    avancerSimulation(delai or 1)
+    return nil
+  end
 
   ------------------------------------------------------------------ terminal
   -- Terminal a tampon : permet de verifier ce que l'interface affiche
@@ -368,12 +505,45 @@ function M.creer(options)
   env.gps       = gps
   env.redstone  = redstoneMock
   env.rs        = redstoneMock
+  env.rednet    = rednetMock
   env.sleep     = sleep
-  env.peripheral= {
-    getNames = function() return {} end,
-    getType  = function() return nil end,
-    isPresent= function() return false end,
-    wrap     = function() return nil end,
+  -- Peripheriques simules. Par defaut il n'y en a aucun, comme avant ;
+  -- 'options.peripheriques' en declare :
+  --
+  --   peripheriques = {
+  --     boussole = { type = "compass", methodes = { getYaw = function() ... end } },
+  --     top      = { type = "mod:truc_inconnu" },   -- accole a la face du haut
+  --   }
+  etat.peripheriques = options.peripheriques or {}
+
+  env.peripheral = {
+    getNames = function()
+      local noms = {}
+      for nom in pairs(etat.peripheriques) do noms[#noms + 1] = nom end
+      table.sort(noms)
+      return noms
+    end,
+    getType = function(nom)
+      local p = etat.peripheriques[nom]
+      return p and (p.type or "inconnu") or nil
+    end,
+    getMethods = function(nom)
+      local p = etat.peripheriques[nom]
+      if not p then return nil end
+      local noms = {}
+      for methode in pairs(p.methodes or {}) do noms[#noms + 1] = methode end
+      table.sort(noms)
+      return noms
+    end,
+    isPresent = function(nom) return etat.peripheriques[nom] ~= nil end,
+    wrap = function(nom)
+      local p = etat.peripheriques[nom]
+      return p and (p.methodes or {}) or nil
+    end,
+    hasType = function(nom, genre)
+      local p = etat.peripheriques[nom]
+      return p ~= nil and p.type == genre
+    end,
   }
   env.colors  = setmetatable({}, { __index = function() return 1 end })
   env.colours = env.colors
