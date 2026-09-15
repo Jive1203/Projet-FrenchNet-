@@ -8,6 +8,12 @@
   Deux ecrans :
     1. CONFIGURATION  - tous les reglages du vehicule, section par section.
                         Se lance au sol, sans GPS et sans moteurs.
+                        La section CONTENEURS est a longueur variable : elle
+                        decrit les conteneurs embarques (peripherique, role,
+                        position par rapport au centre du vehicule) et se pilote
+                        au clavier - N ajouter, Suppr retirer, D detecter les
+                        inventaires branches. C'est la page que consomme le
+                        systeme de livraison FrenchNet.
     2. REGLAGE EN VOL - ajustement a chaud des gains PID de chaque axe, avec
                         affichage temps reel de l'erreur, de la vitesse cible,
                         de la vitesse reelle, de la commande envoyee, et d'un
@@ -30,6 +36,10 @@ local autopilote = dofile(CHEMIN_MODULE)
 
 local interface = {}
 interface.VERSION = "1.0.0"
+
+-- Expose au banc d'essai les rouages de la section a longueur variable, dans
+-- le meme esprit que autopilote.interne. Renseigne en fin de fichier.
+interface.interne = {}
 
 --------------------------------------------------------------------------------
 -- 1. BOITE A OUTILS D'AFFICHAGE
@@ -499,7 +509,16 @@ local SCHEMA = {
 local LARGEUR_SECTIONS = 17
 
 local function valeurChamp(config, champ)
+  -- Un champ peut porter ses propres accesseurs : c'est indispensable pour les
+  -- sections a longueur variable (les conteneurs), dont les indices sont
+  -- numeriques et ne passent pas par un chemin pointe.
+  if champ.lire then return champ.lire(config) end
   return autopilote.interne.lire(config, champ.cle)
+end
+
+local function poser(config, champ, valeur)
+  if champ.ecrire then return champ.ecrire(config, valeur) end
+  return autopilote.interne.ecrire(config, champ.cle, valeur)
 end
 
 --- Applique une valeur saisie au bon type.
@@ -508,22 +527,145 @@ local function definirChamp(config, champ, texte)
   if champ.type == "nombre" then
     local valeur = tonumber(texte)
     if texte == "" or texte == "-" then
-      autopilote.interne.ecrire(config, champ.cle, nil)
+      poser(config, champ, nil)
       return true
     end
     if not valeur then return false, "valeur numerique attendue" end
     if champ.mini and valeur < champ.mini then
       return false, string.format("minimum %s", tostring(champ.mini))
     end
-    autopilote.interne.ecrire(config, champ.cle, valeur)
+    poser(config, champ, valeur)
   else
     if texte == "" then
-      autopilote.interne.ecrire(config, champ.cle, nil)
+      poser(config, champ, nil)
     else
-      autopilote.interne.ecrire(config, champ.cle, texte)
+      poser(config, champ, texte)
     end
   end
   return true
+end
+
+--------------------------------------------------------------------------------
+-- 2 bis. SECTION 'CONTENEURS' - A LONGUEUR VARIABLE
+--    Un vehicule cargo porte un nombre quelconque de conteneurs, chacun avec
+--    son peripherique, son role et sa position par rapport au centre. Le
+--    schema fixe ne peut pas decrire cela : cette section est donc reconstruite
+--    a partir de la configuration chaque fois qu'elle change.
+--
+--    C'est la page que consomme le systeme de livraison FrenchNet.
+--------------------------------------------------------------------------------
+
+local ROLES_CONTENEUR = { "expedition", "recette", "tampon" }
+
+local AIDE_CONTENEURS =
+  "N ajouter   Suppr retirer   D detecter les inventaires branches"
+
+--- Inventaires visibles sur le reseau de modems filaires du vehicule.
+local function inventairesDetectes()
+  local noms = {}
+  local ok, liste = pcall(peripheral.getNames)
+  if not ok or type(liste) ~= "table" then return noms end
+  for _, nom in ipairs(liste) do
+    local estInventaire = false
+    if peripheral.hasType then
+      local okType, resultat = pcall(peripheral.hasType, nom, "inventory")
+      estInventaire = okType and resultat == true
+    end
+    if not estInventaire then
+      -- Repli pour les versions anterieures a CC: Tweaked 1.89.
+      local okWrap, p = pcall(peripheral.wrap, nom)
+      estInventaire = okWrap and type(p) == "table" and type(p.list) == "function"
+    end
+    if estInventaire then noms[#noms + 1] = nom end
+  end
+  table.sort(noms)
+  return noms
+end
+
+--- Accesseurs d'un champ de conteneur : l'indice reste un VRAI indice de
+-- tableau, ce qu'un chemin pointe ne saurait pas preserver.
+local function accesseursConteneur(index, chemin)
+  local function lire(config)
+    local page = config.conteneurs and config.conteneurs[index]
+    if not page then return nil end
+    return autopilote.interne.lire(page, chemin)
+  end
+  local function ecrire(config, valeur)
+    config.conteneurs = config.conteneurs or {}
+    config.conteneurs[index] = config.conteneurs[index] or {}
+    autopilote.interne.ecrire(config.conteneurs[index], chemin, valeur)
+  end
+  return lire, ecrire
+end
+
+local function sectionConteneurs(config)
+  local conteneurs = config.conteneurs or {}
+  local inventaires = inventairesDetectes()
+  local champs = {}
+
+  for index in ipairs(conteneurs) do
+    champs[#champs + 1] = {
+      type = "entete", index = index, aide = AIDE_CONTENEURS,
+      cle = ("conteneurs[%d]"):format(index),
+      libelle = ("-- Conteneur %d"):format(index),
+    }
+
+    local function ajouter(chemin, libelle, type_, extra)
+      local lire, ecrire = accesseursConteneur(index, chemin)
+      local champ = {
+        cle = ("conteneurs[%d].%s"):format(index, chemin),
+        libelle = libelle, type = type_, lire = lire, ecrire = ecrire, index = index,
+      }
+      for cle, valeur in pairs(extra or {}) do champ[cle] = valeur end
+      champs[#champs + 1] = champ
+    end
+
+    ajouter("nom", "Nom", "texte",
+      { aide = "libelle lisible, repris dans les journaux de livraison" })
+    ajouter("peripherique", "Peripherique", "choix",
+      { options = inventaires,
+        aide = "nom reseau rendu par peripheral.getNames() - D pour redetecter" })
+    ajouter("role", "Role", "choix",
+      { options = ROLES_CONTENEUR,
+        aide = "expedition = livre au client | recette = recoit le paiement | tampon = interne" })
+    ajouter("decalage.x", "Decalage x (tribord)", "nombre",
+      { aide = "position du conteneur par rapport au CENTRE du vehicule" })
+    ajouter("decalage.y", "Decalage y (haut)", "nombre")
+    ajouter("decalage.z", "Decalage z (avant)", "nombre")
+    ajouter("priorite", "Priorite", "nombre",
+      { aide = "ordre de remplissage au chargement (1 = rempli en premier)", mini = 1 })
+    ajouter("capacite", "Capacite (emplacements)", "nombre", { mini = 0 })
+  end
+
+  champs[#champs + 1] = {
+    type = "action", action = "ajouter", cle = "conteneurs",
+    libelle = "[ Ajouter un conteneur ]", aide = AIDE_CONTENEURS,
+  }
+  champs[#champs + 1] = {
+    type = "action", action = "detecter", cle = "conteneurs",
+    libelle = "[ Detecter les inventaires ]",
+    aide = ("%d inventaire(s) visible(s) sur le reseau"):format(#inventaires),
+  }
+
+  return { titre = "Conteneurs", champs = champs, conteneurs = true }
+end
+
+--- Schema complet : les sections fixes, plus la section a longueur variable.
+-- Elle est inseree juste AVANT la section verrouillee du ravitaillement, donc
+-- en fin de liste : les sections existantes gardent ainsi leur rang, et toute
+-- navigation deja apprise - celle des bancs d'essai comprise - reste valable.
+local function construireSections(config)
+  local sections = {}
+  local inseree = false
+  for _, section in ipairs(SCHEMA) do
+    if not inseree and section.verrouille then
+      sections[#sections + 1] = sectionConteneurs(config)
+      inseree = true
+    end
+    sections[#sections + 1] = section
+  end
+  if not inseree then sections[#sections + 1] = sectionConteneurs(config) end
+  return sections
 end
 
 function interface.configurer(options)
@@ -551,7 +693,21 @@ function interface.configurer(options)
     etat.couleurMessage = PALETTE.alerte
   end
 
-  local function sectionCourante() return SCHEMA[etat.section] end
+  -- Le schema affiche est reconstruit a chaque changement de structure : la
+  -- section Conteneurs a une longueur variable.
+  local sections = construireSections(config)
+
+  local function sectionCourante() return sections[etat.section] end
+  local function estSectionConteneurs()
+    local s = sectionCourante()
+    return s and s.conteneurs == true
+  end
+  local function reconstruire()
+    sections = construireSections(config)
+    local s = sections[etat.section]
+    local nombre = s and #s.champs or 0
+    if etat.champ > nombre then etat.champ = math.max(1, nombre) end
+  end
   local function champCourant()
     local s = sectionCourante()
     return s and s.champs[etat.champ] or nil
@@ -578,7 +734,7 @@ function interface.configurer(options)
     for ligne = 1, visiblesSections do
       local index = ligne + etat.defilementSections
       local y = 1 + ligne
-      local section = SCHEMA[index]
+      local section = sections[index]
       if section then
         local actif = (index == etat.section)
         fond(actif and PALETTE.selection or PALETTE.fondPanneau)
@@ -649,10 +805,80 @@ function interface.configurer(options)
     etat.couleurMessage = couleur or PALETTE.texteFaible
   end
 
+  ------------------------------------------------------ actions 'Conteneurs' --
+  local function ajouterConteneur(peripherique)
+    config.conteneurs = config.conteneurs or {}
+    local index = #config.conteneurs + 1
+    config.conteneurs[index] = {
+      nom          = ("Conteneur %d"):format(index),
+      peripherique = peripherique or "",
+      role         = "expedition",
+      decalage     = { x = 0, y = 0, z = 0 },
+      priorite     = index,
+      capacite     = 27,
+    }
+    etat.modifie = true
+    reconstruire()
+    return index
+  end
+
+  local function supprimerConteneurCourant()
+    local champ = sections[etat.section] and sections[etat.section].champs[etat.champ]
+    local index = champ and champ.index
+    if not index or not (config.conteneurs and config.conteneurs[index]) then
+      signaler("Placez-vous sur un conteneur pour le retirer", PALETTE.alerte)
+      return
+    end
+    local nom = config.conteneurs[index].nom or ("conteneur " .. index)
+    table.remove(config.conteneurs, index)
+    etat.modifie = true
+    reconstruire()
+    signaler(("'%s' retire (%d conteneur(s) restant(s))"):format(
+      tostring(nom), #config.conteneurs), PALETTE.bon)
+  end
+
+  local function detecterConteneurs()
+    local deja = {}
+    for _, page in ipairs(config.conteneurs or {}) do
+      if page.peripherique and page.peripherique ~= "" then deja[page.peripherique] = true end
+    end
+    local ajoutes = 0
+    for _, nom in ipairs(inventairesDetectes()) do
+      if not deja[nom] then
+        local index = ajouterConteneur(nom)
+        config.conteneurs[index].nom = nom
+        ajoutes = ajoutes + 1
+      end
+    end
+    reconstruire()
+    if ajoutes == 0 then
+      signaler("Aucun inventaire nouveau : tous sont deja declares", PALETTE.texteFaible)
+    else
+      signaler(("%d conteneur(s) ajoute(s) - reglez leur role et leur decalage"):format(ajoutes),
+        PALETTE.bon)
+    end
+  end
+
   local function modifierChamp()
     local section = sectionCourante()
     local champ = champCourant()
     if not champ then return end
+
+    if champ.type == "entete" then
+      signaler(AIDE_CONTENEURS, PALETTE.texteFaible)
+      return
+    end
+    if champ.type == "action" then
+      if champ.action == "ajouter" then
+        local index = ajouterConteneur()
+        signaler(("Conteneur %d cree - reglez son peripherique, son role"
+          .. " et son decalage"):format(index), PALETTE.bon)
+      elseif champ.action == "detecter" then
+        detecterConteneurs()
+      end
+      return
+    end
+
     if champ.verrouille or (section and section.verrouille) then
       signaler("Valeur verrouillee : constante de reseau, non modifiable ici",
         PALETTE.verrou)
@@ -667,19 +893,21 @@ function interface.configurer(options)
     local valeur = valeurChamp(config, champ)
 
     if champ.type == "booleen" then
-      autopilote.interne.ecrire(config, champ.cle, not valeur)
+      poser(config, champ, not valeur)
       etat.modifie = true
       signaler(champ.libelle .. " -> " .. (not valeur and "oui" or "non"), PALETTE.bon)
       return
     end
 
-    if champ.type == "choix" then
-      local options = champ.options or {}
+    -- Une liste de choix vide (aucun inventaire detecte, par exemple) bascule
+    -- en saisie libre : mieux vaut pouvoir taper le nom que rester bloque.
+    if champ.type == "choix" and #(champ.options or {}) > 0 then
+      local options = champ.options
       local suivant = 1
       for i, option in ipairs(options) do
         if option == tostring(valeur) then suivant = i % #options + 1 break end
       end
-      autopilote.interne.ecrire(config, champ.cle, options[suivant])
+      poser(config, champ, options[suivant])
       etat.modifie = true
       signaler(champ.libelle .. " -> " .. tostring(options[suivant]), PALETTE.bon)
       return
@@ -731,7 +959,7 @@ function interface.configurer(options)
 
       if touche == keys.down then
         if etat.focus == "sections" then
-          etat.section = math.min(#SCHEMA, etat.section + 1)
+          etat.section = math.min(#sections, etat.section + 1)
           etat.champ, etat.defilementChamps = 1, 0
         else
           etat.champ = math.min(#champs, etat.champ + 1)
@@ -749,6 +977,13 @@ function interface.configurer(options)
         etat.focus = "sections"
       elseif touche == keys.enter or touche == keys.numPadEnter then
         if etat.focus == "sections" then etat.focus = "champs" else modifierChamp() end
+      elseif touche == keys.n and estSectionConteneurs() then
+        local index = ajouterConteneur()
+        signaler(("Conteneur %d cree"):format(index), PALETTE.bon)
+      elseif touche == keys.delete and estSectionConteneurs() then
+        supprimerConteneurCourant()
+      elseif touche == keys.d and estSectionConteneurs() then
+        detecterConteneurs()
       elseif touche == keys.s then
         sauvegarder()
       elseif touche == keys.r then
@@ -773,7 +1008,7 @@ function interface.configurer(options)
       if y > 1 and y < hauteur - 1 then
         if x <= LARGEUR_SECTIONS then
           local index = y - 1 + etat.defilementSections
-          if SCHEMA[index] then
+          if sections[index] then
             etat.section, etat.champ, etat.defilementChamps = index, 1, 0
             etat.focus = "sections"
           end
@@ -790,7 +1025,7 @@ function interface.configurer(options)
     elseif nom == "mouse_scroll" then
       local direction = evenement[2]
       if etat.focus == "sections" then
-        etat.section = math.max(1, math.min(#SCHEMA, etat.section + direction))
+        etat.section = math.max(1, math.min(#sections, etat.section + direction))
         etat.champ, etat.defilementChamps = 1, 0
       else
         local section = sectionCourante()
@@ -1126,5 +1361,11 @@ end
 if lanceDepuisLeShell() then
   interface.demarrer(...)
 end
+
+interface.interne.construireSections  = construireSections
+interface.interne.sectionConteneurs   = sectionConteneurs
+interface.interne.inventairesDetectes = inventairesDetectes
+interface.interne.accesseursConteneur = accesseursConteneur
+interface.interne.ROLES_CONTENEUR     = ROLES_CONTENEUR
 
 return interface
