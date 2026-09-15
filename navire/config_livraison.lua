@@ -56,8 +56,55 @@ return {
     delaiArriveeMax = 900,
   },
 
+  ------------------------------------------------------------------ CENTRAL ---
+  -- L'ORDINATEUR CENTRAL DETIENT LES PRIX. Le navire ne fixe rien : il
+  -- applique la grille diffusee, et la section 'tarif' plus bas ne sert que
+  -- de repli tant que le central ne s'est pas manifeste.
+  central = {
+    -- Identifiant de la centrale tarifaire. Une grille qui se reclame d'un
+    -- autre identifiant est ignoree.
+    identifiant = "CENTRALE-01",
+
+    -- JETON PARTAGE, identique sur le central, les navires et les bornes.
+    -- Il signe la grille recue et les certificats de pre-paiement emis par
+    -- les bornes. Ce n'est pas de la cryptographie : qui lit ce fichier
+    -- connait le jeton. Cela empeche l'erreur et le bricolage, pas un joueur
+    -- qui aurait deja acces a l'ordinateur.
+    jeton = "CHANGEZ-MOI-jeton-partage-frenchnet",
+
+    -- true : aucune commande n'est acceptee tant que la grille centrale n'a
+    -- pas ete recue. Plus sur commercialement, mais le navire est inutile si
+    -- le central tombe.
+    exigerCentral = false,
+
+    -- Attente d'une reponse du central au demarrage, en secondes.
+    delaiDemande = 5,
+  },
+
+  ---------------------------------------------------------------- PENALITES ---
+  -- Repli applique tant que le central n'a pas diffuse son propre regime.
+  -- Un client qui laisse le navire repartir sans payer est marque.
+  penalites = {
+    -- "prepaiement" : ses commandes suivantes exigent un reglement a la borne
+    -- "refus"       : ses commandes sont refusees jusqu'a expiration
+    mode = "prepaiement",
+    duree = 3600,                  -- secondes
+    incidentsAvantPenalite = 1,
+    effacerApres = 86400,          -- oubli d'un incident reste sans suite
+  },
+
   --------------------------------------------------------------- CONTENEURS ---
   -- UNE PAGE PAR CONTENEUR DE CARGAISON.
+  --
+  -- LE PLUS SIMPLE EST DE NE PAS LES ECRIRE ICI : l'interface de reglage de
+  -- l'autopilote a une section CONTENEURS qui les detecte, les configure et
+  -- les ecrit dans /autopilote/config_vehicule.lua.
+  --
+  --     interface        puis section Conteneurs
+  --                      D detecter   N ajouter   Suppr retirer
+  --
+  -- Ce qui suit reste utile pour un parc de vaisseaux identiques, ou pour
+  -- relire d'un coup d'oeil ce qui est branche.
   -- 'peripherique' est le nom RESEAU rendu par peripheral.getNames() : le
   -- conteneur doit etre relie au calculateur par un modem filaire.
   -- 'decalage' est sa position PAR RAPPORT AU CENTRE DU NAVIRE, en blocs,
@@ -123,8 +170,10 @@ return {
     -- Nom impose du coffre de reception de la marchandise. nil = detection.
     coffreReception = nil,
 
-    -- Attente du paiement. 0 = attendre indefiniment, comme exige.
-    delaiPaiementMax     = 0,
+    -- Attente du paiement a l'arrivee, en secondes. Passe ce delai, le
+    -- navire quitte la zone, la commande est annulee et le client penalise.
+    -- 0 = attendre indefiniment (deconseille : le navire y reste bloque).
+    delaiPaiementMax     = 300,
     intervallePaiement   = 5,    -- secondes entre deux verifications
     rappelPaiementToutes = 60,   -- secondes entre deux lignes de journal
 

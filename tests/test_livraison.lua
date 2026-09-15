@@ -346,6 +346,18 @@ return {
     chemin          = "/autopilote/autopilote.lua",
     delaiArriveeMax = 120,
   },
+  central = {
+    identifiant   = "CENTRALE-01",
+    jeton         = "jeton-de-banc",
+    exigerCentral = @@EXIGER_CENTRAL@@,
+    delaiDemande  = 3,
+  },
+  penalites = {
+    mode                   = "@@MODE_PENALITE@@",
+    duree                  = 3600,
+    incidentsAvantPenalite = 1,
+    effacerApres           = 86400,
+  },
   conteneurs = @@CONTENEURS@@,
   livraison = {
     conteneursSource     = { "create:item_vault_0" },
@@ -378,7 +390,9 @@ return {
 ]]
   local valeurs = {
     IDENTIFIANT = "DIRI-TEST-01",
-    DELAI_PAIEMENT = "0",
+    EXIGER_CENTRAL = "false",
+    MODE_PENALITE = "prepaiement",
+    DELAI_PAIEMENT = "300",   -- 5 minutes : le defaut du systeme
     CONTENEURS = [[{
     { nom = "Soute", peripherique = "minecraft:barrel_0",
       decalage = { x = 0, y = -1, z = 2 }, role = "expedition", priorite = 1 },
@@ -562,11 +576,11 @@ do
 end
 
 --------------------------------------------------------------------------------
-titre("D. Le paiement arrive en retard : le navire attend en boucle")
+titre("D. Le paiement arrive dans les 5 minutes : le navire attend")
 --------------------------------------------------------------------------------
 
 do
-  preparerNavire()   -- delaiPaiementMax = 0 : attente illimitee
+  preparerNavire()   -- delaiPaiementMax = 300 : la fenetre de cinq minutes
   local craftos = dofile(SCR .. "/craftos.lua")
   local motif, etat = lancerNavire(craftos, {
     inventaires = inventairesNavire(false),   -- coffre de paiement vide au depart
@@ -582,7 +596,10 @@ do
   })
   local sorties = etat.sorties
 
-  verifier("attente du paiement journalisee", contient(sorties, "attente de 5 x minecraft:diamond"))
+  verifier("attente du paiement journalisee",
+    contient(sorties, "attente de 5 x minecraft:diamond"))
+  verifier("la fenetre de cinq minutes est annoncee",
+    contient(sorties, "abandon apres 300 s"))
   verifier("relance periodique pendant l'attente",
     contient(sorties, "paiement incomplet : 0 / 5 x minecraft:diamond"))
   verifier("paiement detecte des qu'il est depose", contient(sorties, "paiement detecte"))
@@ -620,11 +637,24 @@ do
     local recu = craftos.contenu("minecraft:chest_reception")
     return next(recu) == nil
   end)())
-  verifier("la cargaison repart avec le navire", (function()
-    local soute = craftos.contenu("minecraft:barrel_0")
-    return soute["minecraft:cobblestone"] == 128
-  end)())
   verifier("retour a la base malgre l'echec", contient(sorties, "navire rentre au point 'BASE'"))
+  verifier("la cargaison est reversee au stock source des le retour", (function()
+    local soute = craftos.contenu("minecraft:barrel_0")
+    return next(soute) == nil
+  end)(), (function()
+    local soute = craftos.contenu("minecraft:barrel_0")
+    return tostring(soute["minecraft:cobblestone"])
+  end)())
+  verifier("le stock source est de nouveau complet", (function()
+    local vault = craftos.contenu("create:item_vault_0")
+    return vault["minecraft:cobblestone"] == 50000 and vault["minecraft:iron_ingot"] == 5000
+  end)(), (function()
+    local vault = craftos.contenu("create:item_vault_0")
+    return tostring(vault["minecraft:cobblestone"]) .. "/" .. tostring(vault["minecraft:iron_ingot"])
+  end)())
+  verifier("le client est penalise", contient(sorties, "'Faction Rouge' penalise"))
+  verifier("le mode et la duree de la penalite sont journalises",
+    contient(sorties, "mode prepaiement pendant 3600 s"))
 end
 
 --------------------------------------------------------------------------------
@@ -868,7 +898,207 @@ return {
 end
 
 --------------------------------------------------------------------------------
-titre("M. Borne publique : parcours complet d'une commande")
+titre("M. Grille tarifaire centrale : le navire applique, il ne decide pas")
+--------------------------------------------------------------------------------
+
+local JETON = "jeton-de-banc"
+
+local function messageTarif(modifs)
+  local m = {
+    central  = "CENTRALE-01",
+    tarif    = {
+      objetPaiement      = "minecraft:diamond",
+      forfaitBase        = 50,
+      prixUnitaireDefaut = 0,
+      parObjet           = {},
+      coefficientVitesse = { fast = 2.0, slow = 1.0 },
+      prixMinimum        = 1,
+    },
+    penalites = { mode = "prepaiement", duree = 3600,
+                  incidentsAvantPenalite = 1, effacerApres = 86400 },
+    sequence  = 7,
+    jeton     = JETON,
+  }
+  for cle, valeur in pairs(modifs or {}) do m[cle] = valeur end
+  local jeton = m.jeton
+  m.jeton = nil
+  if m.signature == nil then
+    m.signature = Protocole.signerTarif(m.tarif, m.sequence, jeton)
+  end
+  return Protocole.enveloppe(Protocole.TYPES.TARIF, m)
+end
+
+do
+  preparerNavire({ sansAutopilote = true })   -- la file suffit : on teste le prix
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerNavire(craftos, {
+    actions = {
+      { t = 12, fn = function(m)
+        m.injecterRednet(90, messageTarif(), "frenchnet_livraison")
+      end },
+      { t = 16, fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "PRIX-1" }), "frenchnet_livraison")
+      end },
+      -- Grille alteree : signature qui ne correspond plus.
+      { t = 20, fn = function(m)
+        m.injecterRednet(91, messageTarif({ sequence = 8, signature = "0000000000000000" }),
+          "frenchnet_livraison")
+      end },
+      -- Grille d'une autre centrale.
+      { t = 24, fn = function(m)
+        m.injecterRednet(92, messageTarif({ central = "CENTRALE-PIRATE", sequence = 9 }),
+          "frenchnet_livraison")
+      end },
+      -- Ancienne grille, moins chere, rejouee.
+      { t = 28, fn = function(m)
+        local ancienne = messageTarif({ sequence = 2 })
+        ancienne.tarif.forfaitBase = 1
+        ancienne.signature = Protocole.signerTarif(ancienne.tarif, 2, JETON)
+        m.injecterRednet(90, ancienne, "frenchnet_livraison")
+      end },
+      { t = 32, fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "PRIX-2" }), "frenchnet_livraison")
+      end },
+    },
+    secondes = 200,
+  })
+  local sorties = etat.sorties
+  local prix = {}
+  for _, a in ipairs(accuses(etat)) do
+    if a.paiement then prix[a.commande] = a.paiement.quantite end
+  end
+
+  verifier("le navire reclame la grille au demarrage",
+    contient(sorties, "etape: reception de la grille tarifaire centrale"))
+  verifier("grille centrale adoptee", contient(sorties, "grille n7 adoptee"))
+  verifier("le prix facture est celui du central, pas celui du fichier local",
+    prix["PRIX-1"] == 50, tostring(prix["PRIX-1"]))
+  verifier("une grille alteree est refusee",
+    contient(sorties, "signature invalide"))
+  verifier("une grille d'une autre centrale est ignoree",
+    contient(sorties, "elle se reclame de 'CENTRALE-PIRATE'"))
+  verifier("une ancienne grille rejouee est refusee",
+    contient(sorties, "grille perimee"))
+  verifier("le prix n'a pas baisse apres la tentative de rejeu",
+    prix["PRIX-2"] == 50, tostring(prix["PRIX-2"]))
+end
+
+do
+  -- Sans grille centrale et avec exigerCentral, mieux vaut refuser que
+  -- facturer au tarif de repli.
+  preparerNavire({ sansAutopilote = true, config = { EXIGER_CENTRAL = "true" } })
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerNavire(craftos, {
+    actions = {
+      { t = 12, fn = function(m)
+        m.injecterRednet(42, commandeRednet(), "frenchnet_livraison")
+      end },
+    },
+    secondes = 120,
+  })
+  local liste = accuses(etat)
+  verifier("central exige et muet : la commande est refusee",
+    #liste > 0 and liste[1].accepte == false, #liste > 0 and tostring(liste[1].motif) or "aucun")
+  verifier("le motif nomme la grille centrale",
+    #liste > 0 and tostring(liste[1].motif):find("centrale", 1, true) ~= nil)
+end
+
+--------------------------------------------------------------------------------
+titre("N. Penalites : le mauvais payeur doit regler d'avance")
+--------------------------------------------------------------------------------
+
+do
+  -- Premiere commande : jamais payee -> penalite. Deuxieme : refusee faute de
+  -- pre-paiement. Troisieme : certifiee par la borne -> livree sans attente.
+  preparerNavire({ config = { DELAI_PAIEMENT = "30" } })
+  local craftos = dofile(SCR .. "/craftos.lua")
+
+  local commandePrepayee = commandeRednet({ id = "PREPAYEE-1" })
+  local paiement = { objet = "minecraft:diamond", quantite = 5 }
+  commandePrepayee.commande.prepaiement = {
+    certifie = true, objet = paiement.objet, quantite = paiement.quantite, borne = 7,
+    signature = Protocole.signerPrepaiement("PREPAYEE-1", paiement, JETON),
+  }
+
+  local commandeFraudee = commandeRednet({ id = "FRAUDE-1" })
+  commandeFraudee.commande.prepaiement = {
+    certifie = true, objet = paiement.objet, quantite = paiement.quantite, borne = 7,
+    signature = "certificat-bidon",
+  }
+
+  local motif, etat = lancerNavire(craftos, {
+    inventairesNavire = nil,
+    inventaires = inventairesNavire(false),   -- personne ne paiera la premiere
+    actions = {
+      { t = 12,  fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "IMPAYEE-1" }), "frenchnet_livraison")
+      end },
+      { t = 200, fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "APRES-1" }), "frenchnet_livraison")
+      end },
+      { t = 230, fn = function(m)
+        m.injecterRednet(42, commandeFraudee, "frenchnet_livraison")
+      end },
+      { t = 260, fn = function(m)
+        m.injecterRednet(42, commandePrepayee, "frenchnet_livraison")
+      end },
+    },
+    secondes = 700,
+  })
+  local sorties = etat.sorties
+  local parCommande = {}
+  for _, a in ipairs(accuses(etat)) do parCommande[a.commande] = a end
+
+  verifier("la livraison impayee declenche la penalite",
+    contient(sorties, "'Faction Rouge' penalise"))
+  verifier("la commande suivante est refusee faute de pre-paiement",
+    parCommande["APRES-1"] and parCommande["APRES-1"].accepte == false,
+    parCommande["APRES-1"] and tostring(parCommande["APRES-1"].motif) or "aucun accuse")
+  verifier("le motif du refus nomme le pre-paiement",
+    parCommande["APRES-1"]
+      and tostring(parCommande["APRES-1"].motif):find("pre-paiement", 1, true) ~= nil)
+  verifier("un certificat de pre-paiement forge est refuse",
+    parCommande["FRAUDE-1"] and parCommande["FRAUDE-1"].accepte == false
+      and tostring(parCommande["FRAUDE-1"].motif):find("certificat", 1, true) ~= nil,
+    parCommande["FRAUDE-1"] and tostring(parCommande["FRAUDE-1"].motif) or "aucun accuse")
+  verifier("un pre-paiement valide est accepte",
+    parCommande["PREPAYEE-1"] and parCommande["PREPAYEE-1"].accepte == true,
+    parCommande["PREPAYEE-1"] and tostring(parCommande["PREPAYEE-1"].motif) or "aucun accuse")
+  verifier("la commande pre-payee n'exige aucun paiement sur place",
+    contient(sorties, "deja reglee a la borne"))
+  verifier("la commande pre-payee est livree",
+    contient(sorties, "commande PREPAYEE-1 terminee"))
+end
+
+do
+  -- Mode 'refus' : aucune commande n'est acceptee tant que dure la penalite.
+  preparerNavire({ config = { DELAI_PAIEMENT = "30", MODE_PENALITE = "refus" } })
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerNavire(craftos, {
+    inventaires = inventairesNavire(false),
+    actions = {
+      { t = 12,  fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "IMPAYEE-2" }), "frenchnet_livraison")
+      end },
+      { t = 220, fn = function(m)
+        m.injecterRednet(42, commandeRednet({ id = "APRES-2" }), "frenchnet_livraison")
+      end },
+    },
+    secondes = 500,
+  })
+  local parCommande = {}
+  for _, a in ipairs(accuses(etat)) do parCommande[a.commande] = a end
+  verifier("mode refus : la commande suivante est rejetee",
+    parCommande["APRES-2"] and parCommande["APRES-2"].accepte == false,
+    parCommande["APRES-2"] and tostring(parCommande["APRES-2"].motif) or "aucun accuse")
+  verifier("le motif annonce la duree restante",
+    parCommande["APRES-2"]
+      and tostring(parCommande["APRES-2"].motif):find("minute", 1, true) ~= nil,
+    parCommande["APRES-2"] and tostring(parCommande["APRES-2"].motif) or "-")
+end
+
+--------------------------------------------------------------------------------
+titre("O. Borne publique : parcours complet d'une commande")
 --------------------------------------------------------------------------------
 
 do
@@ -974,6 +1204,154 @@ do
     contient(sorties, "fast ship") and contient(sorties, "slow ship"))
   verifier("la borne s'arrete proprement sur demande",
     contient(sorties, "[ARRET] arret manuel de la borne."), motif)
+end
+
+--------------------------------------------------------------------------------
+titre("P. Centrale tarifaire : serrure, modification, diffusion signee")
+--------------------------------------------------------------------------------
+
+local function preparerCentral(options)
+  options = options or {}
+  os.execute("rm -rf " .. BANC)
+  os.execute("mkdir -p " .. BANC .. "/commun " .. BANC .. "/central")
+  os.execute("cp " .. RACINE .. "/commun/*.lua " .. BANC .. "/commun/")
+  os.execute("cp " .. RACINE .. "/central/central.lua " .. BANC .. "/central/")
+  ecrire(BANC .. "/central/config_central.lua", [[
+return {
+  titre       = "CENTRALE D'ESSAI",
+  identifiant = "CENTRALE-01",
+  jeton       = "jeton-de-banc",
+  diffusionSecondes = 30,
+  serrure = { longueurMinimale = 4, tentativesMax = 3,
+              verrouillageSecondes = 60, inactiviteSecondes = 120 },
+  tarifInitial = {
+    objetPaiement      = "minecraft:diamond",
+    forfaitBase        = 5,
+    prixUnitaireDefaut = 0.01,
+    parObjet           = { ["minecraft:iron_ingot"] = 0.02 },
+    coefficientVitesse = { fast = 2.0, slow = 1.0 },
+    prixMinimum        = 1,
+  },
+  penalitesInitiales = { mode = "prepaiement", duree = 3600,
+                         incidentsAvantPenalite = 1, effacerApres = 86400 },
+  journal    = { fichier = "central/central.log", tailleMax = 65536,
+                 niveauEcran = "DEBUG" },
+  robustesse = { redemarrageDelaiMin = 3, redemarrageDelaiMax = 10 },
+}
+]])
+  if options.code then ecrire(BANC .. "/central/code.dat", options.code) end
+end
+
+local function lancerCentral(craftos, entrees, secondes)
+  craftos.creer({
+    racine = BANC, programme = "central/central.lua", id = 3,
+    inventaires = {}, entrees = entrees,
+  })
+  -- Les ecrans de pause attendent une touche : on en fournit regulierement.
+  local function clavier(m)
+    m.injecterEvenement("key", 57)
+    m.planifier(m.horloge() + 1, clavier)
+  end
+  craftos.planifier(1, clavier)
+  return craftos.executer(BANC .. "/central/central.lua", secondes or 200)
+end
+
+local function tarifsDiffuses(etat)
+  local liste = {}
+  for _, envoi in ipairs(etat.diffusions) do
+    if envoi.message and envoi.message.type == "TARIF" then liste[#liste + 1] = envoi.message end
+  end
+  return liste
+end
+
+do
+  preparerCentral()
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerCentral(craftos, {
+    "1234", "1234",   -- premier demarrage : creation du code
+    "2",              -- menu : reglages generaux
+    "2", "77",        -- forfait de base -> 77
+    "",               -- quitter les reglages
+    "v",              -- verrouiller
+  }, 200)
+  local sorties = etat.sorties
+  local grilles = tarifsDiffuses(etat)
+
+  verifier("la centrale demande un code au premier demarrage",
+    contient(sorties, "CHOIX DU CODE D'ACCES"))
+  verifier("la creation du code est journalisee",
+    contient(sorties, "code d'acces defini"))
+  verifier("la grille est diffusee des le demarrage", #grilles > 0, "#=" .. #grilles)
+
+  local derniere = grilles[#grilles]
+  verifier("la modification est publiee", derniere and derniere.tarif.forfaitBase == 77,
+    derniere and tostring(derniere.tarif.forfaitBase) or "aucune grille")
+  verifier("la sequence est incrementee a chaque publication",
+    derniere and derniere.sequence and derniere.sequence > 1,
+    derniere and tostring(derniere.sequence) or "-")
+  verifier("la grille diffusee est signee avec le jeton partage",
+    derniere and Protocole.verifierTarif(derniere, "jeton-de-banc") == true)
+  verifier("elle est refusee par qui n'a pas le bon jeton",
+    derniere and Protocole.verifierTarif(derniere, "autre-jeton") == false)
+  verifier("le verrouillage manuel est journalise",
+    contient(sorties, "verrouillage manuel"))
+
+  -- Le code lui-meme ne doit jamais se lire sur le disque.
+  local f = io.open(BANC .. "/central/code.dat", "r")
+  local fiche = f and f:read("a") or ""
+  if f then f:close() end
+  verifier("le code n'est pas ecrit en clair sur le disque",
+    fiche ~= "" and not fiche:find("1234", 1, true), fiche:sub(1, 60))
+  verifier("seule une empreinte salee est conservee",
+    fiche:find("empreinte", 1, true) ~= nil and fiche:find("sel", 1, true) ~= nil)
+end
+
+do
+  -- Serrure : trois codes errones bloquent l'acces, et rien n'est modifiable.
+  local sel = "0011223344556677"
+  local empreinte = Protocole.empreinte(sel .. "bonCode")
+  preparerCentral({ code = ("{ sel = %q, empreinte = %q, version = 1 }")
+    :format(sel, empreinte) })
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerCentral(craftos, { "faux1", "faux2", "faux3" }, 120)
+  local sorties = etat.sorties
+
+  verifier("un code errone est refuse", contient(sorties, "Code errone."))
+  verifier("trois echecs bloquent l'acces", contient(sorties, "ACCES BLOQUE"))
+  verifier("le blocage est inscrit au journal", contient(sorties, "acces bloque"))
+  verifier("aucun menu n'a ete atteint", not contient(sorties, "Prix par objet"))
+  verifier("la diffusion continue malgre le verrouillage",
+    #tarifsDiffuses(etat) > 0, "#=" .. #tarifsDiffuses(etat))
+end
+
+do
+  -- Le bon code ouvre le menu, et la grille deja sur disque est relue.
+  local sel = "0011223344556677"
+  local empreinte = Protocole.empreinte(sel .. "bonCode")
+  preparerCentral({ code = ("{ sel = %q, empreinte = %q, version = 1 }")
+    :format(sel, empreinte) })
+  ecrire(BANC .. "/central/tarifs.dat", [[{
+  version = 1, sequence = 41,
+  tarif = { objetPaiement = "minecraft:diamond", forfaitBase = 9,
+            prixUnitaireDefaut = 0, parObjet = {},
+            coefficientVitesse = { fast = 2, slow = 1 }, prixMinimum = 1 },
+  penalites = { mode = "refus", duree = 600, incidentsAvantPenalite = 2,
+                effacerApres = 86400 },
+}]])
+
+  local craftos = dofile(SCR .. "/craftos.lua")
+  local motif, etat = lancerCentral(craftos, { "bonCode", "v" }, 120)
+  local sorties = etat.sorties
+  local grilles = tarifsDiffuses(etat)
+
+  verifier("le bon code ouvre le menu", contient(sorties, "[1] Prix par objet"))
+  verifier("l'acces accorde est journalise", contient(sorties, "acces accorde"))
+  verifier("la grille sur disque est relue telle quelle",
+    grilles[1] and grilles[1].sequence == 41 and grilles[1].tarif.forfaitBase == 9,
+    grilles[1] and tostring(grilles[1].sequence) or "aucune")
+  verifier("le regime de penalites accompagne la grille",
+    grilles[1] and grilles[1].penalites and grilles[1].penalites.mode == "refus")
 end
 
 --------------------------------------------------------------------------------

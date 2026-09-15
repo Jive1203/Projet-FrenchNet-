@@ -2,17 +2,20 @@
 
 Système de livraison automatisé embarqué sur un dirigeable **Create Aeronautics**, avec **borne de commande publique** ouverte à tous les joueurs et à toutes les factions d'**AERONAUTICS WARFARE**.
 
-Le navire **ne pilote pas lui-même** : tout déplacement est délégué au **module d'autopilote FrenchNet** déjà construit, appelé tel quel, avec **son** fichier de configuration par véhicule. Ce dépôt n'ajoute que la logistique — commandes, cargaison, paiement, dépôt, retour automatique.
+Le navire **ne pilote pas lui-même** : tout déplacement est délégué au **module d'autopilote FrenchNet** déjà construit, appelé tel quel, avec **son** fichier de configuration par véhicule — conteneurs compris, réglés dans sa propre interface. Ce dépôt n'ajoute que la logistique — commandes, cargaison, paiement, dépôt, retour automatique.
+
+Les prix ne se décident nulle part ailleurs que sur **l'ordinateur central**, derrière un menu verrouillé par code, qui les diffuse signés aux bornes et aux navires.
 
 ## Ce que ça fait
 
-1. Un joueur ou une faction passe commande sur la borne publique : objets et quantités pris dans le grand conteneur source (y compris un *bulk container* Create de plusieurs dizaines de milliers d'objets), niveau de service **fast ship** (plus rapide, plus cher) ou **slow ship**, et coordonnées X/Y/Z exactes du point de dépôt.
-2. Le navire prélève **exactement** ce qui est commandé avec `pushItems` / `pullItems`, sans toucher au reste du stock.
-3. Il transmet le point de dépôt à l'autopilote (`ap.allerA`, point de type `"depot"`) et réagit à ses messages d'état.
-4. À l'arrivée, il vérifie le **coffre de paiement** du client et **attend en boucle** tant que le montant exact n'y est pas (par défaut 5 diamants).
-5. Paiement encaissé, il vide la soute chez le destinataire.
-6. Une fois la file vide, il rentre **seul** au point de retour le plus pertinent, sans nouvel ordre.
-7. En cas de plantage : relance automatique, reprise de l'état sur disque, et au redémarrage il reste sur place s'il est déjà à un point de sécurité, sinon il y va d'abord.
+1. L'opérateur fixe **un prix par objet** sur l'ordinateur central, derrière un code. Le central diffuse la grille signée ; bornes et navires l'appliquent sans jamais la modifier.
+2. Un joueur ou une faction passe commande sur la borne publique : objets et quantités pris dans le grand conteneur source (y compris un *bulk container* Create de plusieurs dizaines de milliers d'objets), niveau de service **fast ship** (plus rapide, plus cher) ou **slow ship**, et coordonnées X/Y/Z exactes du point de dépôt.
+3. Le navire prélève **exactement** ce qui est commandé avec `pushItems` / `pullItems`, sans toucher au reste du stock.
+4. Il transmet le point de dépôt à l'autopilote (`ap.allerA`, point de type `"depot"`) et réagit à ses messages d'état.
+5. À l'arrivée, il vérifie le **coffre de paiement** du client et attend le montant exact — **cinq minutes**, pas plus.
+6. Payé : il vide la soute chez le destinataire. **Non payé au bout de cinq minutes : il repart**, la commande est annulée, la cargaison revient au stock et le client est **pénalisé** — ses commandes suivantes exigent un pré-paiement à la borne, ou sont refusées.
+7. Une fois la file vide, il rentre **seul** au point de retour le plus pertinent, sans nouvel ordre.
+8. En cas de plantage : relance automatique, reprise de l'état sur disque, et au redémarrage il reste sur place s'il est déjà à un point de sécurité, sinon il y va d'abord.
 
 ## Prérequis : l'autopilote
 
@@ -44,6 +47,24 @@ edit navire/config_livraison.lua
 reboot
 ```
 
+## Installation — ordinateur central
+
+Sur un ordinateur avancé **dans un local fermé** (c'est lui qui fixe les prix) :
+
+```
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/cc-tweaked-delivery-system-xzg7ns/commun/journal.lua commun/journal.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/cc-tweaked-delivery-system-xzg7ns/commun/protocole.lua commun/protocole.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/cc-tweaked-delivery-system-xzg7ns/central/central.lua central/central.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/cc-tweaked-delivery-system-xzg7ns/central/config_central.lua central/config_central.lua
+wget https://raw.githubusercontent.com/Jive1203/Projet-FrenchNet-/claude/cc-tweaked-delivery-system-xzg7ns/central/startup.lua startup.lua
+edit central/config_central.lua
+reboot
+```
+
+Au premier démarrage, la centrale **demande un code** et n'en garde qu'une empreinte salée : il n'est écrit nulle part en clair. Notez-le.
+
+Changez `jeton` dans les trois configurations (central, navire, borne) — **la même valeur partout**. Il signe la grille : une trame altérée, une grille venue d'ailleurs ou une ancienne grille moins chère rejouée sont refusées.
+
 ## Installation — borne publique
 
 Sur un ordinateur avancé posé n'importe où, accessible à tous :
@@ -60,20 +81,30 @@ reboot
 
 ## Configuration
 
-**Le fichier de configuration par véhicule est celui de l'autopilote**, `/autopilote/config_vehicule.lua`. Il porte déjà, et reste seul à porter : `nom`, `identifiant`, `decalageGps`, `decalageDepot`, `tolerances`, `vitesses`, `gabarit`, `gains` PID, et la station `ravitaillement`. Rien de tout cela n'est dupliqué ici, et le système de livraison n'y touche jamais.
+**Le fichier de configuration par véhicule est celui de l'autopilote**, `/autopilote/config_vehicule.lua`. Il porte déjà, et reste seul à porter : `nom`, `identifiant`, `decalageGps`, `decalageDepot`, `tolerances`, `vitesses`, `gabarit`, `gains` PID, la station `ravitaillement` — et désormais `conteneurs`.
 
-Le fichier `navire/config_livraison.lua` contient les **pages à ajouter** à cette configuration :
+### Les conteneurs se règlent dans l'autopilote
+
+L'interface de l'autopilote a une section **Conteneurs** faite pour ça :
+
+```
+interface                    -- puis section "Conteneurs"
+    D       détecter les inventaires branchés et créer une page pour chacun
+    N       ajouter une page vierge
+    Suppr   retirer celui sous le curseur
+```
+
+Pour chaque conteneur : `peripherique` (choisi dans la liste détectée), `role` — `expedition` (vidé chez le client), `recette` (reçoit le paiement), `tampon` (jamais livré) — `decalage` x/y/z par rapport au centre, `priorite`, `capacite`.
+
+### Le reste
+
+Le fichier `navire/config_livraison.lua` contient les **autres pages à ajouter** :
 
 ```lua
-conteneurs = {                            -- une page par conteneur de cargaison
-  { nom = "Soute avant", peripherique = "minecraft:barrel_0",
-    decalage = { x = -4, y = -1, z = 6 }, -- par rapport au CENTRE du navire
-    role = "expedition", priorite = 1 },
-  { nom = "Coffre de recette", peripherique = "minecraft:chest_0",
-    decalage = { x = 0, y = 1, z = 0 }, role = "recette" },
-},
+central   = { identifiant = "CENTRALE-01", jeton = "...", exigerCentral = false },
 livraison = { ... },   -- source, paiement, points de retour, limites
-tarif     = { ... },   -- grille publique fast ship / slow ship
+penalites = { ... },   -- repli tant que le central ne s'est pas manifesté
+tarif     = { ... },   -- repli, idem
 ```
 
 Deux façons de les utiliser :
@@ -81,15 +112,13 @@ Deux façons de les utiliser :
 1. **Recommandé** — les recopier à la fin de la table de `/autopilote/config_vehicule.lua`. Tout tient dans un seul fichier par véhicule.
 2. Ou laisser `navire/config_livraison.lua` en place : il est lu comme un **recouvrement** et ses valeurs l'emportent. Pratique quand plusieurs vaisseaux partagent la même grille tarifaire.
 
-Rôles de conteneur : `expedition` (vidé chez le client), `recette` (où atterrit le paiement), `tampon` (jamais livré).
-
 ## Prérequis côté client (destinataire)
 
 Le point de dépôt doit exposer au navire **au moins un inventaire** sur le réseau de modems filaires de la plateforme d'accueil :
 
 | Coffre | Rôle | Détection |
 |---|---|---|
-| Coffre de paiement | le client y dépose le montant exact | nom contenant `motifPaiement` (défaut `chest`) |
+| Coffre de paiement | le client y dépose le montant exact, **dans les cinq minutes** | nom contenant `motifPaiement` (défaut `chest`) |
 | Coffre de réception | reçoit la marchandise | premier autre inventaire visible |
 
 S'il n'y a qu'un seul coffre, il sert aux deux (le paiement est aspiré avant le dépôt). Sans aucun inventaire accessible, la livraison échoue proprement et le navire rentre avec la cargaison.
@@ -97,7 +126,7 @@ S'il n'y a qu'un seul coffre, il sert aux deux (le paiement est aspiré avant le
 ## Vérifier
 
 ```
-lua5.4 tests/test_livraison.lua     -- 97 vérifications, hors du jeu
+lua5.4 tests/test_livraison.lua     -- 138 vérifications, hors du jeu
 ```
 
 Le banc d'essai rejoue l'API réelle de l'autopilote (`nouveau`, `initialiser`, `allerA`, `attendreArrivee`, `etat`, `executer`), boucle de vol en parallèle comprise.
@@ -119,6 +148,9 @@ Consultable à l'écran ou dans `navire/livraison.log` (et `borne/borne.log`). L
 | `navire/livraison.lua` | Programme embarqué : commandes, cargaison, paiement, dépôt, retour |
 | `navire/autopilote.lua` | **Adaptateur** vers le module d'autopilote — aucune logique de vol |
 | `navire/config_livraison.lua` | Pages à ajouter à la configuration du véhicule |
+| `central/central.lua` | Centrale tarifaire : menu verrouillé par code, diffusion signée |
+| `central/config_central.lua` | Configuration de la centrale |
+| `central/startup.lua` | Démarrage automatique de la centrale |
 | `navire/startup.lua` | Démarrage automatique du navire |
 | `borne/borne.lua` | Borne de commande publique |
 | `borne/config_borne.lua` | Configuration de la borne |

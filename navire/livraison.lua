@@ -45,6 +45,8 @@ local ETAPES = {
   CALCUL_POSITION      = "calcul de position (GPS + decalages)",
   CHOIX_RETOUR         = "choix du point de retour",
   RECEPTION_COMMANDE   = "reception d'une commande publique",
+  RECEPTION_TARIF      = "reception de la grille tarifaire centrale",
+  PENALITE             = "application d'une penalite client",
   VALIDATION_COMMANDE  = "validation d'une commande publique",
   CATALOGUE            = "lecture du catalogue du conteneur source",
   PURGE_SOUTES         = "purge des soutes avant chargement",
@@ -155,7 +157,7 @@ local DEFAUTS = {
     pointChargement      = nil,
     distanceChargement   = 24,
     motifPaiement        = "chest",
-    delaiPaiementMax     = 0,
+    delaiPaiementMax     = 300,   -- 5 minutes, puis le navire quitte la zone
     intervallePaiement   = 5,
     rappelPaiementToutes = 60,
     choixRetour          = "auto",
@@ -171,6 +173,22 @@ local DEFAUTS = {
     parObjet           = {},
     coefficientVitesse = { fast = 2.0, slow = 1.0 },
     prixMinimum        = 1,
+  },
+  -- Ordinateur central : c'est lui qui detient la grille tarifaire et le
+  -- regime de penalites. Le navire ne fixe aucun prix.
+  central = {
+    identifiant   = "CENTRALE-01",
+    jeton         = "",
+    exigerCentral = false,   -- true : refuser toute commande tant que la
+                             -- grille centrale n'a pas ete recue
+    delaiDemande  = 5,
+  },
+  -- Valeurs de repli, appliquees tant que le central ne s'est pas manifeste.
+  penalites = {
+    mode                   = "prepaiement",
+    duree                  = 3600,
+    incidentsAvantPenalite = 1,
+    effacerApres           = 86400,
   },
   reseau = { coteModem = nil, diffusionEtat = 10, diffusionCatalogue = 60 },
   journal = { fichier = "navire/livraison.log", tailleMax = 128 * 1024, niveauEcran = "INFO" },
@@ -352,6 +370,10 @@ local function etatNeuf()
     livraisons       = 0,       -- compteur depuis la mise en service
     derniereErreur   = nil,
     derniereActivite = 0,
+    tarifCentral     = nil,     -- derniere grille recue du central
+    tarifSequence    = 0,       -- refuse le rejeu d'une grille plus ancienne
+    penalitesReglage = nil,     -- regime de penalites diffuse par le central
+    penalites        = {},      -- fiches par client
   }
 end
 
@@ -391,6 +413,8 @@ local function reprendreEtat()
   if ok and type(resultat) == "table" and resultat.version == 1 then
     etat = resultat
     etat.file = etat.file or {}
+    etat.penalites = etat.penalites or {}
+    etat.tarifSequence = etat.tarifSequence or 0
     log("info", ETAPES.RECUPERATION_ETAT,
       "etat repris : phase=%s, commande=%s, file=%d, livraisons=%d",
       tostring(etat.phase), etat.commande and etat.commande.id or "aucune",
@@ -478,6 +502,158 @@ local function diffuser(type_, contenu)
     log("avert", ETAPES.DIFFUSION_ETAT, "diffusion rednet impossible : %s", tostring(err))
   end
   return ok
+end
+
+--------------------------------------------------------------------------------
+-- 8 bis. GRILLE TARIFAIRE ET PENALITES
+--    Le navire ne fixe AUCUN prix. Il applique la grille diffusee par
+--    l'ordinateur central, et retombe sur la grille locale tant que celui-ci
+--    ne s'est pas manifeste.
+--------------------------------------------------------------------------------
+
+local function tarifCourant()
+  return etat.tarifCentral or config.tarif
+end
+
+local function reglagePenalites()
+  return etat.penalitesReglage or config.penalites or {}
+end
+
+local function maintenantMs()
+  local ok, valeur = pcall(os.epoch, "utc")
+  if ok and type(valeur) == "number" then return valeur end
+  return math.floor(os.clock() * 1000)
+end
+
+local function adopterTarif(message, expediteur)
+  local attendu = config.central.identifiant
+  if attendu and attendu ~= "" and message.central ~= attendu then
+    log("avert", ETAPES.RECEPTION_TARIF,
+      "grille ignoree : elle se reclame de '%s', pas de '%s'",
+      tostring(message.central), tostring(attendu))
+    return false
+  end
+
+  local ok, motif = Protocole.verifierTarif(message, config.central.jeton,
+    etat.tarifSequence)
+  if not ok then
+    log("avert", ETAPES.RECEPTION_TARIF, "grille refusee (ordinateur %s) : %s",
+      tostring(expediteur), tostring(motif))
+    return false
+  end
+
+  local ancienne = etat.tarifSequence or 0
+  etat.tarifCentral     = message.tarif
+  etat.tarifSequence    = message.sequence
+  etat.penalitesReglage = message.penalites or etat.penalitesReglage
+  sauverEtat()
+
+  if message.sequence ~= ancienne then
+    log("info", ETAPES.RECEPTION_TARIF,
+      "grille n%d adoptee : paiement en %s, forfait %s, fast x%s / slow x%s",
+      message.sequence, tostring(message.tarif.objetPaiement),
+      tostring(message.tarif.forfaitBase),
+      tostring((message.tarif.coefficientVitesse or {}).fast),
+      tostring((message.tarif.coefficientVitesse or {}).slow))
+  end
+  return true
+end
+
+local function demanderTarif()
+  local ok = pcall(rednet.broadcast,
+    Protocole.enveloppe(Protocole.TYPES.TARIF_DEMANDE, {
+      navire = config.identite.identifiant }), Protocole.PROTOCOLE)
+  if not ok then return false end
+
+  local minuteur = os.startTimer(config.central.delaiDemande or 5)
+  while true do
+    local ev = table.pack(os.pullEvent())
+    if ev[1] == "rednet_message" and ev[4] == Protocole.PROTOCOLE
+       and type(ev[3]) == "table" and ev[3].type == Protocole.TYPES.TARIF then
+      if adopterTarif(ev[3], ev[2]) then return true end
+    elseif ev[1] == "timer" and ev[2] == minuteur then
+      return false
+    end
+  end
+end
+
+-- Fiche de penalite d'un client. Un incident isole s'oublie apres
+-- 'effacerApres' ; c'est la recidive qui compte.
+local function penaliteDe(client)
+  if type(client) ~= "string" or client == "" then return nil end
+  return (etat.penalites or {})[client]
+end
+
+local function enregistrerPenalite(client, motif)
+  if type(client) ~= "string" or client == "" then
+    log("avert", ETAPES.PENALITE, "incident non imputable : commande anonyme")
+    return nil
+  end
+  local reglage = reglagePenalites()
+  local maintenant = maintenantMs()
+
+  etat.penalites = etat.penalites or {}
+  local fiche = etat.penalites[client]
+  if type(fiche) ~= "table" then fiche = { incidents = 0 } end
+
+  -- Oubli d'un incident ancien reste sans suite.
+  local oubli = (reglage.effacerApres or 86400) * 1000
+  if fiche.dernier and (maintenant - fiche.dernier) > oubli then
+    fiche.incidents = 0
+  end
+
+  fiche.incidents = (fiche.incidents or 0) + 1
+  fiche.dernier   = maintenant
+  fiche.motif     = motif
+
+  local seuil = reglage.incidentsAvantPenalite or 1
+  if fiche.incidents >= seuil then
+    fiche.jusqua = maintenant + (reglage.duree or 3600) * 1000
+    fiche.mode   = reglage.mode or Protocole.MODES_PENALITE.PREPAIEMENT
+    log("avert", ETAPES.PENALITE,
+      "'%s' penalise (%d incident(s), seuil %d) : mode %s pendant %d s",
+      client, fiche.incidents, seuil, fiche.mode, reglage.duree or 3600)
+  else
+    log("info", ETAPES.PENALITE, "incident note pour '%s' (%d/%d avant penalite)",
+      client, fiche.incidents, seuil)
+  end
+
+  etat.penalites[client] = fiche
+  sauverEtat()
+  return fiche
+end
+
+-- Verifie qu'une commande est recevable au regard des penalites.
+-- Retourne : true | false, motif
+local function penaliteAutorise(commande)
+  local client = commande.client
+  local active, reste, fiche = Protocole.penaliteActive(etat.penalites, client, maintenantMs())
+  if not active then return true end
+
+  local mode = fiche.mode or reglagePenalites().mode
+      or Protocole.MODES_PENALITE.PREPAIEMENT
+
+  if mode == Protocole.MODES_PENALITE.REFUS then
+    return false, ("penalite active pour '%s' : %d minute(s) restante(s)")
+      :format(tostring(client), math.ceil(reste / 60))
+  end
+
+  -- Mode pre-paiement : la borne doit certifier que le client a deja paye.
+  if not commande.prepaiement or commande.prepaiement.certifie ~= true then
+    return false, ("pre-paiement exige a la borne pour '%s' (penalite, %d minute(s)"
+      .. " restante(s))"):format(tostring(client), math.ceil(reste / 60))
+  end
+
+  local jeton = config.central.jeton
+  if jeton and jeton ~= "" then
+    local attendue = Protocole.signerPrepaiement(commande.id, commande.paiement, jeton)
+    if commande.prepaiement.signature ~= attendue then
+      return false, "certificat de pre-paiement invalide"
+    end
+  end
+
+  log("info", ETAPES.PENALITE, "'%s' est penalise mais a pre-paye a la borne", tostring(client))
+  return true
 end
 
 --------------------------------------------------------------------------------
@@ -1081,8 +1257,10 @@ local function executerCommande(commande)
     if not paye then
       log("erreur", ETAPES.VERIF_PAIEMENT, "commande %s abandonnee : %s",
         commande.id, tostring(errPaiement))
+      local fiche = enregistrerPenalite(commande.client, "livraison non payee")
       diffuser(Protocole.TYPES.AVIS, {
         commande = commande.id, evenement = "ABANDON", message = tostring(errPaiement),
+        client = commande.client, penalite = fiche,
       })
       return false, errPaiement
     end
@@ -1181,6 +1359,10 @@ local function cycleMission()
         -- sans qu'aucun ordre ne soit redonne.
         journal.proteger(ETAPES.RETOUR_BASE, retournerBase,
           commande.destination, "fin de tournee")
+        -- Une livraison refusee faute de paiement revient avec sa cargaison :
+        -- elle est reversee au stock des le retour, sinon le catalogue ment et
+        -- les soutes restent bloquees.
+        journal.proteger(ETAPES.PURGE_SOUTES, purgerSoutes)
         ravitaillerSiNecessaire()
       end
 
@@ -1217,6 +1399,10 @@ local function resumeEtat()
     autopilote  = pilote and pilote.disponible or false,
     version     = VERSION_PROGRAMME,
     erreur      = etat.derniereErreur,
+    tarifSequence = etat.tarifSequence or 0,
+    tarifCentral  = etat.tarifCentral ~= nil,
+    penalites     = etat.penalites or {},
+    regimePenalites = reglagePenalites(),
   }
 end
 
@@ -1224,13 +1410,18 @@ local function traiterMessage(expediteur, message)
   local ok, motif = Protocole.valide(message)
   if not ok then return end
 
+  if message.type == Protocole.TYPES.TARIF then
+    journal.proteger(ETAPES.RECEPTION_TARIF, adopterTarif, message, expediteur)
+    return
+  end
+
   if message.type == Protocole.TYPES.CATALOGUE_DEMANDE then
     local articles = lireCatalogue(message.force == true)
     log("info", ETAPES.CATALOGUE, "catalogue transmis a l'ordinateur %d (%d types)",
       expediteur, #articles)
     repondre(expediteur, Protocole.TYPES.CATALOGUE, {
       articles = articles,
-      tarif    = config.tarif,
+      tarif    = tarifCourant(),
       limites  = config.livraison.limites,
       etat     = resumeEtat(),
     })
@@ -1248,6 +1439,25 @@ local function traiterMessage(expediteur, message)
       log("avert", ETAPES.VALIDATION_COMMANDE, "commande refusee : %s", erreur)
       repondre(expediteur, Protocole.TYPES.ACCUSE,
         { commande = commande and commande.id, accepte = false, motif = erreur })
+      return
+    end
+
+    -- Le central est la seule source de prix. S'il est exige et muet, mieux
+    -- vaut refuser que facturer au tarif de repli.
+    if config.central.exigerCentral and not etat.tarifCentral then
+      log("avert", ETAPES.VALIDATION_COMMANDE,
+        "commande %s refusee : grille centrale jamais recue", commande.id)
+      repondre(expediteur, Protocole.TYPES.ACCUSE, { commande = commande.id,
+        accepte = false, motif = "grille tarifaire centrale indisponible" })
+      return
+    end
+
+    local autorise, motifPenalite = penaliteAutorise(commande)
+    if not autorise then
+      log("avert", ETAPES.PENALITE, "commande %s refusee : %s", commande.id,
+        tostring(motifPenalite))
+      repondre(expediteur, Protocole.TYPES.ACCUSE, { commande = commande.id,
+        accepte = false, motif = motifPenalite, penalite = penaliteDe(commande.client) })
       return
     end
 
@@ -1270,7 +1480,7 @@ local function traiterMessage(expediteur, message)
     -- Le prix est RECALCULE a bord : la borne est publique, son chiffre ne
     -- fait pas foi.
     local paiement = Protocole.calculerPaiement(commande.articles, commande.vitesse,
-      config.tarif)
+      tarifCourant())
     if commande.paiement.objet ~= paiement.objet
        or commande.paiement.quantite ~= paiement.quantite then
       log("avert", ETAPES.VALIDATION_COMMANDE,
@@ -1279,6 +1489,14 @@ local function traiterMessage(expediteur, message)
         paiement.quantite, paiement.objet)
     end
     commande.paiement = paiement
+    -- Un pre-paiement certifie a la borne vaut paiement : le navire ne
+    -- redemandera pas le montant a l'arrivee.
+    if commande.prepaiement and commande.prepaiement.certifie then
+      commande.paiementEncaisse = true
+      log("info", ETAPES.VALIDATION_COMMANDE,
+        "commande %s deja reglee a la borne : aucun paiement exige sur place",
+        commande.id)
+    end
     commande.expediteur = expediteur
     commande.recueLe = os.epoch and os.epoch("utc") or 0
 
@@ -1339,7 +1557,7 @@ local function cycleDiffusion()
       dernierCatalogue = os.clock()
       local articles = lireCatalogue(true)
       diffuser(Protocole.TYPES.CATALOGUE, {
-        articles = articles, tarif = config.tarif,
+        articles = articles, tarif = tarifCourant(),
         limites = config.livraison.limites, etat = resumeEtat(),
       })
     end
@@ -1484,6 +1702,22 @@ local function cyclePrincipal()
 
   ------------------------------------------------------------------ reseau ---
   ouvrirReseau()
+
+  ------------------------------------------------------------------ tarifs ---
+  -- Le central detient la grille : on la reclame avant d'accepter la moindre
+  -- commande, pour ne pas facturer au tarif de repli.
+  if journal.proteger(ETAPES.RECEPTION_TARIF, demanderTarif) and etat.tarifCentral then
+    log("info", ETAPES.RECEPTION_TARIF, "grille centrale n%d en vigueur",
+      etat.tarifSequence or 0)
+  elseif etat.tarifCentral then
+    log("avert", ETAPES.RECEPTION_TARIF,
+      "central muet : la derniere grille connue (n%d) reste appliquee",
+      etat.tarifSequence or 0)
+  else
+    log("avert", ETAPES.RECEPTION_TARIF,
+      "central muet et aucune grille connue : application de la grille locale%s",
+      config.central.exigerCentral and " -- les commandes seront REFUSEES" or "")
+  end
 
   ----------------------------------------------------------------- catalogue -
   lireCatalogue(true)

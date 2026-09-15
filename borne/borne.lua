@@ -27,6 +27,8 @@ local ETAPES = {
   DETECTION_MODEM   = "detection du modem",
   OUVERTURE_REDNET  = "ouverture rednet",
   CATALOGUE         = "recuperation du catalogue",
+  TARIF             = "reception de la grille tarifaire centrale",
+  PREPAIEMENT       = "encaissement d'un pre-paiement",
   SAISIE_ARTICLES   = "saisie des articles",
   SAISIE_VITESSE    = "choix du niveau de service",
   SAISIE_DESTINATION= "saisie des coordonnees de depot",
@@ -85,6 +87,10 @@ local config, journal, Protocole, Inventaire
 local coteModem
 local catalogue = { articles = {}, tarif = nil, limites = nil, navire = nil,
                     nomNavire = nil, etat = nil, horodatage = -1e9 }
+local grilleCentrale = { tarif = nil, penalites = nil, sequence = 0 }
+-- Declaration anticipee : interroger() prend au passage les grilles qui
+-- transitent, or elle est definie avant l'adoption elle-meme.
+local adopterTarif
 local mesCommandes = {}   -- commandes deposees depuis cette borne
 
 local function log(niveau, etape, message, ...)
@@ -116,6 +122,14 @@ local function entete(sousTitre)
     end
   else
     print("Navire : non contacte pour l'instant")
+  end
+  if grilleCentrale.tarif then
+    print(("Grille tarifaire n%d (centrale %s)"):format(grilleCentrale.sequence,
+      tostring(config.central and config.central.identifiant or "?")))
+  else
+    couleur(colors.orange)
+    print("Grille centrale non recue : prix indicatifs du navire")
+    couleur(colors.lightGray)
   end
   if sousTitre then
     couleur(colors.white)
@@ -202,6 +216,12 @@ local function interroger(typeDemande, contenu, typeAttendu)
     local ev = table.pack(os.pullEvent())
     if ev[1] == "rednet_message" and ev[4] == Protocole.PROTOCOLE then
       local message = ev[3]
+      -- Une grille peut arriver a tout moment : on la prend au passage plutot
+      -- que de la laisser filer parce qu'on attendait autre chose.
+      if type(message) == "table" and message.type == Protocole.TYPES.TARIF
+         and typeAttendu ~= Protocole.TYPES.TARIF then
+        pcall(adopterTarif, message, ev[2])
+      end
       if pourNous(message) and message.type == typeAttendu then
         return message, nil, ev[2]
       end
@@ -209,6 +229,45 @@ local function interroger(typeDemande, contenu, typeAttendu)
       return nil, "aucune reponse du navire dans le delai imparti"
     end
   end
+end
+
+--------------------------------------------------------------------------------
+-- Grille tarifaire centrale
+--    La borne n'invente aucun prix : elle affiche ce que le central diffuse.
+--    Le navire recalcule de toute facon le prix a bord, sur la meme grille.
+--------------------------------------------------------------------------------
+
+adopterTarif = function(message, expediteur)
+  local reglages = config.central or {}
+  if reglages.identifiant and reglages.identifiant ~= ""
+     and message.central ~= reglages.identifiant then
+    log("avert", ETAPES.TARIF, "grille ignoree : elle se reclame de '%s'",
+      tostring(message.central))
+    return false
+  end
+
+  local ok, motif = Protocole.verifierTarif(message, reglages.jeton, grilleCentrale.sequence)
+  if not ok then
+    log("avert", ETAPES.TARIF, "grille refusee (ordinateur %s) : %s",
+      tostring(expediteur), tostring(motif))
+    return false
+  end
+
+  grilleCentrale.tarif     = message.tarif
+  grilleCentrale.penalites = message.penalites
+  grilleCentrale.sequence  = message.sequence
+  log("info", ETAPES.TARIF, "grille n%d adoptee", message.sequence)
+  return true
+end
+
+local function tarifApplique()
+  return grilleCentrale.tarif or catalogue.tarif
+end
+
+local function demanderTarif()
+  local reponse = interroger(Protocole.TYPES.TARIF_DEMANDE, {}, Protocole.TYPES.TARIF)
+  if reponse then return adopterTarif(reponse) end
+  return false
 end
 
 --------------------------------------------------------------------------------
@@ -383,7 +442,7 @@ local function saisirArticles()
 end
 
 local function saisirVitesse(panier)
-  local tarif = catalogue.tarif
+  local tarif = tarifApplique()
   local rapide = Protocole.calculerPaiement(panier, Protocole.VITESSES.RAPIDE, tarif)
   local lent   = Protocole.calculerPaiement(panier, Protocole.VITESSES.LENT, tarif)
 
@@ -442,6 +501,103 @@ local function saisirDestination()
       pause()
     else
       return { x = x, y = y, z = z }
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+-- Pre-paiement des clients penalises
+--    Un client qui a laisse un navire repartir sans payer doit regler a la
+--    borne. La borne certifie le paiement, et le navire ne le redemande pas
+--    a l'arrivee.
+--
+--    LIMITE ASSUMEE : le nom du client est du texte libre. Un joueur penalise
+--    peut en saisir un autre. Identifier reellement les joueurs demanderait un
+--    peripherique dedie ; en l'etat, la penalite dissuade, elle n'empeche pas.
+--------------------------------------------------------------------------------
+
+local function penaliteDuClient(client)
+  local e = catalogue.etat
+  if not e or type(e.penalites) ~= "table" then return nil end
+  local fiche = e.penalites[client]
+  if type(fiche) ~= "table" or type(fiche.jusqua) ~= "number" then return nil end
+  -- L'horloge du navire fait foi : on compare a l'instant qu'il a diffuse.
+  local maintenant = e.horodatage or (os.epoch and os.epoch("utc")) or 0
+  if fiche.jusqua <= maintenant then return nil end
+  return fiche, math.ceil((fiche.jusqua - maintenant) / 1000)
+end
+
+local function encaisserPrepaiement(commande)
+  local reglages = config.prepaiement or {}
+  local depot = reglages.coffreDepot
+  if not depot or depot == "" then
+    return false, "cette borne n'est pas equipee pour encaisser un pre-paiement"
+  end
+
+  local exige = commande.paiement
+  local debut = os.clock()
+  local delaiMax = reglages.delaiMax or 120
+  local intervalle = reglages.intervalle or 3
+
+  log("info", ETAPES.PREPAIEMENT, "commande %s : attente de %d x %s dans '%s'",
+    commande.id, exige.quantite, exige.objet, depot)
+
+  while true do
+    entete("PRE-PAIEMENT EXIGE")
+    couleur(colors.orange)
+    print("Une livraison precedente est repartie sans avoir ete payee.")
+    couleur(colors.white)
+    print("")
+    print(("Deposez %d x %s dans le coffre :"):format(exige.quantite, exige.objet))
+    print("   " .. depot)
+    print("")
+
+    local contenu, err = Inventaire.contenu(depot)
+    local present = contenu and (contenu.totaux[exige.objet] or 0) or 0
+    if err then
+      log("avert", ETAPES.PREPAIEMENT, "coffre de depot illisible : %s", tostring(err))
+    end
+    print(("Depose : %d / %d"):format(present, exige.quantite))
+    local reste = math.max(0, delaiMax - (os.clock() - debut))
+    print(("Temps restant : %d s"):format(math.floor(reste)))
+    print("")
+    print("[a] abandonner")
+
+    if present >= exige.quantite then
+      -- Encaissement : le paiement quitte le coffre du client.
+      local cible = reglages.coffreRecette
+      if cible and cible ~= "" then
+        local deplace = Inventaire.transferer(depot, cible, exige.objet, exige.quantite,
+          { journal = journal, etape = ETAPES.PREPAIEMENT })
+        if (deplace or 0) < exige.quantite then
+          log("avert", ETAPES.PREPAIEMENT,
+            "encaissement incomplet : %d / %d", deplace or 0, exige.quantite)
+        end
+      end
+      log("info", ETAPES.PREPAIEMENT, "commande %s pre-payee (%d x %s)",
+        commande.id, exige.quantite, exige.objet)
+      return true
+    end
+
+    if (os.clock() - debut) > delaiMax then
+      log("avert", ETAPES.PREPAIEMENT, "commande %s : pre-paiement non depose a temps",
+        commande.id)
+      return false, "pre-paiement non depose dans le delai"
+    end
+
+    -- Attente courte, interrompue par une touche : 'a' abandonne.
+    local minuteur = os.startTimer(intervalle)
+    while true do
+      local ev = table.pack(os.pullEvent())
+      if ev[1] == "timer" and ev[2] == minuteur then break end
+      if ev[1] == "char" and (ev[2] == "a" or ev[2] == "A") then
+        return false, "abandonne par le client"
+      end
+      if ev[1] == "rednet_message" and ev[4] == Protocole.PROTOCOLE
+         and type(ev[3]) == "table" then
+        if ev[3].type == Protocole.TYPES.TARIF then pcall(adopterTarif, ev[3], ev[2]) end
+        if ev[3].type == Protocole.TYPES.ETAT then catalogue.etat = ev[3].etat end
+      end
     end
   end
 end
@@ -509,6 +665,45 @@ local function passerCommande()
     paiement    = paiement,
   }
 
+  -- Client penalise : le navire refusera, ou exigera un pre-paiement. Autant
+  -- le regler ici plutot que de laisser partir une commande vouee au refus.
+  local fiche, reste = penaliteDuClient(commande.client)
+  if fiche then
+    local mode = fiche.mode
+      or (grilleCentrale.penalites and grilleCentrale.penalites.mode)
+      or Protocole.MODES_PENALITE.PREPAIEMENT
+
+    if mode == Protocole.MODES_PENALITE.REFUS then
+      entete("COMMANDE REFUSEE")
+      couleur(colors.red)
+      print(("Penalite active pour '%s'."):format(tostring(commande.client)))
+      couleur(colors.white)
+      print(("Une livraison precedente est repartie sans avoir ete payee."))
+      print(("Aucune commande avant %d minute(s)."):format(math.ceil((reste or 0) / 60)))
+      pause()
+      return
+    end
+
+    local paye, motif = journal.proteger(ETAPES.PREPAIEMENT, encaisserPrepaiement, commande)
+    if not paye then
+      entete("COMMANDE ABANDONNEE")
+      couleur(colors.red)
+      print("Pre-paiement non effectue : " .. tostring(motif))
+      couleur(colors.white)
+      pause()
+      return
+    end
+    -- paye vaut ici le premier retour de encaisserPrepaiement.
+    commande.prepaiement = {
+      certifie  = true,
+      objet     = commande.paiement.objet,
+      quantite  = commande.paiement.quantite,
+      borne     = os.getComputerID(),
+      signature = Protocole.signerPrepaiement(commande.id, commande.paiement,
+        (config.central or {}).jeton),
+    }
+  end
+
   -- Verification locale avant l'envoi : autant refuser tout de suite ce que
   -- le navire refuserait de toute facon.
   local valide, erreur = Protocole.validerCommande(commande, catalogue.limites)
@@ -534,7 +729,13 @@ local function passerCommande()
   print(("PRIX      : %d x %s"):format(paiement.quantite, paiement.objet))
   couleur(colors.white)
   print("")
-  print(config.rappelPaiement or "")
+  if commande.prepaiement and commande.prepaiement.certifie then
+    couleur(colors.lime)
+    print("DEJA REGLE a cette borne : rien a deposer a la livraison.")
+    couleur(colors.white)
+  else
+    print(config.rappelPaiement or "")
+  end
   print("")
 
   local confirmation = saisir("Confirmer l'envoi ? (o/N) : ", "n")
@@ -555,10 +756,16 @@ local function passerCommande()
     couleur(colors.white)
     print(("Reference : %s"):format(commande.id))
     print(("Rang dans la file : %d"):format(resultat.rang or 0))
-    print(("Montant a deposer : %d x %s")
-      :format(commande.paiement.quantite, commande.paiement.objet))
-    print("")
-    print(config.rappelPaiement or "")
+    if commande.prepaiement and commande.prepaiement.certifie then
+      couleur(colors.lime)
+      print("Commande deja reglee a la borne.")
+      couleur(colors.white)
+    else
+      print(("Montant a deposer : %d x %s")
+        :format(commande.paiement.quantite, commande.paiement.objet))
+      print("")
+      print(config.rappelPaiement or "")
+    end
   else
     couleur(colors.red)
     print("Commande refusee : " .. tostring(resultat))
@@ -697,6 +904,15 @@ local function cyclePrincipal()
   log("info", ETAPES.CHARGEMENT_MODULES, "modules communs charges")
 
   ouvrirReseau()
+
+  -- La grille des prix vient du central, pas de cette borne.
+  if journal.proteger(ETAPES.TARIF, demanderTarif) and grilleCentrale.tarif then
+    log("info", ETAPES.TARIF, "grille centrale n%d en vigueur", grilleCentrale.sequence)
+  else
+    log("avert", ETAPES.TARIF,
+      "central muet : affichage des prix indicatifs transmis par le navire")
+  end
+
   rafraichirCatalogue(true)
 
   menu()

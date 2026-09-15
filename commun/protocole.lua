@@ -21,6 +21,11 @@
     ACCUSE             acceptation ou refus d'une commande
     ETAT               etat courant (phase, position, file, commande en cours)
     AVIS               evenement notable (paiement recu, livraison effectuee...)
+
+  TYPES emis par l'ORDINATEUR CENTRAL :
+    TARIF              grille de prix signee, diffusee a tous les ordinateurs
+  et recus par lui :
+    TARIF_DEMANDE      un navire ou une borne reclame la grille courante
 --------------------------------------------------------------------------------]]
 
 local M = {}
@@ -38,6 +43,8 @@ M.TYPES = {
   ETAT_DEMANDE      = "ETAT_DEMANDE",
   ETAT              = "ETAT",
   AVIS              = "AVIS",
+  TARIF_DEMANDE     = "TARIF_DEMANDE",
+  TARIF             = "TARIF",
 }
 
 -- Phases de mission du navire. Elles sont persistees sur disque : apres un
@@ -176,6 +183,105 @@ function M.calculerPaiement(articles, vitesse, tarif)
   end
 
   return { objet = tarif.objetPaiement or "minecraft:diamond", quantite = quantite }
+end
+
+--------------------------------------------------------------------------------
+-- GRILLE TARIFAIRE CENTRALISEE
+--------------------------------------------------------------------------------
+-- L'ordinateur central diffuse la grille ; navires et bornes l'appliquent.
+--
+-- CE QUE CETTE SIGNATURE FAIT, ET CE QU'ELLE NE FAIT PAS.
+-- rednet n'authentifie personne : n'importe qui peut emettre sur le protocole.
+-- Le jeton partage et l'empreinte ci-dessous empechent une trame malformee,
+-- une erreur de configuration et le rejeu d'une vieille grille moins chere.
+-- Ce n'est PAS de la cryptographie : quelqu'un qui lit le fichier de
+-- configuration d'une borne connait le jeton et peut forger une grille. La
+-- protection reelle reste de ne pas laisser un joueur ouvrir l'ordinateur.
+--------------------------------------------------------------------------------
+
+-- Empreinte 64 bits, deux accumulateurs polynomiaux modulo 2^32.
+-- VOLONTAIREMENT SANS OPERATEUR BINAIRE : ni ~, ni >>, ni <<, qui n'existent
+-- qu'a partir de Lua 5.3, alors que CC: Tweaked tourne sur Cobalt (Lua 5.2).
+-- Les produits restent sous 2^37, tres en deca des 2^53 exacts d'un flottant
+-- double : le resultat est donc identique sur toutes les versions.
+function M.empreinte(texte)
+  texte = tostring(texte)
+  local h1, h2 = 5381, 52711
+  for i = 1, #texte do
+    local octet = texte:byte(i)
+    h1 = (h1 * 33 + octet) % 4294967296
+    h2 = (h2 * 31 + octet * (i % 251 + 1)) % 4294967296
+  end
+  return string.format("%08x%08x", math.floor(h1), math.floor(h2))
+end
+
+-- Rend une table sous une forme stable, independante de l'ordre de pairs().
+local function canoniser(valeur)
+  if type(valeur) ~= "table" then return tostring(valeur) end
+  local cles = {}
+  for cle in pairs(valeur) do cles[#cles + 1] = tostring(cle) end
+  table.sort(cles)
+  local morceaux = {}
+  for _, cle in ipairs(cles) do
+    local sous = valeur[cle]
+    if sous == nil then sous = valeur[tonumber(cle)] end
+    morceaux[#morceaux + 1] = cle .. "=" .. canoniser(sous)
+  end
+  return "{" .. table.concat(morceaux, ",") .. "}"
+end
+M.canoniser = canoniser
+
+function M.signerTarif(tarif, sequence, jeton)
+  return M.empreinte(canoniser(tarif) .. "|" .. tostring(sequence) .. "|" .. tostring(jeton))
+end
+
+-- Verifie une grille recue. 'sequenceConnue' est la derniere acceptee : une
+-- grille plus ancienne est rejetee, pour qu'on ne puisse pas rejouer d'anciens
+-- prix apres une hausse.
+function M.verifierTarif(message, jeton, sequenceConnue)
+  if type(message) ~= "table" or type(message.tarif) ~= "table" then
+    return false, "grille absente ou non structuree"
+  end
+  if type(message.sequence) ~= "number" then
+    return false, "numero de sequence absent"
+  end
+  if sequenceConnue and message.sequence < sequenceConnue then
+    return false, ("grille perimee (sequence %d, deja vu %d)")
+      :format(message.sequence, sequenceConnue)
+  end
+  if jeton and jeton ~= "" then
+    local attendue = M.signerTarif(message.tarif, message.sequence, jeton)
+    if message.signature ~= attendue then
+      return false, "signature invalide : jeton different ou grille alteree"
+    end
+  end
+  return true
+end
+
+--------------------------------------------------------------------------------
+-- PENALITES
+--    Un client qui laisse un navire attendre puis repartir sans payer est
+--    marque. Selon le mode, ses commandes suivantes exigent un pre-paiement a
+--    la borne, ou sont refusees jusqu'a expiration.
+--------------------------------------------------------------------------------
+
+M.MODES_PENALITE = { PREPAIEMENT = "prepaiement", REFUS = "refus" }
+
+-- Retourne : active (booleen), reste (secondes), fiche
+function M.penaliteActive(penalites, client, maintenantMs)
+  if type(penalites) ~= "table" or type(client) ~= "string" or client == "" then
+    return false, 0, nil
+  end
+  local fiche = penalites[client]
+  if type(fiche) ~= "table" or type(fiche.jusqua) ~= "number" then return false, 0, nil end
+  local reste = (fiche.jusqua - (maintenantMs or 0)) / 1000
+  if reste <= 0 then return false, 0, fiche end
+  return true, reste, fiche
+end
+
+function M.signerPrepaiement(commandeId, paiement, jeton)
+  return M.empreinte(tostring(commandeId) .. "|" .. canoniser(paiement)
+    .. "|" .. tostring(jeton))
 end
 
 function M.distance(a, b)

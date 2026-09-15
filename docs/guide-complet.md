@@ -13,22 +13,25 @@ Le navire **ne vole pas tout seul** : il **appelle** le module d'autopilote stan
 - **aucun** PID ;
 - **aucune** commande de moteur ou de gouverne.
 
-Il contient la logistique : file de commandes publiques, prélèvement dans le stockage source, vol commandé, encaissement, dépôt, retour automatique, supervision.
+Il contient la logistique : grille tarifaire centralisée, file de commandes publiques, prélèvement dans le stockage source, vol commandé, encaissement, dépôt, pénalités, retour automatique, supervision.
+
+Il ne décide pas non plus des **prix** : ceux-ci viennent de l'ordinateur central (§6), et les **conteneurs** se déclarent dans l'interface de l'autopilote (§5.2).
 
 Le réseau de balises GPS FrenchNet est supposé en place : le navire utilise `gps.locate()`, donc la constellation de quatre balises non alignées et à altitudes différentes est un prérequis.
 
 ```
-   BORNE PUBLIQUE                NAVIRE                     AUTOPILOTE
-   (tout le monde)               (ce dépôt)                 (déjà construit)
-        |                           |                             |
-        |--- COMMANDE ------------->|                             |
-        |<-- ACCUSE ----------------|                             |
-        |                           |--- ap.allerA(point) ------->|
-        |                           |<-- "etape" / "arrivee" -----|
-        |                           |<-- "anomalie" --------------|
-        |<-- ETAT / AVIS -----------|                             |
-                                    |                             |
-                       parallel.waitForAny(ap.executer, mission...)
+        CENTRAL                BORNE PUBLIQUE          NAVIRE            AUTOPILOTE
+   (local fermé, à code)       (tout le monde)       (ce dépôt)       (déjà construit)
+        |                           |                    |                   |
+        |--- TARIF signé ---------->|                    |                   |
+        |--- TARIF signé ------------------------------->|                   |
+        |                           |--- COMMANDE ------>|                   |
+        |                           |<-- ACCUSE ---------|                   |
+        |                           |                    |-- ap.allerA() --->|
+        |                           |                    |<- "arrivee" ------|
+        |                           |<-- ETAT / AVIS ----|                   |
+                                                         |                   |
+                                    parallel.waitForAny(ap.executer, mission...)
 ```
 
 La boucle de vol `ap.executer()` tourne **dans le même `parallel`** que la mission : c'est l'usage prescrit par le module, et la condition pour qu'un ordre aboutisse.
@@ -42,6 +45,8 @@ La boucle de vol `ap.executer()` tourne **dans le même `parallel`** que la miss
 | `navire/livraison.lua` | Programme embarqué. Machine à états de mission, serveur de commandes, superviseur. |
 | `navire/autopilote.lua` | **Adaptateur** : traduit « va à ce point » vers l'API réelle du module d'autopilote. Zéro logique de vol. |
 | `navire/config_livraison.lua` | Pages à ajouter à la configuration du véhicule — ou recouvrement autonome. |
+| `central/central.lua` | Centrale tarifaire : menu verrouillé par code, diffusion signée de la grille. |
+| `central/config_central.lua` | Configuration de la centrale (serrure, jeton, grille initiale). |
 | `navire/startup.lua` | Lanceur automatique, ultime filet de sécurité au-dessus du superviseur interne. |
 | `borne/borne.lua` | Borne de commande publique (catalogue, panier, niveau de service, coordonnées, suivi). |
 | `borne/config_borne.lua` | Configuration de la borne. |
@@ -49,7 +54,7 @@ La boucle de vol `ap.executer()` tourne **dans le même `parallel`** que la miss
 | `commun/protocole.lua` | Enveloppe rednet, validation des commandes, tarification, distances. |
 | `commun/inventaire.lua` | `pushItems` / `pullItems`, transferts exacts, catalogue, gros volumes. |
 | `tests/craftos.lua` | Mini-émulateur CraftOS, inventaires compris. |
-| `tests/test_livraison.lua` | 97 vérifications, nominal et pannes, API réelle de l'autopilote comprise. |
+| `tests/test_livraison.lua` | 138 vérifications : nominal, pannes, API réelle de l'autopilote, centrale et pénalités. |
 
 ---
 
@@ -204,6 +209,17 @@ Si les deux existent, le recouvrement l'emporte, page par page. Il peut aussi re
 
 ### 5.2 Conteneurs — une page par conteneur
 
+**Le plus simple est de ne pas les écrire à la main.** L'interface de réglage de l'autopilote a une section *Conteneurs* qui les détecte et les écrit dans `/autopilote/config_vehicule.lua` :
+
+```
+interface                  -- puis section "Conteneurs"
+    D       détecte les inventaires branchés et crée une page pour chacun
+    N       ajoute une page vierge
+    Suppr   retire celui sous le curseur
+```
+
+Câblez les modems filaires, appuyez sur `D`, réglez le rôle et le décalage de chaque page, `S` pour enregistrer. Le fichier généré contient alors le tableau ci-dessous, que le système de livraison relit tel quel.
+
 ```lua
 conteneurs = {
   {
@@ -243,7 +259,7 @@ livraison = {
   coffrePaiement       = nil,     -- nom imposé, prioritaire sur le filtre
   coffreReception      = nil,     -- nom imposé
 
-  delaiPaiementMax     = 0,       -- 0 = attente illimitée
+  delaiPaiementMax     = 300,     -- 5 min, puis le navire repart et pénalise
   intervallePaiement   = 5,
   rappelPaiementToutes = 60,
 
@@ -262,7 +278,25 @@ livraison = {
 
 `rayonSecurite` définit la zone dans laquelle le navire se considère **déjà rentré** : au redémarrage, il ne bouge pas s'il s'y trouve.
 
-### 5.4 Tarif
+```lua
+central = {
+  identifiant   = "CENTRALE-01",   -- une grille venue d'ailleurs est ignorée
+  jeton         = "...",           -- LE MÊME sur central, navires et bornes
+  exigerCentral = false,           -- true : rien n'est accepté sans grille centrale
+  delaiDemande  = 5,
+},
+
+penalites = {                      -- repli, tant que le central n'a rien diffusé
+  mode = "prepaiement",            -- "prepaiement" | "refus"
+  duree = 3600,
+  incidentsAvantPenalite = 1,
+  effacerApres = 86400,
+},
+```
+
+### 5.4 Tarif — grille de repli seulement
+
+**La grille qui fait foi est celle de l'ordinateur central** (§6). La page `tarif` ci-dessous n'est qu'un repli, appliqué tant qu'aucune grille centrale n'est arrivée. Dès la première diffusion du central, elle n'est plus consultée.
 
 Le prix est calculé par la **même fonction** côté borne et côté navire, à partir de la même grille. Le chiffre affiché au client est donc exactement celui qui sera exigé à l'arrivée.
 
@@ -289,7 +323,76 @@ tarif = {
 
 ---
 
-## 6. La borne de commande publique
+## 6. L'ordinateur central : les prix
+
+Un seul ordinateur décide des prix. Ni la borne, qui est publique, ni le navire, qui se contente d'appliquer. C'est ce qui permet d'ouvrir une borne à tout le serveur sans ouvrir la caisse.
+
+### 6.1 La serrure
+
+Au premier démarrage, la centrale demande un code et n'en conserve qu'une **empreinte salée**, dans `central/code.dat`. Le code n'est écrit nulle part en clair.
+
+| Réglage | Effet |
+|---|---|
+| `serrure.longueurMinimale` | longueur minimale du code (défaut 4) |
+| `serrure.tentativesMax` | essais avant blocage (défaut 3) |
+| `serrure.verrouillageSecondes` | durée du blocage après échecs (défaut 300) |
+| `serrure.inactiviteSecondes` | reverrouillage automatique sans frappe (défaut 120) |
+
+Chaque échec et chaque blocage sont inscrits au journal. Pendant un blocage, **la diffusion de la grille continue** : couper l'accès au menu n'arrête pas le commerce.
+
+> Ce que la serrure fait : empêcher de lire le code en ouvrant les fichiers, et de forcer le menu par essais successifs. Ce qu'elle ne fait pas : protéger contre quelqu'un qui a accès physique à l'ordinateur et peut casser le disque ou remplacer le programme. **Fermez la pièce.**
+
+### 6.2 Le menu
+
+```
+[1] Prix par objet          un prix unitaire par identifiant d'objet
+[2] Reglages generaux       objet de paiement, forfait, coefficients, plafonds
+[3] Penalites               mode, duree, seuil, oubli
+[4] Diffuser la grille maintenant
+[5] Changer le code d'acces
+[V] Verrouiller
+```
+
+La liste des objets tarifables se remplit toute seule : les navires diffusent le catalogue de leur stockage source, la centrale les note. On peut aussi saisir un identifiant à la main (`a`).
+
+L'écran d'édition d'un prix montre immédiatement l'effet du changement :
+
+```
+minecraft:iron_ingot
+Prix unitaire actuel : 0.0200
+Pour 1000 unites : slow 25 minecraft:diamond | fast 50 minecraft:diamond
+```
+
+### 6.3 La diffusion
+
+Toute modification incrémente un numéro de séquence, écrit la grille sur disque et la diffuse immédiatement. Une diffusion périodique (`diffusionSecondes`, défaut 60) rattrape les machines qui viennent de redémarrer, et tout navire ou borne qui démarre réclame la grille par `TARIF_DEMANDE`.
+
+Chaque grille porte une **signature** calculée sur son contenu, son numéro de séquence et le **jeton partagé** :
+
+```lua
+signature = empreinte( grille_canonisée .. "|" .. sequence .. "|" .. jeton )
+```
+
+Un destinataire refuse la grille si :
+
+- elle se réclame d'un autre `central.identifiant` ;
+- la signature ne correspond pas (contenu altéré, ou jeton différent) ;
+- son numéro de séquence est **inférieur** à la dernière grille acceptée — c'est ce qui empêche de rejouer d'anciens prix après une hausse.
+
+> **Ce que cette signature n'est pas.** Rednet n'authentifie personne, et l'empreinte utilisée n'est pas cryptographique. Qui peut lire le fichier de configuration d'une borne connaît le jeton et peut forger une grille. Cela arrête l'erreur de configuration, la trame corrompue et le rejeu ; cela n'arrête pas un joueur déterminé qui a déjà accès à vos ordinateurs.
+
+### 6.4 Si la centrale se tait
+
+| `central.exigerCentral` | Comportement du navire |
+|---|---|
+| `false` (défaut) | il applique la dernière grille reçue, ou la page `tarif` locale s'il n'en a jamais reçu — le commerce continue |
+| `true` | il **refuse toute commande** tant qu'aucune grille centrale n'est arrivée — aucun risque de facturer au mauvais prix, mais la centrale devient un point de panne unique |
+
+La dernière grille reçue est écrite dans l'état du navire : un redémarrage ne la perd pas, et le numéro de séquence mémorisé continue d'interdire le rejeu.
+
+---
+
+## 7. La borne de commande publique
 
 Un ordinateur avancé, un modem, aucun privilège. Menu :
 
@@ -300,7 +403,7 @@ Un ordinateur avancé, un modem, aucun privilège. Menu :
 [4] Rafraichir l'etat du navire
 ```
 
-### 6.1 Trois écrans de commande
+### 7.1 Trois écrans de commande
 
 1. **Objets et quantités** — catalogue paginé et filtrable, panier cumulatif, une ligne par type d'objet. Les quantités sont plafonnées par le stock réel et par `limites.maxQuantite`.
 2. **Niveau de service** — le prix des deux options est affiché côte à côte :
@@ -311,7 +414,31 @@ Un ordinateur avancé, un modem, aucun privilège. Menu :
    `fast ship` passe devant les `slow ship` déjà en file, **jamais** devant une autre `fast ship` : le prix majoré achète une priorité, pas un passe-droit sur les clients qui l'ont déjà payée. Il vole aussi à la vitesse de croisière pleine, quand `slow ship` est transmis à `facteurVitesseLente`.
 3. **Coordonnées de dépôt** — X, Y, Z saisis par le client, entiers, contrôlés contre `maxPortee` et les limites d'altitude.
 
-### 6.2 Catalogue
+### 7.2 Pré-paiement d'un client pénalisé
+
+Quand le client saisi est sous pénalité (§9.1), la borne agit avant d'envoyer quoi que ce soit :
+
+| Mode diffusé par le central | Ce que fait la borne |
+|---|---|
+| `refus` | elle refuse sur place, en annonçant la durée restante |
+| `prepaiement` | elle réclame le montant **immédiatement**, dans son propre coffre |
+
+En mode pré-paiement, l'écran affiche le coffre à remplir et décompte le temps restant (`prepaiement.delaiMax`, défaut 120 s). Dès que le compte y est, la borne encaisse — elle transfère le paiement dans `prepaiement.coffreRecette` — puis joint à la commande un certificat signé avec le jeton partagé :
+
+```lua
+prepaiement = {
+  certifie = true, objet = "minecraft:diamond", quantite = 5,
+  borne = 7, signature = "...",
+}
+```
+
+Le navire vérifie cette signature, marque la commande comme déjà réglée et **ne redemande rien à l'arrivée**. Un certificat forgé sans le bon jeton est refusé.
+
+Sans `prepaiement.coffreDepot` configuré, la borne ne peut pas encaisser : les clients pénalisés sont alors simplement refusés.
+
+> **Limite assumée.** Le nom du client est du texte libre. Un joueur pénalisé peut en saisir un autre et repartir de zéro. Identifier réellement les joueurs demanderait un périphérique dédié (détecteur de joueur d'Advanced Peripherals, par exemple). En l'état, la pénalité dissuade et trace ; elle n'empêche pas un tricheur décidé.
+
+### 7.3 Catalogue
 
 La borne préfère le **stock local** si elle est câblée au stockage (`conteneursSourceLocaux`) : le catalogue reste alors juste même quand le navire est à l'autre bout de la carte. Sinon elle utilise celui que le navire transmet, et affiche le dernier connu s'il est injoignable.
 
@@ -319,7 +446,7 @@ Les tarifs, les limites et l'état viennent **toujours** du navire.
 
 ---
 
-## 7. Manipulation des inventaires
+## 8. Manipulation des inventaires
 
 Tout repose sur les deux fonctions officielles de l'API `inventory` de CC: Tweaked :
 
@@ -343,7 +470,7 @@ Garde-fous : 20 000 appels maximum par transfert, et arrêt immédiat dès qu'un
 
 ---
 
-## 8. Déroulement d'une mission
+## 9. Déroulement d'une mission
 
 | Phase | Ce qui se passe |
 |---|---|
@@ -357,12 +484,12 @@ Garde-fous : 20 000 appels maximum par transfert, et arrêt immédiat dès qu'un
 
 Chaque changement de phase est **écrit sur disque** (`navire/etat.dat`). Après un plantage, un rechargement de chunk ou un redémarrage du serveur, la mission reprend d'elle-même.
 
-### 8.1 Paiement
+### 9.1 Paiement
 
 À l'arrivée, le navire liste les inventaires visibles et retire les siens et ceux de la base : **ce qui reste appartient au client**. Il y repère le coffre de paiement (nom imposé, ou filtre `motifPaiement`, ou à défaut le premier), puis :
 
 ```
-[INFO] [etape: verification du coffre de paiement] commande CMD-11-482913 : attente de 5 x minecraft:diamond dans 'minecraft:chest_3' (attente illimitee)
+[INFO] [etape: verification du coffre de paiement] commande CMD-11-482913 : attente de 5 x minecraft:diamond dans 'minecraft:chest_3' (abandon apres 300 s)
 [INFO] [etape: verification du coffre de paiement] paiement incomplet : 2 / 5 x minecraft:diamond (attente depuis 60 s)
 [INFO] [etape: verification du coffre de paiement] paiement detecte : 5 x minecraft:diamond (exige 5) apres 184 s
 [INFO] [etape: aspiration du paiement] paiement encaisse : 5 x minecraft:diamond
@@ -370,9 +497,33 @@ Chaque changement de phase est **écrit sur disque** (`navire/etat.dat`). Après
 
 Le montant est aspiré dans un conteneur de rôle `recette` **avant** que la marchandise ne soit déposée, et la commande est marquée `paiementEncaisse`. Si le programme plante entre l'encaissement et le dépôt, la reprise **ne refait pas payer le client**.
 
-`delaiPaiementMax = 0` fait attendre indéfiniment, comme demandé. Une valeur non nulle fait abandonner la commande, avec un avis diffusé et un retour à la base — la cargaison repart avec le navire.
+#### La fenêtre de cinq minutes
 
-### 8.2 Retour automatique
+`delaiPaiementMax` vaut **300 secondes** par défaut. Passé ce délai :
+
+1. le navire **quitte la zone** — il ne reste pas indéfiniment exposé au-dessus d'une plateforme inconnue ;
+2. la commande est annulée, un avis `ABANDON` est diffusé au client ;
+3. la cargaison **revient avec lui** et est reversée au conteneur source dès l'arrivée à la base, pour que le catalogue reste juste et les soutes libres ;
+4. le client est **pénalisé**.
+
+`delaiPaiementMax = 0` rétablit l'attente illimitée. Déconseillé : le navire y reste bloqué et toute la file avec lui.
+
+#### Les pénalités
+
+Un incident est noté par client. Au-delà de `incidentsAvantPenalite` (défaut 1), la pénalité s'applique pour `duree` secondes. Un incident isolé resté sans récidive est oublié après `effacerApres`.
+
+| Mode | Effet sur les commandes suivantes de ce client |
+|---|---|
+| `prepaiement` (défaut) | acceptées **seulement** avec un certificat de pré-paiement signé par une borne (§7.2) |
+| `refus` | refusées jusqu'à expiration, avec la durée restante en motif |
+
+Le régime est diffusé par le central avec la grille ; la page `penalites` locale n'est qu'un repli. Les fiches, elles, appartiennent au navire : elles sont écrites dans son état et survivent à un redémarrage, et il les diffuse dans son `ETAT` pour que les bornes sachent à quoi s'en tenir.
+
+```
+[AVERT] [etape: application d'une penalite client] 'Faction Rouge' penalise (1 incident(s), seuil 1) : mode prepaiement pendant 3600 s
+```
+
+### 9.2 Retour automatique
 
 Dès que la file est vide, sans nouvel ordre :
 
@@ -381,7 +532,7 @@ Dès que la file est vide, sans nouvel ordre :
 
 S'il est déjà dans le `rayonSecurite` d'un point de retour, il ne bouge pas.
 
-### 8.3 Au redémarrage
+### 9.3 Au redémarrage
 
 ```
 [INFO] [etape: verification de la position au demarrage] navire deja au point de securite 'BASE-NORD' (9 blocs du centre) : aucun deplacement
@@ -398,7 +549,7 @@ Une commande interrompue **en vol** est remise en tête de file et refaite depui
 
 ---
 
-## 9. Protocole rednet
+## 10. Protocole rednet
 
 Protocole : `frenchnet_livraison`. Enveloppe commune :
 
@@ -414,9 +565,13 @@ Protocole : `frenchnet_livraison`. Enveloppe commune :
 | `ACCUSE` | navire → borne | `commande`, `accepte`, `motif`, `rang`, `paiement` |
 | `ANNULATION` | borne → navire | `commande` |
 | `ETAT_DEMANDE` / `ETAT` | borne ↔ navire | `etat` |
-| `AVIS` | navire → tous | `commande`, `evenement`, `message` |
+| `AVIS` | navire → tous | `commande`, `evenement`, `message`, `client`, `penalite` |
+| `TARIF_DEMANDE` | navire / borne → central | — |
+| `TARIF` | central → tous | `tarif`, `penalites`, `sequence`, `signature`, `central` |
 
 Événements diffusés : `DEPART`, `ATTENTE_PAIEMENT`, `PAIEMENT_INCOMPLET`, `LIVREE`, `ABANDON`, `ECHEC`.
+
+L'`ETAT` du navire transporte aussi `tarifSequence`, `tarifCentral` (booléen), `penalites` (les fiches par client) et `regimePenalites` : c'est ce qui permet à une borne d'annoncer une pénalité avant même d'envoyer la commande.
 
 Une commande :
 
@@ -431,13 +586,13 @@ Une commande :
 }
 ```
 
-### 9.1 La borne est publique, donc suspecte
+### 10.1 La borne est publique, donc suspecte
 
 Tout ce qui arrive est revalidé à bord avant acceptation : structure, identifiant, nom de client, niveau de service, coordonnées entières et dans la portée, altitude plausible, nombre de lignes, quantités entières positives et plafonnées, volume total, **et prix recalculé**. Un message d'un autre protocole ou d'une autre version est ignoré sans réponse.
 
 ---
 
-## 10. Journalisation et diagnostic
+## 11. Journalisation et diagnostic
 
 Format d'une ligne :
 
@@ -467,10 +622,18 @@ Niveaux : `DEBUG` < `INFO` < `AVERT` < `ERREUR` < `CRITIQUE`. `journal.niveauEcr
 | `configuration vehicule absente` | l'autopilote n'est pas installé | installer `/autopilote/config_vehicule.lua`, ou indiquer son chemin |
 | `configuration invalide` | page de livraison manquante | lire le CRITIQUE qui précède : il nomme le champ |
 | `file d'attente pleine` | plus de `fileMax` commandes | augmenter la limite ou attendre |
+| `grille tarifaire centrale indisponible` | `exigerCentral = true` et central muet | relancer la centrale, ou repasser `exigerCentral` à `false` |
+| `signature invalide : jeton different ou grille alteree` | `jeton` différent d'une machine à l'autre | remettre le **même** jeton partout |
+| `elle se reclame de 'X'` | `central.identifiant` ne correspond pas | aligner l'identifiant sur celui de la centrale |
+| `grille perimee` | ancienne grille rejouée, ou centrale réinstallée à zéro | normal après un rejeu ; sinon effacer `navire/etat.dat` |
+| `pre-paiement exige a la borne` | client sous pénalité en mode `prepaiement` | le client règle à la borne, ou attendre l'expiration |
+| `certificat de pre-paiement invalide` | jeton différent sur la borne | remettre le même jeton |
+| `cette borne n'est pas equipee pour encaisser` | `prepaiement.coffreDepot` non renseigné | brancher un coffre par modem filaire et le déclarer |
+| `ACCES BLOQUE` sur la centrale | trois codes erronés | attendre `verrouillageSecondes` ; l'incident est au journal |
 
 ---
 
-## 11. Tests
+## 12. Tests
 
 Un mini-émulateur CraftOS (`tests/craftos.lua`) rejoue le programme hors du jeu, avec horloge virtuelle, rednet, GPS, `parallel` et des **inventaires conformes au contrat de l'API `inventory`** (table creuse, une pile maximum par appel). Depuis la racine :
 
@@ -478,7 +641,7 @@ Un mini-émulateur CraftOS (`tests/craftos.lua`) rejoue le programme hors du jeu
 lua5.4 tests/test_livraison.lua
 ```
 
-**97 vérifications** réparties en treize sections :
+**138 vérifications** réparties en seize sections :
 
 | Section | Couverture |
 |---|---|
@@ -486,7 +649,7 @@ lua5.4 tests/test_livraison.lua
 | B | prélèvement exact sur un *bulk container* de 50 000 objets, stock restant intact, vidage, catalogue |
 | C | livraison de bout en bout : chargement, vol, paiement, dépôt, retour — et vérification que le navire s'est placé pour que la soute tombe sur la cible |
 | D | paiement déposé en retard : attente en boucle puis livraison |
-| E | paiement jamais déposé : abandon au délai, cargaison conservée, retour |
+| E | paiement jamais déposé : abandon au délai, cargaison reversée au stock, client pénalisé |
 | F | autopilote absent : aucune commande engagée, stock intact |
 | G | redémarrage hors zone de sécurité avec une commande en file |
 | H | redémarrage déjà à un point de sécurité : aucun déplacement |
@@ -494,11 +657,14 @@ lua5.4 tests/test_livraison.lua
 | J | priorité `fast ship` et tarification différenciée |
 | K | configuration invalide : relance automatique à temporisation progressive |
 | L | recouvrement facultatif : `navire/config_livraison.lua` a le dernier mot |
-| M | borne publique : parcours complet d'une commande, du catalogue à l'accusé |
+| M | grille centrale : adoption, signature fausse, grille étrangère, rejeu d'une ancienne grille, `exigerCentral` |
+| N | pénalités : refus, pré-paiement exigé, certificat forgé rejeté, commande pré-payée livrée sans attente |
+| O | borne publique : parcours complet d'une commande, du catalogue à l'accusé |
+| P | centrale tarifaire : serrure, blocage après trois échecs, modification publiée, diffusion signée, code jamais en clair |
 
 ---
 
-## 12. Notes techniques
+## 13. Notes techniques
 
 - **Accents** : les chaînes affichées et journalisées sont volontairement sans accents. Le terminal de CC: Tweaked est orienté octet ; un caractère UTF-8 accentué y apparaîtrait sous forme de deux glyphes parasites. Les commentaires du code, jamais affichés, sont rédigés normalement.
 - **Chargement des modules** : CC: Tweaked n'offre pas de `require` fiable hors `/rom/modules`. Chaque fichier est chargé explicitement par `load(source, nom, "t", _ENV)`, ce qui fonctionne sur toutes les versions et rend le code testable hors du jeu.

@@ -31,6 +31,37 @@ return {
   -- Nombre d'articles affiches par page de catalogue.
   articlesParPage = 10,
 
+  ------------------------------------------------------------------ CENTRAL ---
+  -- La borne n'invente aucun prix : elle affiche la grille diffusee par
+  -- l'ordinateur central, et le navire exige a l'arrivee cette meme grille.
+  central = {
+    -- Identifiant de la centrale tarifaire. Une grille qui se reclame d'un
+    -- autre identifiant est ignoree.
+    identifiant = "CENTRALE-01",
+    -- JETON PARTAGE, identique sur le central, les navires et les bornes.
+    -- Il signe la grille recue et le certificat de pre-paiement emis.
+    jeton = "CHANGEZ-MOI-jeton-partage-frenchnet",
+    -- Attente d'une reponse du central au demarrage, en secondes.
+    delaiDemande = 5,
+  },
+
+  -------------------------------------------------------------- PRE-PAIEMENT --
+  -- Un client penalise (il a laisse un navire repartir sans payer) doit
+  -- regler a la borne avant qu'une nouvelle commande soit acceptee.
+  prepaiement = {
+    -- Coffre ou le client depose son paiement, relie a la borne par modem
+    -- filaire. nil = la borne ne peut pas encaisser, les clients penalises
+    -- sont alors simplement refuses.
+    coffreDepot = nil,
+    -- Coffre ou la borne range le paiement encaisse. nil = il reste dans le
+    -- coffre de depot.
+    coffreRecette = nil,
+    -- Temps laisse au client pour deposer, en secondes.
+    delaiMax = 120,
+    -- Periode de verification du coffre, en secondes.
+    intervalle = 3,
+  },
+
   -- Nom propose par defaut dans le formulaire (le joueur peut le changer).
   clientParDefaut = "",
 
