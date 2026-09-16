@@ -1211,5 +1211,203 @@ do
     (banc5.contient("SANS capteur de cap")) and (banc5.contient("incertaine")))
 end
 
+--------------------------------------------------------------------------------
+print("\n== TEST 24 : calibration automatique ==")
+do
+  local banc, env, etat, autopilote = monter({ sansInstance = true })
+  local calibration = banc.charger(SRC .. "/calibration.lua")
+
+  -- a. Analyse d'une reponse du premier ordre connue : K = 8, tau = 1.2 s.
+  local echantillons = {}
+  for i = 0, 60 do
+    local t = i * 0.25
+    echantillons[#echantillons + 1] = { t = t, v = 8 * (1 - math.exp(-t / 1.2)) }
+  end
+  local K, tau = calibration.interne.analyser(echantillons, 0.4)
+  verifier("regime etabli retrouve", K and math.abs(K - 8) < 0.3,
+    K and string.format("%.3f", K))
+  verifier("inertie retrouvee", tau and math.abs(tau - 1.2) < 0.35,
+    tau and string.format("%.3f", tau))
+
+  -- b. Un axe immobile est signale, pas traduit en gains absurdes.
+  local plats = {}
+  for i = 0, 40 do plats[#plats + 1] = { t = i * 0.25, v = 0.001 } end
+  local Kplat, _, motif = calibration.interne.analyser(plats, 0.4)
+  verifier("axe immobile detecte", Kplat == nil and motif ~= nil, tostring(motif))
+  verifier("le motif oriente le diagnostic",
+    motif and motif:find("cable", 1, true) ~= nil, tostring(motif))
+
+  -- c. Formules de gains : kp = 2/K, et l'inertie regle ki et kd.
+  local gains = calibration.interne.gainsDeduits(8, 1.2)
+  verifier("kp deduit du gain vehicule", math.abs(gains.kp - 2 / 8) < 1e-9,
+    string.format("%.4f", gains.kp))
+  verifier("ki deduit de l'inertie", math.abs(gains.ki - gains.kp / 3.6) < 1e-9)
+  verifier("kd deduit de l'inertie", math.abs(gains.kd - gains.kp * 1.2 / 6) < 1e-9)
+  verifier("boucle externe deduite de l'inertie",
+    math.abs(gains.position - 1 / 3.6) < 1e-9)
+  local rapides = calibration.interne.gainsDeduits(8, 0.3)
+  verifier("un vehicule plus vif recoit des gains plus fermes",
+    rapides.ki > gains.ki and rapides.position > gains.position)
+
+  -- d. Mesure reelle sur le vehicule simule (vMax 10, vertical 5, lacet 50).
+  local banc2, env2, etat2, autopilote2 = monter({
+    budget = 400, sansInstance = true,
+    decalageGps = { x = 0, y = 2, z = 0 },
+    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    vehicule = { x = 0, y = 150, z = 0, cap = 0, vLateralMax = 0 },
+  })
+  local calibration2 = banc2.charger(SRC .. "/calibration.lua")
+  local ap2 = autopilote2.nouveau({
+    config = "/autopilote/config_vehicule.lua", commandes = banc2.pilote() })
+  ap2.initialiser()
+  ap2.pas(); env2.sleep(0.4); ap2.pas()
+
+  local resultats, motifEchec = calibration2.mesurer(ap2, {
+    reglages = { duree = 8, repos = 3, rayonMax = 400 },
+  })
+  verifier("la calibration aboutit", resultats ~= nil, tostring(motifEchec))
+  if resultats then
+    verifier("marche avant mesuree proche de la realite du vehicule",
+      resultats.avance and math.abs(resultats.avance.K - 10) < 1.5,
+      resultats.avance and string.format("%.2f (reel 10)", resultats.avance.K))
+    verifier("montee mesuree proche de la realite",
+      resultats.vertical and math.abs(resultats.vertical.K - 5) < 1.2,
+      resultats.vertical and string.format("%.2f (reel 5)", resultats.vertical.K))
+    verifier("inertie mesuree plausible",
+      resultats.avance and resultats.avance.tau > 0.2 and resultats.avance.tau < 3,
+      resultats.avance and string.format("%.2f", resultats.avance.tau))
+    verifier("axe lateral non equipe : ignore sans faire echouer l'essai",
+      resultats.lateral == nil)
+
+    local propositions, detail = calibration2.proposer(resultats, ap2.config)
+    verifier("vitesse de croisiere proposee sous la mesure (marge)",
+      propositions.vitesses.croisiere < resultats.avance.K
+      and propositions.vitesses.croisiere > resultats.avance.K * 0.7,
+      string.format("%.2f", propositions.vitesses.croisiere))
+    verifier("vitesse d'approche deduite de la croisiere",
+      propositions.vitesses.approche > 0
+      and propositions.vitesses.approche < propositions.vitesses.croisiere)
+    verifier("axe lateral remis a zero faute de mesure",
+      propositions.vitesses.lateraleMax == 0)
+    verifier("gains proposes pour les axes mesures",
+      propositions.gains.avance and propositions.gains.avance.croisiere.kp > 0
+      and propositions.gains.altitude)
+    verifier("gains de maintien plus fermes que ceux de croisiere",
+      propositions.gains.avance.maintien.kp > propositions.gains.avance.croisiere.kp)
+    verifier("compte rendu lisible produit", #detail >= 3, "#" .. #detail)
+
+    calibration2.appliquer(ap2.config, propositions)
+    verifier("configuration vive mise a jour",
+      ap2.config.vitesses.croisiere == propositions.vitesses.croisiere)
+    verifier("le vehicule est rendu au maintien de position apres calibration",
+      ap2.etat().mode == "MAINTIEN" or ap2.etat().mode == "ARRET", ap2.etat().mode)
+  end
+
+  -- e. Interruption au clavier.
+  local banc3, env3, etat3, autopilote3 = monter({
+    budget = 300, sansInstance = true,
+    vehicule = { x = 0, y = 150, z = 0, cap = 0, vLateralMax = 0 } })
+  local calibration3 = banc3.charger(SRC .. "/calibration.lua")
+  local ap3 = autopilote3.nouveau({
+    config = "/autopilote/config_vehicule.lua", commandes = banc3.pilote() })
+  ap3.initialiser()
+  ap3.pas(); env3.sleep(0.4); ap3.pas()
+  banc3.taper("q")
+  local rien, motifArret = calibration3.mesurer(ap3, { reglages = { duree = 8 } })
+  verifier("une touche interrompt la calibration", rien == nil)
+  verifier("l'interruption est expliquee",
+    motifArret and motifArret:find("clavier", 1, true) ~= nil, tostring(motifArret))
+  verifier("commandes neutralisees apres interruption",
+    etat3.vehicule.commandes.avance == 0 and etat3.vehicule.commandes.vertical == 0)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 25 : itineraires et console de navigation ==")
+do
+  local banc, env, etat, autopilote = monter({ sansInstance = true })
+  local routesLib = banc.charger(SRC .. "/routes.lua")
+
+  -- a. Aller-retour disque : l'altitude absente doit le RESTER.
+  local liste = {
+    { nom = "LIVRAISON-NORD", altitudeCroisiere = 350, points = {
+        { x = 480, z = -1200, nom = "SORTIE" },
+        { x = 1150, y = 140, z = -2400, nom = "COL", arret = true },
+        { x = 1980, y = 118, z = -3100, nom = "ENTREPOT", type = "depot", cap = 90 },
+    }},
+    { nom = "PATROUILLE", points = { { x = 10, z = 20 } } },
+  }
+  verifier("enregistrement des itineraires", routesLib.enregistrer(liste))
+  local relue = routesLib.charger()
+  verifier("deux routes relues", #relue == 2, "#" .. #relue)
+  verifier("altitude absente conservee absente", relue[1].points[1].y == nil)
+  verifier("altitude presente conservee", relue[1].points[2].y == 140)
+  verifier("type, cap, arret et nom conserves",
+    relue[1].points[3].type == "depot" and relue[1].points[3].cap == 90
+    and relue[1].points[2].arret == true and relue[1].points[1].nom == "SORTIE")
+  verifier("altitude de croisiere de la route conservee",
+    relue[1].altitudeCroisiere == 350)
+  verifier("longueur de route calculee", routesLib.longueur(relue[1]) > 2000,
+    string.format("%.0f", routesLib.longueur(relue[1])))
+
+  -- b. Validation : ce sont les pieges concrets qui doivent etre attrapes.
+  local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+  local okVide, anomaliesVide = routesLib.valider({ nom = "X", points = {} }, config)
+  verifier("route vide refusee", not okVide and #anomaliesVide >= 1)
+
+  local okDepot, anomaliesDepot = routesLib.valider({ nom = "X", points = {
+    { x = 1, z = 2, type = "depot" } } }, config)
+  verifier("depot sans altitude refuse", not okDepot)
+  verifier("le motif explique qu'il serait survole",
+    table.concat(anomaliesDepot, " "):find("survole", 1, true) ~= nil)
+
+  local okFinal = routesLib.valider({ nom = "X", points = { { x = 1, z = 2 } } }, config)
+  verifier("point final sans altitude signale", not okFinal)
+
+  local okHaut, anomaliesHaut = routesLib.valider({ nom = "X",
+    altitudeCroisiere = 100, points = { { x = 1, y = 200, z = 2, type = "depot" } } }, config)
+  verifier("point au-dessus de la croisiere signale", not okHaut)
+  verifier("le motif dit que le vehicule montera",
+    table.concat(anomaliesHaut, " "):find("montera", 1, true) ~= nil)
+
+  local okBonne = routesLib.valider(relue[1], config)
+  verifier("une route coherente est acceptee", okBonne)
+
+  -- c. Conversion en mission.
+  local points, options = routesLib.versMission(relue[1])
+  verifier("conversion en itineraire d'autopilote", #points == 3
+    and points[1].y == nil and points[3].type == "depot")
+  verifier("options de mission transmises", options.altitudeCroisiere == 350)
+
+  -- d. La console : creer une route, y ajouter un point, l'enregistrer.
+  local banc2, env2, etat2, autopilote2 = monter({ sansInstance = true })
+  os.execute("rm -f " .. BANC .. "/autopilote/itineraires.lua")
+  local console = banc2.charger(SRC .. "/console.lua")
+  verifier("console chargee comme bibliotheque",
+    type(console) == "table" and type(console.demarrer) == "function")
+
+  banc2.taper("n")                    -- nouvelle route
+  banc2.tapeTexte("ESSAI")
+  banc2.taper("enter")
+  banc2.taper("enter")                -- ouvrir l'ecran des points
+  banc2.taper("a")                    -- ajouter un point a la position GPS
+  banc2.taper("s")                    -- enregistrer
+  banc2.taper("q")                    -- retour aux itineraires
+  banc2.taper("q")                    -- quitter
+  console.demarrer()
+
+  local routesLib2 = banc2.charger(SRC .. "/routes.lua")
+  local apres = routesLib2.charger()
+  verifier("route creee depuis la console", #apres == 1 and apres[1].nom == "ESSAI",
+    "#" .. #apres)
+  verifier("point capture depuis le GPS", apres[1] and #apres[1].points == 1,
+    apres[1] and ("#" .. #apres[1].points))
+  verifier("la capture prend la position reelle du vehicule",
+    apres[1] and apres[1].points[1] and math.abs(apres[1].points[1].x - 100) <= 2,
+    apres[1] and apres[1].points[1] and tostring(apres[1].points[1].x))
+  -- Le message passe par la barre d'etat de la console, pas par print.
+  verifier("la console previent que la capture vise l'antenne",
+    banc2.ecranTexte():find("ANTENNE", 1, true) ~= nil)
+end
+
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))
 os.exit(echecs == 0 and 0 or 1)

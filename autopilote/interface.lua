@@ -1116,6 +1116,27 @@ function interface.demarrer(...)
   return interface.configurer()
 end
 
+--------------------------------------------------------------------------------
+-- BOITE A OUTILS PARTAGEE
+--    La console de navigation reutilise exactement le meme habillage : une
+--    seule definition du style FrenchNet, pas deux qui divergent.
+--------------------------------------------------------------------------------
+
+interface.ui = {
+  PALETTE = PALETTE,
+  fond = fond,
+  encre = encre,
+  ecrireA = ecrireA,
+  ligneVide = ligneVide,
+  barre = barre,
+  saisir = saisir,
+  heure = heure,
+  formaterValeur = formaterValeur,
+  tracerCourbe = tracerCourbe,
+  ecran = ecran,
+  couleurDisponible = couleurDisponible,
+}
+
 local function lanceDepuisLeShell()
   if not (shell and shell.getRunningProgram) then return false end
   local ok, chemin = pcall(shell.getRunningProgram)

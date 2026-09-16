@@ -109,6 +109,7 @@ end)
 
 ### Ce qu'il fait tout seul
 
+- **Profil de vol vertical** : montée verticale au départ, transit en palier, arrivée à l'aplomb puis **descente verticale** — jamais d'approche en pente au-dessus du relief.
 - **Asservissement en cascade** sur quatre axes (altitude, cap, avance, dérive) : une boucle de position calcule une vitesse cible, une boucle de vitesse produit la commande — le véhicule ralentit progressivement au lieu de dépasser puis revenir.
 - **PID robustes** : intégrale bornée et gelée en saturation, dérivée sur la mesure, limitation de pente, temps réellement écoulé.
 - **Repli automatique en zone morte** si un axe devient instable, avec hystérésis, journalisation et forçage manuel.
@@ -119,11 +120,21 @@ end)
 ### Réglage
 
 ```
-interface            -- configuration du véhicule (au sol)
 cablage              -- vérification du câblage et pilotage manuel au clavier
+console              -- calibration, itinéraires, supervision de vol
+interface            -- configuration détaillée du véhicule
 interface vol        -- réglage des gains PID en vol, avec courbes temps réel
 interface journal    -- consultation du journal
 ```
+
+### La console de navigation
+
+`console` est l'interface de vol : elle crée et enregistre des **itinéraires à plusieurs points de passage**, lance les vols et les supervise en direct.
+
+- **L'altitude d'un point est facultative.** Sans altitude, le point est survolé à l'altitude de croisière (**350** par défaut, au-dessus de la limite de construction). Avec une altitude, le véhicule s'y rend **à l'aplomb** puis **descend verticalement**.
+- Le départ est une **montée verticale** à l'aplomb du point de départ, avant tout transit.
+- `A` capture la position GPS courante comme point de passage : on vole sur place, on appuie, le point est enregistré.
+- La **calibration** (`C`) fait mesurer au véhicule ce qu'il sait réellement faire — vitesse à pleine poussée et inertie, sur chaque axe — et en déduit ses vitesses et un jeu de gains PID de départ. Plus rien à deviner à la main.
 
 Chaque véhicule a son propre `config_vehicule.lua` : identité, décalages, tolérances, vitesses, gabarit, gains PID. **Aucune valeur de vol n'est écrite en dur dans le code** — une valeur obligatoire manquante empêche le démarrage et est nommée en clair. La position de ravitaillement est une constante de réseau verrouillée (`ravitaillement.lua`), affichée mais non modifiable.
 
@@ -137,7 +148,7 @@ Bancs d'essai hors du jeu, sur un interpréteur Lua 5.4 :
 
 ```
 lua5.4 tests/test_balise.lua        -- 49 vérifications
-lua5.4 tests/test_autopilote.lua    -- 180 vérifications, dont un vol simulé en boucle fermée
+lua5.4 tests/test_autopilote.lua    -- 242 vérifications, dont des vols simulés en boucle fermée
 ```
 
 ## Fichiers
@@ -153,6 +164,9 @@ lua5.4 tests/test_autopilote.lua    -- 180 vérifications, dont un vol simulé e
 | `autopilote/ravitaillement.lua` | Station de ravitaillement (verrouillée) |
 | `autopilote/interface.lua` | Interface de réglage et menu de vol |
 | `autopilote/cablage.lua` | Vérification du câblage et pilotage manuel |
+| `autopilote/console.lua` | Console de navigation : itinéraires, vol, calibration |
+| `autopilote/routes.lua` | Gestion des itinéraires enregistrés |
+| `autopilote/calibration.lua` | Mesure automatique du véhicule et des gains |
 | `autopilote/startup.lua` | Démarrage automatique du véhicule |
 | `autopilote/exemple_mission.lua` | Trois missions types |
 | `tests/banc_vol.lua` | Mini-CraftOS + simulateur de vol |

@@ -89,6 +89,7 @@ local MODES = {
   TRANSIT     = "TRANSIT",     -- en route vers une cible
   MAINTIEN    = "MAINTIEN",    -- arrive : correction permanente de la derive
   SECOURS     = "SECOURS",     -- GPS perdu : commandes neutres + anomalie
+  MANUEL      = "MANUEL",      -- commandes imposees de l'exterieur, mesure active
 }
 autopilote.MODES = MODES
 
@@ -1573,6 +1574,7 @@ function autopilote.nouveau(options)
     optionsMission = {},
     dansMarges  = 0,     -- duree continue passee dans les tolerances
     hauteurSol = nil, sourceSol = "aucun",
+    commandesManuelles = {},
     tolerances = nil,   -- tolerances effectives (config, ou surcharge de mission)
     tTick = nil, tReel = nil, dt = 0,
     perteGps = 0, lecturesValides = 0, rejetsConsecutifs = 0,
@@ -2584,6 +2586,26 @@ function autopilote.nouveau(options)
       return etat
     end
 
+    ---------------------------------------------------------------------- manuel
+    -- Commandes imposees par un programme exterieur (cablage, calibration),
+    -- mais TOUTE la chaine de mesure continue de tourner : position filtree,
+    -- vitesse, cap, hauteur sol. C'est ce qui permet de mesurer le vehicule
+    -- avec la meme qualite qu'en vol automatique.
+    if etat.mode == MODES.MANUEL then
+      etat.commandes = {
+        avance   = borner(etat.commandesManuelles.avance or 0, -1, 1),
+        lacet    = borner(etat.commandesManuelles.lacet or 0, -1, 1),
+        vertical = borner(etat.commandesManuelles.vertical or 0, -1, 1),
+        lateral  = borner(etat.commandesManuelles.lateral or 0, -1, 1),
+      }
+      sorties.appliquer(etat.commandes)
+      debugCycle(ETAPES.APPLICATION_CMD, string.format(
+        "manuel : avance %.2f lacet %.2f vertical %.2f lateral %.2f",
+        etat.commandes.avance, etat.commandes.lacet,
+        etat.commandes.vertical, etat.commandes.lateral))
+      return etat
+    end
+
     ------------------------------------------------------- cible et limites du cycle
     local cible, limites, point, estDernier
 
@@ -3118,6 +3140,37 @@ function autopilote.nouveau(options)
       x = station.position.x, y = station.position.y, z = station.position.z,
       type = "atterrissage", cap = station.capFinal, nom = station.nom,
     }, optionsMission)
+  end
+
+  --- Pilotage manuel : les commandes sont imposees, la mesure continue.
+  -- Utilise par l'outil de cablage et par la calibration, qui ont besoin de
+  -- pousser le vehicule tout en le mesurant finement.
+  function ap.piloterManuellement(commandes)
+    etat.commandesManuelles = commandes or {}
+    if etat.mode ~= MODES.MANUEL then
+      etat.modeAvantManuel = etat.mode
+      etat.mode = MODES.MANUEL
+      etat.itineraire = nil
+      etat.index = 0
+      for _, axe in ipairs(AXES) do etat.axes[axe].pid.reinitialiser(0) end
+      journal.avert(ETAPES.APPLICATION_CMD, "passage en pilotage MANUEL")
+      emettre("mode", { mode = MODES.MANUEL, manuel = true })
+    end
+    return ap
+  end
+
+  --- Sort du pilotage manuel et tient la position courante.
+  function ap.reprendreAutomatique()
+    if etat.mode ~= MODES.MANUEL then return ap end
+    etat.commandesManuelles = {}
+    sorties.neutraliser()
+    journal.info(ETAPES.APPLICATION_CMD, "fin du pilotage manuel")
+    if etat.position then
+      entrerMaintien(copierProfond(etat.position), "sortie du pilotage manuel")
+    else
+      etat.mode = MODES.ARRET
+    end
+    return ap
   end
 
   --- Hauteur au-dessus du sol, en blocs, ou nil si aucune mesure.
