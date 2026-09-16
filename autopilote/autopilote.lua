@@ -3222,7 +3222,7 @@ end
 
 local ORDRE_CLES = {
   "nom", "identifiant", "decalageGps", "decalageDepot", "decalageDansRepereVehicule",
-  "gabarit", "tolerances", "vitesses", "gains", "pilotage", "maintien",
+  "gabarit", "conteneurs", "tolerances", "vitesses", "gains", "pilotage", "maintien",
   "gps", "cap", "sorties", "mission", "journal",
   "x", "y", "z", "longueur", "largeur", "hauteur",
   "position", "croisiere", "maintien", "kp", "ki", "kd",
@@ -3234,6 +3234,7 @@ local COMMENTAIRES = {
   decalageGps    = "Decalage ordinateur -> centre du vehicule (x=tribord, y=haut, z=avant)",
   decalageDepot  = "Decalage centre -> point de depot / d'atterrissage",
   gabarit        = "Dimensions du vehicule, en blocs",
+  conteneurs     = "Conteneurs embarques : peripherique, role et position par rapport au centre",
   tolerances     = "Marges de tolerance (zone morte) et duree d'arrivee",
   vitesses       = "Vitesses de vol, altitude de croisiere et distances",
   gains          = "Gains PID : position (boucle externe), croisiere et maintien (boucle interne)",

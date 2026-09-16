@@ -244,6 +244,27 @@ interface journal    -- consultation du journal
 
 **Écran de configuration** — barre de titre, panneau de sections à gauche, champs à droite, aide contextuelle et barre d'état. Clavier (flèches, `Tab`, `Entrée`, `S` sauvegarder, `J` journal, `Q` quitter) **et souris** sur les ordinateurs avancés. La saisie remplace la valeur à la première frappe. Une configuration invalide n'est pas enregistrée sans confirmation, et l'anomalie est affichée en clair. La section *Ravitaillement* est marquée d'un cadenas : consultable, non modifiable.
 
+**Section *Conteneurs*** — seule section à longueur variable, juste avant le cadenas du ravitaillement. Elle décrit les conteneurs embarqués d'un véhicule cargo : périphérique, rôle et position par rapport au centre. C'est la page que consomme le système de livraison FrenchNet ; un véhicule sans soute la laisse simplement vide.
+
+| Champ | Rôle |
+|---|---|
+| `nom` | libellé lisible, repris dans les journaux |
+| `peripherique` | nom réseau rendu par `peripheral.getNames()`, choisi dans la liste détectée |
+| `role` | `expedition` (livré au client), `recette` (reçoit le paiement), `tampon` (réserve interne) |
+| `decalage` x / y / z | position du conteneur par rapport au **centre** du véhicule, même repère que `decalageDepot` |
+| `priorite` | ordre de remplissage au chargement |
+| `capacite` | emplacements, indicatif |
+
+Trois touches propres à cette section :
+
+| Touche | Effet |
+|---|---|
+| `N` | ajouter une page de conteneur vierge |
+| `Suppr` | retirer le conteneur sur lequel se trouve le curseur |
+| `D` | détecter les inventaires branchés et créer une page pour chacun |
+
+`D` est le chemin le plus rapide : câblez les modems filaires, appuyez sur `D`, puis réglez rôle et décalage de chaque page. Le fichier généré contient alors un vrai tableau `conteneurs = { ... }`, relu tel quel par l'autopilote comme par le système de livraison.
+
 **Menu de réglage en vol** — affiche en temps réel, pour l'axe choisi : **erreur courante, vitesse cible, vitesse réelle, commande envoyée**, état de saturation, mode de l'axe, et **l'historique des dernières secondes tracé à l'écran** (erreur et commande). On voit immédiatement si le réglage oscille — dents de scie serrées — ou s'il traîne — pente molle qui n'atteint jamais zéro.
 
 | Touche | Effet |
