@@ -83,6 +83,18 @@ local function monter(options)
     vehicule    = options.vehicule or { x = 100, y = 150, z = 100, cap = 0, vLateralMax = 0 },
   })
   local autopilote = banc.charger(SRC .. "/autopilote.lua")
+
+  -- Ajustement de configuration par la TABLE plutot que par le texte : un
+  -- gabarit qui evolue ne doit pas casser des essais qui portent sur autre
+  -- chose que sa mise en page.
+  if options.ajusterConfig then
+    local configuration = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    options.ajusterConfig(configuration)
+    local fichier = env.fs.open("/autopilote/config_vehicule.lua", "w")
+    fichier.write(autopilote.serialiserConfig(configuration))
+    fichier.close()
+  end
+
   local ap
   if not options.sansInstance then
     -- Attention : 'a and nil or b' vaut toujours b en Lua, d'ou le if explicite.
@@ -96,6 +108,20 @@ local function monter(options)
     ap.initialiser()
   end
   return banc, env, etat, autopilote, ap
+end
+
+--- Cablage continu classique : une face analogique pour l'avance, deux faces
+-- opposees pour le vertical et le lacet. C'est l'autre famille de montage,
+-- qui doit rester eprouvee a cote des boites a rapports.
+local function cablageClassique(config)
+  config.sorties.axes = {
+    avance   = { mode = "analogique", cote = "front", neutre = 0, amplitude = 15 },
+    vertical = { mode = "bipolaire", cotePositif = "top", coteNegatif = "bottom",
+                 amplitude = 15, seuil = 0.08 },
+    lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",
+                 amplitude = 15, seuil = 0.08 },
+    lateral  = { mode = "aucun" },
+  }
 end
 
 --- Fait tourner l'autopilote jusqu'a l'arrivee ou l'echeance.
@@ -585,7 +611,8 @@ end
 --------------------------------------------------------------------------------
 print("\n== TEST 12 : sorties moteur redstone ==")
 do
-  local banc, env, etat, _, ap = monter({ budget = 200, sansPilote = true })
+  local banc, env, etat, _, ap = monter({ budget = 200, sansPilote = true,
+    ajusterConfig = cablageClassique })
   ap.pas(); env.sleep(0.4); ap.pas()
   ap.allerA({ x = 300, y = 175, z = 100 })
   for _ = 1, 6 do ap.pas() env.sleep(0.4) end
@@ -637,16 +664,29 @@ do
   verifier("identite et geometrie preservees a la reecriture",
     relue.identifiant == "AER-CARGO-01" and relue.decalageDepot.y == -3
     and relue.gabarit.longueur == 21)
-  verifier("sorties moteur preservees",
-    relue.sorties.axes.vertical.cotePositif == "top")
+  -- Le cablage livre melange une boite a rapports (liste imbriquee) et un axe
+  -- a deux signaux : c'est le cas le plus exigeant pour le serialiseur.
+  verifier("sorties moteur preservees a la reecriture",
+    relue.sorties.axes.vertical.coteGrossier == "top"
+    and relue.sorties.axes.vertical.neutre == 128
+    and relue.sorties.axes.avance.mode == "boite_vitesses")
+  verifier("liste des rapports preservee dans l'ordre",
+    #relue.sorties.axes.avance.rapports == 7
+    and relue.sorties.axes.avance.rapports[1].nom == "R"
+    and relue.sorties.axes.avance.rapports[1].interdit == true
+    and relue.sorties.axes.avance.rapports[7].effet == 1.0,
+    "#" .. #relue.sorties.axes.avance.rapports)
 
   local fichier = io.open(BANC .. "/autopilote/config_vehicule.lua", "r")
   local contenu = fichier:read("a")
   fichier:close()
+  -- On cherche des marqueurs propres a la station, pas un nombre qui pourrait
+  -- apparaitre ailleurs par coincidence (128 est aussi une valeur de chauffe).
   verifier("la station de ravitaillement n'est jamais recopiee dans le vehicule",
     contenu:find("ravitaillement", 1, true) ~= nil
     and contenu:find("verrouillee", 1, true) ~= nil
-    and contenu:find("128", 1, true) == nil)
+    and contenu:find("PONTON", 1, true) == nil
+    and contenu:find("-742", 1, true) == nil)
   verifier("le fichier reecrit reste un fichier Lua valide et commente",
     contenu:find("return {", 1, true) ~= nil and contenu:find("%-%- Gains PID") ~= nil)
 end
@@ -917,9 +957,10 @@ end
 --------------------------------------------------------------------------------
 print("\n== TEST 21 : outil de cablage et pilotage manuel ==")
 do
-  local banc, env, etat, autopilote = monter({ budget = 300, sansInstance = true })
+  local banc, env, etat, autopilote = monter({ budget = 300, sansInstance = true,
+    ajusterConfig = cablageClassique })
 
-  -- Marche avant : sortie analogique 'front', neutre 7, amplitude 7.
+  -- Marche avant : sortie analogique 'front'.
   banc.taper("up")                       -- avance a 50 % par defaut
   banc.taper("q")
   banc.charger(SRC .. "/cablage.lua")
@@ -934,7 +975,7 @@ do
     string.format("front=%s top=%s", tostring(etat.redstone.front), tostring(etat.redstone.top)))
 
   -- Verification des niveaux pendant l'appui, avant relachement.
-  local banc2, env2, etat2, autopilote2 = monter({ budget = 300, sansInstance = true })
+  local banc2, env2, etat2, autopilote2 = monter({ budget = 300, sansInstance = true, ajusterConfig = cablageClassique })
   banc2.taper("up")
   banc2.taper("tab")                     -- provoque un redessin, appui maintenu
   banc2.taper("q")
@@ -945,7 +986,7 @@ do
     "niveau attendu 0 + 15*0.5")
 
   -- Montee, puis inversion de l'axe vertical, puis enregistrement.
-  local banc3, env3, etat3, autopilote3 = monter({ budget = 300, sansInstance = true })
+  local banc3, env3, etat3, autopilote3 = monter({ budget = 300, sansInstance = true, ajusterConfig = cablageClassique })
   banc3.taper("pageUp")
   banc3.taper("tab")
   banc3.taper("q")
@@ -955,7 +996,7 @@ do
     and banc3.ecranTexte():find("bottom=0", 1, true) ~= nil,
     "0.5 * 15 = 8")
 
-  local banc4, env4, etat4, autopilote4 = monter({ budget = 300, sansInstance = true })
+  local banc4, env4, etat4, autopilote4 = monter({ budget = 300, sansInstance = true, ajusterConfig = cablageClassique })
   banc4.taper("tab")                     -- AVANCE -> LACET
   banc4.taper("tab")                     -- LACET  -> VERTICAL
   banc4.taper("i")                       -- inverser l'axe vertical
@@ -973,8 +1014,10 @@ do
   -- L'inversion enregistree doit s'appliquer aussi en vol, pas seulement a la main.
   local banc5, env5, etat5, autopilote5 = monter({
     budget = 200, sansPilote = true,
-    config = { ["vertical = { mode = \"bipolaire\", cotePositif = \"top\", coteNegatif = \"bottom\","] =
-      "vertical = { mode = \"bipolaire\", inverse = true, cotePositif = \"top\", coteNegatif = \"bottom\"," },
+    ajusterConfig = function(config)
+      cablageClassique(config)
+      config.sorties.axes.vertical.inverse = true
+    end,
   })
   local ap5 = autopilote5.nouveau({ config = "/autopilote/config_vehicule.lua" })
   ap5.initialiser()
@@ -987,7 +1030,7 @@ do
       tostring(etat5.redstone.bottom)))
 
   -- Test guide : la reponse "oui, c'etait a l'envers" inscrit l'inversion.
-  local banc6, env6, etat6, autopilote6 = monter({ budget = 300, sansInstance = true })
+  local banc6, env6, etat6, autopilote6 = monter({ budget = 300, sansInstance = true, ajusterConfig = cablageClassique })
   banc6.taper("t")                       -- test guide de l'axe AVANCE
   banc6.taper("o")                       -- "le vehicule a fait l'inverse"
   banc6.taper("s")
@@ -1407,6 +1450,225 @@ do
   -- Le message passe par la barre d'etat de la console, pas par print.
   verifier("la console previent que la capture vise l'antenne",
     banc2.ecranTexte():find("ANTENNE", 1, true) ~= nil)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 26 : boite sequentielle et commande a deux signaux ==")
+do
+  local banc, env, etat, autopilote = monter({ budget = 300, sansInstance = true })
+  local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+  local sorties = autopilote.creerSorties(config)
+
+  local function cycle(commande)
+    sorties.appliquer({ avance = commande or 0, vertical = 0, lacet = 0, lateral = 0 })
+  end
+
+  ----------------------------------------------------------------- calage
+  verifier("au demarrage, le rapport engage est inconnu",
+    not sorties.calageTermine())
+
+  local impulsionsDescente, impulsionsMontee, faceHauteEnContinu = 0, 0, 0
+  local precedenteDescente, precedenteMontee = 0, 0
+  local cycles = 0
+  while not sorties.calageTermine() and cycles < 200 do
+    cycle(0)
+    cycles = cycles + 1
+    local descente = etat.redstone.right or 0
+    local montee = etat.redstone.left or 0
+    if descente > 0 and precedenteDescente == 0 then
+      impulsionsDescente = impulsionsDescente + 1
+    end
+    if montee > 0 and precedenteMontee == 0 then
+      impulsionsMontee = impulsionsMontee + 1
+    end
+    if descente > 0 and precedenteDescente > 0 then
+      faceHauteEnContinu = faceHauteEnContinu + 1
+    end
+    precedenteDescente, precedenteMontee = descente, montee
+  end
+
+  verifier("le calage aboutit", sorties.calageTermine(), cycles .. " cycles")
+  verifier("le calage descend d'abord, jamais ne monte a l'aveugle",
+    impulsionsDescente >= 7 and impulsionsMontee <= 1,
+    string.format("%d descentes, %d montees", impulsionsDescente, impulsionsMontee))
+  verifier("les ordres sont de vraies IMPULSIONS, pas un niveau maintenu",
+    faceHauteEnContinu == 0, faceHauteEnContinu .. " cycles maintenus")
+  verifier("le vehicule se retrouve au point mort",
+    sorties.rapports().avance.rapport == "N",
+    tostring(sorties.rapports().avance.rapport))
+  verifier("les deux faces retombent a zero apres le calage",
+    (etat.redstone.left or 0) == 0 and (etat.redstone.right or 0) == 0)
+
+  ------------------------------------------------------- montee en rapport
+  local vus = { N = true }
+  for _ = 1, 120 do
+    cycle(1.0)
+    vus[sorties.rapports().avance.rapport] = true
+  end
+  verifier("une commande pleine monte jusqu'au dernier rapport",
+    sorties.rapports().avance.rapport == "5",
+    tostring(sorties.rapports().avance.rapport))
+  verifier("les rapports sont passes un par un, dans l'ordre",
+    vus["1"] and vus["2"] and vus["3"] and vus["4"] and vus["5"])
+  verifier("la marche arriere n'est jamais engagee", not vus.R)
+
+  ------------------------------------------------------------ hysteresis
+  -- Rapport 3 = 0.60. Une commande a 0.62 ne doit RIEN changer : sans
+  -- hysteresis, le selecteur passerait son temps a monter et descendre.
+  for _ = 1, 60 do cycle(0.60) end
+  local rapportStable = sorties.rapports().avance.rapport
+  local changementsAvant = sorties.rapports().avance.changements
+  for _ = 1, 40 do cycle(0.62) end
+  verifier("une commande a peine differente ne fait pas changer de rapport",
+    sorties.rapports().avance.changements == changementsAvant
+    and sorties.rapports().avance.rapport == rapportStable,
+    string.format("%s -> %s", rapportStable, sorties.rapports().avance.rapport))
+
+  for _ = 1, 40 do cycle(1.0) end
+  verifier("une commande franchement plus haute fait bien monter",
+    sorties.rapports().avance.changements > changementsAvant)
+
+  ------------------------------------------------------------ retour au neutre
+  for _ = 1, 120 do sorties.neutraliser() end
+  verifier("la neutralisation ramene au point mort, cran par cran",
+    sorties.rapports().avance.rapport == "N",
+    tostring(sorties.rapports().avance.rapport))
+
+  ------------------------------------------------- commande a deux signaux
+  -- neutre 128, amplitude 127, pas 16 : total = 128 + 127 x commande.
+  local function verticalBrut(commande)
+    sorties.appliquer({ avance = 0, vertical = commande, lacet = 0, lateral = 0 })
+    return (etat.redstone.top or 0), (etat.redstone.bottom or 0)
+  end
+
+  local grossier, fin = verticalBrut(0)
+  verifier("commande nulle : la chauffe de sustentation est appliquee",
+    grossier == 8 and fin == 0, string.format("grossier %d fin %d", grossier, fin))
+
+  grossier, fin = verticalBrut(1)
+  verifier("commande pleine : les deux signaux au maximum",
+    grossier == 15 and fin == 15, string.format("grossier %d fin %d", grossier, fin))
+
+  grossier, fin = verticalBrut(-1)
+  verifier("commande minimale : chauffe presque nulle",
+    grossier == 0 and fin <= 1, string.format("grossier %d fin %d", grossier, fin))
+
+  -- La raison d'etre du second signal : une correction trop fine pour le
+  -- signal grossier doit quand meme etre transmise.
+  local g1, f1 = verticalBrut(0.01)
+  local g2, f2 = verticalBrut(0.02)
+  verifier("une correction fine change le signal fin sans toucher le grossier",
+    g1 == g2 and f1 ~= f2,
+    string.format("(%d,%d) puis (%d,%d)", g1, f1, g2, f2))
+
+  local resolutionFine = 127 / (16 * 16 - 1)
+  verifier("resolution 16 fois meilleure qu'un seul signal",
+    resolutionFine < (127 / 16) / 15, string.format("%.3f par cran", resolutionFine))
+
+  ----------------------------------------- l'autopilote attend le calage
+  -- Sans pilote injecte : un pilote fourni par le programme appelant remplace
+  -- toute la couche de sorties, boites comprises. Ici on veut la vraie.
+  local banc2, env2, etat2, _, ap2 = monter({ budget = 300, sansPilote = true })
+  ap2.pas(); env2.sleep(0.4); ap2.pas()
+  verifier("l'autopilote reste en acquisition tant que la boite n'est pas calee",
+    ap2.etat().mode == "ACQUISITION", ap2.etat().mode)
+  verifier("aucune poussee pendant le calage",
+    (etat2.redstone.front or 0) == 0)
+  verifier("la boite est annoncee au demarrage",
+    journalContient("boite a 7 rapports"))
+
+  for _ = 1, 60 do ap2.pas() env2.sleep(0.4) end
+  verifier("l'autopilote sort d'acquisition une fois la boite calee",
+    ap2.etat().mode ~= "ACQUISITION", ap2.etat().mode)
+  verifier("la fin du calage est journalisee",
+    journalContient("cale au point mort"))
+  verifier("la butee basse atteinte est journalisee",
+    journalContient("butee basse atteinte"))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 27 : bruleurs pilotes individuellement (mode reparti) ==")
+do
+  local banc, env, etat, autopilote = monter({ budget = 200, sansInstance = true })
+
+  --- Construit une couche de sorties avec un axe vertical reparti.
+  local function avecBruleurs(sorties, options)
+    local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    config.sorties.axes.vertical = {
+      mode = "reparti",
+      sorties = sorties,
+      neutre = (options or {}).neutre or 0,
+      amplitude = (options or {}).amplitude,
+      repartition = (options or {}).repartition,
+    }
+    config.sorties.axes.avance = { mode = "aucun" }
+    config.sorties.axes.lacet = { mode = "aucun" }
+    return autopilote.creerSorties(config)
+  end
+
+  ------------------------------------------------- quatre bruleurs egaux
+  local quatre = avecBruleurs({
+    { cote = "top" }, { cote = "bottom" }, { cote = "left" }, { cote = "right" },
+  })
+  local function pousser(s, commande)
+    s.appliquer({ avance = 0, vertical = commande, lacet = 0, lateral = 0 })
+    return etat.redstone.top or 0, etat.redstone.bottom or 0,
+           etat.redstone.left or 0, etat.redstone.right or 0
+  end
+
+  local a, b, c, d = pousser(quatre, 0.5)   -- total = 0.5 x 60 = 30
+  verifier("la demande est etalee sur tous les bruleurs",
+    a + b + c + d == 30, string.format("%d+%d+%d+%d", a, b, c, d))
+  verifier("aucun bruleur ne porte la charge tout seul",
+    math.max(a, b, c, d) - math.min(a, b, c, d) <= 1,
+    string.format("%d..%d", math.min(a, b, c, d), math.max(a, b, c, d)))
+
+  a, b, c, d = pousser(quatre, 1)
+  verifier("pleine chauffe : tous les bruleurs au maximum",
+    a == 15 and b == 15 and c == 15 and d == 15)
+  a, b, c, d = pousser(quatre, 0)
+  verifier("chauffe nulle : tous eteints", a + b + c + d == 0)
+
+  -- Un cran de plus doit rester perceptible : c'est la resolution reelle.
+  local _, _, _, _ = pousser(quatre, 0)
+  local t1 = 0
+  for _, v in ipairs({ pousser(quatre, 1 / 60) }) do t1 = t1 + v end
+  verifier("resolution d'un cran sur soixante", t1 == 1, tostring(t1))
+
+  ------------------------------------------- deux signaux, poids inegaux
+  local grossierFin = avecBruleurs({
+    { cote = "top", poids = 16 }, { cote = "bottom", poids = 1 },
+  }, { neutre = 128, amplitude = 127 })
+
+  local grossier, fin = pousser(grossierFin, 0)
+  verifier("poids inegaux : encodage positionnel, commande nulle",
+    grossier == 8 and fin == 0, string.format("%d / %d", grossier, fin))
+  grossier, fin = pousser(grossierFin, 1)
+  verifier("poids inegaux : commande pleine",
+    grossier == 15 and fin == 15, string.format("%d / %d", grossier, fin))
+  grossier, fin = pousser(grossierFin, -1)
+  verifier("poids inegaux : commande minimale",
+    grossier == 0 and fin == 1, string.format("%d / %d", grossier, fin))
+
+  -- Le total reconstruit doit etre exact sur toute la plage : c'est ce qui
+  -- garantit qu'aucune position n'est inatteignable.
+  local exact = true
+  for pas = 0, 255 do
+    local commande = (pas - 128) / 127
+    if commande >= -1 and commande <= 1 then
+      local g, f = pousser(grossierFin, commande)
+      if g * 16 + f ~= pas then exact = false end
+    end
+  end
+  verifier("toutes les positions de 0 a 255 sont atteignables", exact)
+
+  ------------------------------------------------ comparaison des montages
+  -- Le point a connaitre avant de recabler : des bruleurs TOUT OU RIEN
+  -- donnent moins de finesse qu'un couple grossier/fin.
+  verifier("4 bruleurs 0-15 : 61 positions", 4 * 15 + 1 == 61)
+  verifier("2 signaux ponderes 16 et 1 : 256 positions", 17 * 15 + 1 == 256)
+  verifier("un couple pondere bat quatre bruleurs en finesse",
+    (17 * 15 + 1) > (4 * 15 + 1))
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))

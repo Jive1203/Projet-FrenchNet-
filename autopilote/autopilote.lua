@@ -952,6 +952,162 @@ end
 
 local AXES_SORTIE = { "avance", "vertical", "lacet", "lateral" }
 
+--------------------------------------------------------------------------------
+-- 9a. ACTIONNEUR CRANTE (boite a rapports)
+--     Certains vehicules ne se commandent pas par une intensite mais par une
+--     BOITE SEQUENTIELLE : R, N, 1, 2, 3, 4, 5, ou l'on ne choisit pas un
+--     rapport, on monte ou on descend d'un cran a la fois, par impulsion
+--     redstone - exactement comme une boite de voiture.
+--
+--     Trois consequences que le code doit assumer :
+--       1. On ne SAIT PAS quel rapport est engage au demarrage. Il faut donc
+--          caler : descendre assez de fois pour etre certain d'etre en butee
+--          basse, puis remonter au point mort. Comme la butee basse ne produit
+--          aucun mouvement, ce calage est sans danger.
+--       2. Chaque changement coute du temps. Le selecteur ne change de rapport
+--          que si le gain est reel (hysteresis) et jamais plus d'un cran a la
+--          fois, avec un delai minimal entre deux.
+--       3. Chaque rapport a un EFFET declare. C'est ce qui permet de traduire
+--          une commande continue (-1 a +1) en un cran, et d'ecarter les
+--          positions qui ne produisent rien.
+--------------------------------------------------------------------------------
+
+local function creerBoite(reglageAxe, nomAxe, journal, ecrireFace)
+  local rapports = reglageAxe.rapports or {}
+  if #rapports < 2 then
+    journal.erreur(ETAPES.INIT_SORTIES, string.format(
+      "axe %s en boite a rapports mais aucun rapport declare : axe inerte", nomAxe))
+    return nil
+  end
+
+  local b = {
+    nom        = nomAxe,
+    rapports   = rapports,
+    neutre     = math.max(1, math.min(#rapports, reglageAxe.neutre or 1)),
+    index      = nil,          -- rapport engage ; nil tant que le calage n'est pas fait
+    cible      = nil,
+    hysteresis = reglageAxe.hysteresis or 0.08,
+    attente    = 0,            -- cycles avant la prochaine impulsion possible
+    delai      = math.max(1, math.floor(reglageAxe.cyclesEntreRapports or 2)),
+    duree      = math.max(1, math.floor(reglageAxe.cyclesImpulsion or 1)),
+    impulsion  = nil,          -- { sens = 1|-1, restant = n }
+    changements= 0,
+  }
+
+  -- Calage : on descend d'autant de crans qu'il y a de rapports (une fois de
+  -- plus que necessaire, quelle que soit la position de depart), puis on
+  -- remonte au point mort.
+  b.calage = { descentes = #rapports, montees = nil, termine = false }
+
+  function b.calageTermine() return b.calage.termine end
+
+  function b.rapportCourant()
+    return b.index and b.rapports[b.index] or nil
+  end
+
+  function b.libelle()
+    local rapport = b.rapportCourant()
+    if not rapport then return "?" end
+    return tostring(rapport.nom)
+  end
+
+  --- Choisit le rapport a viser pour une commande continue donnee.
+  function b.viser(commande)
+    if not b.calage.termine or not b.index then return end
+    commande = borner(commande or 0, -1, 1)
+
+    local courant = b.rapports[b.index]
+    local erreurCourante = math.abs((courant.effet or 0) - commande)
+    local meilleur, meilleureErreur = b.index, erreurCourante
+
+    for i, rapport in ipairs(b.rapports) do
+      -- Un rapport declare sans effet utile (une marche arriere qui ne pousse
+      -- pas, par exemple) n'est jamais choisi : il n'existe que comme butee.
+      if not rapport.interdit then
+        local erreur = math.abs((rapport.effet or 0) - commande)
+        -- L'hysteresis exige un gain REEL : sans elle, le selecteur passerait
+        -- son temps a monter et descendre autour d'un point d'equilibre.
+        if erreur < meilleureErreur - b.hysteresis then
+          meilleur, meilleureErreur = i, erreur
+        end
+      end
+    end
+    b.cible = meilleur
+  end
+
+  --- Avance d'un cycle : entretient l'impulsion en cours, ou en declenche une.
+  function b.tick()
+    -- Impulsion en cours : on la maintient le nombre de cycles demande.
+    if b.impulsion then
+      b.impulsion.restant = b.impulsion.restant - 1
+      if b.impulsion.restant > 0 then
+        ecrireFace(b.impulsion.sens > 0 and reglageAxe.coteMontee or reglageAxe.coteDescente, 15)
+        return
+      end
+      -- Fin d'impulsion : on retombe, et le rapport est repute change.
+      ecrireFace(reglageAxe.coteMontee, 0)
+      ecrireFace(reglageAxe.coteDescente, 0)
+      b.impulsion = nil
+      b.attente = b.delai
+      return
+    end
+
+    ecrireFace(reglageAxe.coteMontee, 0)
+    ecrireFace(reglageAxe.coteDescente, 0)
+
+    if b.attente > 0 then
+      b.attente = b.attente - 1
+      return
+    end
+
+    ------------------------------------------------------------------ calage
+    if not b.calage.termine then
+      if b.calage.descentes > 0 then
+        b.calage.descentes = b.calage.descentes - 1
+        b.impulsion = { sens = -1, restant = b.duree }
+        ecrireFace(reglageAxe.coteDescente, 15)
+        if b.calage.descentes == 0 then
+          -- Butee basse atteinte a coup sur.
+          b.index = 1
+          b.calage.montees = b.neutre - 1
+          journal.info(ETAPES.INIT_SORTIES, string.format(
+            "axe %s : butee basse atteinte (%s)", nomAxe, tostring(b.rapports[1].nom)))
+        end
+        return
+      end
+
+      if (b.calage.montees or 0) > 0 then
+        b.calage.montees = b.calage.montees - 1
+        b.index = math.min(#b.rapports, (b.index or 1) + 1)
+        b.impulsion = { sens = 1, restant = b.duree }
+        ecrireFace(reglageAxe.coteMontee, 15)
+        return
+      end
+
+      b.calage.termine = true
+      b.index = b.index or b.neutre
+      b.cible = b.index
+      journal.info(ETAPES.INIT_SORTIES, string.format(
+        "axe %s cale au point mort (%s)", nomAxe, b.libelle()))
+      return
+    end
+
+    --------------------------------------------------------------- changement
+    if b.cible and b.cible ~= b.index then
+      local sens = (b.cible > b.index) and 1 or -1
+      local suivant = b.index + sens
+      b.index = math.max(1, math.min(#b.rapports, suivant))
+      b.changements = b.changements + 1
+      b.impulsion = { sens = sens, restant = b.duree }
+      ecrireFace(sens > 0 and reglageAxe.coteMontee or reglageAxe.coteDescente, 15)
+      journal.debug(ETAPES.APPLICATION_CMD, string.format(
+        "axe %s : passage en %s", nomAxe, b.libelle()))
+    end
+  end
+
+  return b
+end
+
 local function creerSorties(config, journal, commandesInjectees)
   local s = {
     derniere = { avance = 0, vertical = 0, lacet = 0, lateral = 0 },
@@ -1088,6 +1244,24 @@ local function creerSorties(config, journal, commandesInjectees)
     trames = {}
   end
 
+  ------------------------------------------------------- boites a rapports
+  s.boites = {}
+  for _, nomAxe in ipairs(AXES_SORTIE) do
+    local reglageAxe = (reglages.axes or {})[nomAxe]
+    if reglageAxe and reglageAxe.mode == "boite_vitesses" then
+      local ordinateur = reglageAxe.ordinateur
+      local boite = creerBoite(reglageAxe, nomAxe, journal, function(cote, niveau)
+        sortieRedstone(cote, niveau, ordinateur)
+      end)
+      if boite then
+        s.boites[nomAxe] = boite
+        journal.info(ETAPES.INIT_SORTIES, string.format(
+          "axe %s : boite a %d rapports, point mort '%s', calage au demarrage",
+          nomAxe, #boite.rapports, tostring(boite.rapports[boite.neutre].nom)))
+      end
+    end
+  end
+
   local function appliquerAxe(nomAxe, valeur)
     local reglageAxe = (reglages.axes or {})[nomAxe] or { mode = "aucun" }
     local mode = reglageAxe.mode or "aucun"
@@ -1101,6 +1275,104 @@ local function creerSorties(config, journal, commandesInjectees)
 
     if mode == "aucun" then
       return
+
+    elseif mode == "boite_vitesses" then
+      -- On ne commande pas un niveau mais un RAPPORT : la commande continue
+      -- n'est qu'un souhait, traduit en cran par le selecteur.
+      local boite = s.boites[nomAxe]
+      if boite then boite.viser(valeur) end
+
+    elseif mode == "reparti" then
+      -- PLUSIEURS sorties pour un seul axe, chacune avec son POIDS.
+      -- Deux usages, deux strategies de repartition :
+      --
+      --   poids EGAUX (des bruleurs pilotes un par un) -> repartition
+      --   EQUITABLE. La demande est etalee sur tous les bruleurs : on ne
+      --   chauffe pas que l'avant du ballon, ce qui le ferait piquer du nez.
+      --   Resolution obtenue : 15 x nombre de bruleurs + 1 positions.
+      --
+      --   poids INEGAUX (16 et 1, par exemple) -> encodage POSITIONNEL, du
+      --   poids le plus fort au plus faible : un signal grossier et un signal
+      --   fin. Resolution : 15 x somme des poids + 1 positions.
+      --
+      -- A poids egaux, N bruleurs tout ou rien ne donnent que N+1 niveaux :
+      -- beaucoup MOINS qu'un couple grossier/fin. Ce mode ne se justifie donc
+      -- que si chaque bruleur accepte lui aussi une intensite 0-15.
+      local liste = reglageAxe.sorties or {}
+      if #liste == 0 then return end
+
+      local poidsTotal, poidsEgaux = 0, true
+      local poidsPremier = liste[1].poids or 1
+      for _, sortie in ipairs(liste) do
+        local poids = sortie.poids or 1
+        poidsTotal = poidsTotal + poids
+        if poids ~= poidsPremier then poidsEgaux = false end
+      end
+      if poidsTotal <= 0 then return end
+
+      local maxTotal  = poidsTotal * 15
+      local neutre    = reglageAxe.neutre or 0
+      local amplitude = reglageAxe.amplitude or maxTotal
+      local total = math.floor(neutre + amplitude * valeur + 0.5)
+      total = math.max(0, math.min(maxTotal, total))
+
+      local strategie = reglageAxe.repartition
+        or (poidsEgaux and "equitable" or "positionnelle")
+      local niveaux = {}
+
+      if strategie == "equitable" then
+        local sommeNiveaux = math.max(0, math.min(15 * #liste,
+          math.floor(total / poidsPremier + 0.5)))
+        local base  = math.floor(sommeNiveaux / #liste)
+        local reste = sommeNiveaux - base * #liste
+        for index = 1, #liste do
+          niveaux[index] = math.min(15, base + ((index <= reste) and 1 or 0))
+        end
+      else
+        local ordre = {}
+        for index = 1, #liste do ordre[index] = index end
+        table.sort(ordre, function(a, b)
+          return (liste[a].poids or 1) > (liste[b].poids or 1)
+        end)
+        local restant, poidsRestant = total, poidsTotal
+        for _, index in ipairs(ordre) do
+          local poids = liste[index].poids or 1
+          -- Ce que les sorties suivantes pourront encore absorber : en dessous,
+          -- celle-ci doit prendre le relais, sinon le total serait inatteignable.
+          local capaciteSuivantes = (poidsRestant - poids) * 15
+          local minimum = math.max(0, math.ceil((restant - capaciteSuivantes) / poids))
+          local maximum = math.min(15, math.floor(restant / poids))
+          local niveau = math.max(minimum, math.min(15, maximum))
+          niveaux[index] = niveau
+          restant = restant - niveau * poids
+          poidsRestant = poidsRestant - poids
+        end
+      end
+
+      for index, sortie in ipairs(liste) do
+        sortieRedstone(sortie.cote, niveaux[index] or 0, sortie.ordinateur or ordinateur)
+      end
+      s.repartition = s.repartition or {}
+      s.repartition[nomAxe] = {
+        total = total, max = maxTotal, niveaux = niveaux, strategie = strategie,
+      }
+
+    elseif mode == "double" then
+      -- DEUX signaux 0-15 : un grossier, un fin. Ensemble ils donnent 16 x pas
+      -- crans au lieu de 16. Sur un ballon, le signal grossier regle la
+      -- puissance des bruleurs et le fin l'ajuste entre deux crans : c'est ce
+      -- qui permet de tenir une altitude au bloc pres au lieu d'osciller
+      -- entre deux paliers de chauffe.
+      local pas       = math.max(1, math.floor(reglageAxe.pas or 16))
+      local maxTotal  = 15 * pas + math.min(15, pas - 1)
+      local neutre    = reglageAxe.neutre or 0
+      local amplitude = reglageAxe.amplitude or maxTotal
+      local total = math.floor(neutre + amplitude * valeur + 0.5)
+      total = math.max(0, math.min(maxTotal, total))
+      local grossier = math.floor(total / pas)
+      local fin = total - grossier * pas
+      sortieRedstone(reglageAxe.coteGrossier, math.min(15, grossier), ordinateur)
+      sortieRedstone(reglageAxe.coteFin, math.min(15, fin), ordinateur)
 
     elseif mode == "analogique" then
       local neutre    = reglageAxe.neutre or 7
@@ -1152,6 +1424,13 @@ local function creerSorties(config, journal, commandesInjectees)
   local reposDistants = {}
   do
     for _, nomAxe in ipairs(AXES_SORTIE) do appliquerAxe(nomAxe, 0) end
+    -- Les faces d'impulsion d'une boite sont au repos a zero : une face
+    -- laissee haute ferait defiler les rapports sans fin.
+    for nomAxe, boite in pairs(s.boites) do
+      local reglageAxe = (reglages.axes or {})[nomAxe] or {}
+      sortieRedstone(reglageAxe.coteMontee, 0, reglageAxe.ordinateur)
+      sortieRedstone(reglageAxe.coteDescente, 0, reglageAxe.ordinateur)
+    end
     for ordinateur, niveaux in pairs(trames) do reposDistants[ordinateur] = niveaux end
     trames = {}
   end
@@ -1161,10 +1440,36 @@ local function creerSorties(config, journal, commandesInjectees)
     for _, nomAxe in ipairs(AXES_SORTIE) do
       appliquerAxe(nomAxe, commandes[nomAxe])
     end
+    -- Les boites avancent d'un cycle : impulsion en cours, calage, ou
+    -- changement de rapport. C'est ici que les faces sont reellement ecrites.
+    for _, boite in pairs(s.boites) do boite.tick() end
     emettreTrames()
   end
 
+  --- Toutes les boites savent-elles ou elles en sont ?
+  function s.calageTermine()
+    for _, boite in pairs(s.boites) do
+      if not boite.calageTermine() then return false end
+    end
+    return true
+  end
+
+  --- Rapport engage sur chaque axe crante, pour l'affichage.
+  function s.rapports()
+    local etatBoites = {}
+    for nomAxe, boite in pairs(s.boites) do
+      etatBoites[nomAxe] = {
+        rapport = boite.libelle(),
+        index = boite.index,
+        cale = boite.calageTermine(),
+        changements = boite.changements,
+      }
+    end
+    return etatBoites
+  end
+
   function s.neutraliser()
+    -- Une boite ne se "coupe" pas : on la ramene au point mort, cran par cran.
     s.appliquer({ avance = 0, vertical = 0, lacet = 0, lateral = 0 })
   end
 
@@ -2554,6 +2859,14 @@ function autopilote.nouveau(options)
     if etat.mode == MODES.ACQUISITION then
       if etat.lecturesValides < config.gps.lecturesAcquisition then
         sorties.neutraliser()
+        return etat
+      end
+      -- Un vehicule a boite sequentielle ne sait pas quel rapport est engage
+      -- au demarrage : tant que le calage n'est pas fini, il ne part pas.
+      -- neutraliser() fait avancer ce calage d'un cran a chaque cycle.
+      if sorties.calageTermine and not sorties.calageTermine() then
+        sorties.neutraliser()
+        debugCycle(ETAPES.ACQUISITION, "calage des boites a rapports en cours")
         return etat
       end
       journal.info(ETAPES.ACQUISITION, string.format(

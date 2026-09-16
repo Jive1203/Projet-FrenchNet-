@@ -296,14 +296,67 @@ return {
     },
 
     axes = {
-      -- Vehicule SANS marche arriere : la commande d'avance va de 0 a 1, donc
-      -- neutre = 0 et amplitude = 15 pour exploiter toute la plage redstone
-      -- (0 = moteur arrete, 15 = pleine poussee).
-      -- Avec marche arriere, prendre neutre = 7 et amplitude = 7 : le repos
-      -- tombe alors au milieu de la plage.
-      avance   = { mode = "analogique", cote = "front", neutre = 0, amplitude = 15 },
-      vertical = { mode = "bipolaire", cotePositif = "top", coteNegatif = "bottom",
-                   amplitude = 15, seuil = 0.08 },
+
+      -- AVANCE : boite SEQUENTIELLE. On ne choisit pas un rapport, on monte ou
+      -- on descend d'un cran par impulsion redstone, comme une boite de
+      -- voiture. Le module ne sait pas quel rapport est engage au demarrage :
+      -- il cale en descendant jusqu'en butee basse (R, qui ne pousse pas, donc
+      -- sans danger) puis remonte au point mort.
+      --   effet    : ce que produit le rapport, de 0 a 1 (part de la poussee)
+      --   interdit : rapport qui n'existe que comme butee, jamais choisi
+      --   neutre   : index du point mort dans la liste
+      avance = {
+        mode = "boite_vitesses",
+        coteMontee = "left", coteDescente = "right",
+        cyclesImpulsion = 1,      -- duree d'une impulsion, en cycles de vol
+        cyclesEntreRapports = 2,  -- cycles minimum entre deux changements
+        hysteresis = 0.08,        -- gain minimal exige pour changer de rapport
+        neutre = 2,
+        rapports = {
+          { nom = "R", effet = 0,    interdit = true },  -- existe, ne pousse pas
+          { nom = "N", effet = 0    },
+          { nom = "1", effet = 0.20 },
+          { nom = "2", effet = 0.40 },
+          { nom = "3", effet = 0.60 },
+          { nom = "4", effet = 0.80 },
+          { nom = "5", effet = 1.00 },
+        },
+      },
+
+      -- VERTICAL : deux signaux 0-15. Le GROSSIER regle la puissance des
+      -- bruleurs du ballon, le FIN ajuste entre deux crans. Ensemble ils
+      -- donnent 256 positions au lieu de 16, ce qui permet de tenir une
+      -- altitude au lieu d'osciller entre deux paliers de chauffe.
+      --   total = neutre + amplitude x commande, borne a 0..255
+      --   grossier = total / pas     fin = reste
+      -- 'neutre' est la chauffe qui TIENT l'altitude, commande nulle. Elle se
+      -- releve en vol : montez jusqu'a ce que le vehicule ne monte ni ne
+      -- descende, et inscrivez la valeur totale ici.
+      vertical = {
+        mode = "double",
+        coteGrossier = "top", coteFin = "bottom",
+        pas = 16,          -- unites fines par cran grossier
+        neutre = 128,      -- chauffe de sustentation (0 a 255)
+        amplitude = 127,   -- ecart maximal de part et d'autre
+      },
+
+      -- VARIANTE : bruleurs pilotes UN PAR UN (mode "reparti"). A poids egaux,
+      -- la demande est etalee sur tous les bruleurs, ce qui evite de ne
+      -- chauffer qu'un cote du ballon. Attention a la finesse : quatre
+      -- bruleurs 0-15 donnent 61 positions, la contre 256 pour le couple
+      -- grossier/fin ci-dessus. Ne vaut le cablage que si chaque bruleur
+      -- accepte lui aussi une intensite, et pour la redondance.
+      --
+      -- vertical = {
+      --   mode = "reparti",
+      --   sorties = {
+      --     { cote = "top" }, { cote = "bottom" },
+      --     { cote = "left", ordinateur = 12 },   -- une face sur un satellite
+      --     { cote = "right", ordinateur = 12 },
+      --   },
+      --   neutre = 30, amplitude = 30,   -- en unites de la somme (0 a 60)
+      -- },
+
       lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",
                    amplitude = 15, seuil = 0.08 },
       lateral  = { mode = "aucun" },

@@ -110,6 +110,7 @@ end)
 ### Ce qu'il fait tout seul
 
 - **Profil de vol vertical** : montée verticale au départ, transit en palier, arrivée à l'aplomb puis **descente verticale** — jamais d'approche en pente au-dessus du relief.
+- **Actionneurs réels** : boîte séquentielle à impulsions (R/N/1-5, avec calage au démarrage), double signal grossier/fin, brûleurs répartis, redstone continu ou périphérique — au choix, axe par axe.
 - **Asservissement en cascade** sur quatre axes (altitude, cap, avance, dérive) : une boucle de position calcule une vitesse cible, une boucle de vitesse produit la commande — le véhicule ralentit progressivement au lieu de dépasser puis revenir.
 - **PID robustes** : intégrale bornée et gelée en saturation, dérivée sur la mesure, limitation de pente, temps réellement écoulé.
 - **Repli automatique en zone morte** si un axe devient instable, avec hystérésis, journalisation et forçage manuel.
@@ -148,7 +149,7 @@ Bancs d'essai hors du jeu, sur un interpréteur Lua 5.4 :
 
 ```
 lua5.4 tests/test_balise.lua        -- 49 vérifications
-lua5.4 tests/test_autopilote.lua    -- 242 vérifications, dont des vols simulés en boucle fermée
+lua5.4 tests/test_autopilote.lua    -- 278 vérifications, dont des vols simulés en boucle fermée
 ```
 
 ## Fichiers

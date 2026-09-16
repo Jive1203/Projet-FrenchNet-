@@ -144,6 +144,73 @@ vertical = { mode = "bipolaire", cotePositif = "top", coteNegatif = "bottom",
 
 C'est le mode naturel pour tout ce qui a deux sens : monter/descendre, pivoter à gauche/droite, avancer/reculer.
 
+### `boite_vitesses` — boîte séquentielle à impulsions
+
+Le véhicule n'accepte pas une intensité mais une **boîte de vitesses** : `R`, `N`, `1`, `2`, `3`, `4`, `5`. On ne choisit pas un rapport — on **monte ou descend d'un cran** par impulsion redstone, exactement comme une boîte séquentielle de voiture.
+
+```lua
+avance = {
+  mode = "boite_vitesses",
+  coteMontee = "left", coteDescente = "right",
+  cyclesImpulsion = 1, cyclesEntreRapports = 2, hysteresis = 0.08,
+  neutre = 2,                                  -- index du point mort
+  rapports = {
+    { nom = "R", effet = 0,    interdit = true },  -- existe, ne pousse pas
+    { nom = "N", effet = 0    },
+    { nom = "1", effet = 0.20 },
+    { nom = "5", effet = 1.00 },
+  },
+},
+```
+
+Trois conséquences que le module assume pour vous :
+
+- **Il ne sait pas quel rapport est engagé au démarrage.** Il **cale** donc : il descend d'autant de crans qu'il y a de rapports — ce qui garantit la butée basse quelle que soit la position de départ — puis remonte au point mort. Comme la butée basse (`R`) ne produit aucune poussée, ce calage est **sans danger**. L'autopilote **refuse de partir** tant qu'il n'est pas terminé.
+- **Changer de rapport coûte du temps.** Un seul cran à la fois, avec un délai minimal entre deux, et une **hystérésis** : sans elle, le sélecteur passerait son temps à monter et descendre autour d'un point d'équilibre.
+- **Un rapport marqué `interdit` n'est jamais choisi.** Il n'existe que comme butée — c'est le cas d'une marche arrière qui ne pousse pas.
+
+### `double` — deux signaux, grossier et fin
+
+Deux faces 0-15 pour un seul axe. Le signal **grossier** règle la puissance (les brûleurs d'un ballon), le **fin** ajuste entre deux crans.
+
+```lua
+vertical = {
+  mode = "double",
+  coteGrossier = "top", coteFin = "bottom",
+  pas = 16,          -- unités fines par cran grossier
+  neutre = 128,      -- chauffe qui TIENT l'altitude, commande nulle
+  amplitude = 127,
+},
+```
+
+> `total = neutre + amplitude × commande`, borné à 0–255, puis `grossier = total / pas`, `fin = reste`.
+
+**256 positions au lieu de 16.** C'est ce qui permet de tenir une altitude au lieu d'osciller entre deux paliers de chauffe. `neutre` est la chauffe de sustentation : montez jusqu'à ce que le véhicule ne monte ni ne descende, et inscrivez la valeur.
+
+### `reparti` — plusieurs sorties pondérées
+
+Généralisation du précédent : **N sorties**, chacune avec son **poids**. Deux usages, deux stratégies choisies automatiquement.
+
+| Poids | Stratégie | Usage |
+|---|---|---|
+| **Égaux** | Répartition **équitable** | Brûleurs pilotés un par un : la demande est étalée sur tous, on ne chauffe pas qu'un côté du ballon |
+| **Inégaux** (16 et 1…) | Encodage **positionnel** | Équivalent du mode `double`, exprimé autrement |
+
+```lua
+vertical = {
+  mode = "reparti",
+  sorties = {
+    { cote = "top" }, { cote = "bottom" },
+    { cote = "left", ordinateur = 12 },   -- une face sur un satellite
+  },
+  neutre = 22, amplitude = 22,            -- en unités de la somme (ici 0 à 45)
+},
+```
+
+> **Le piège à connaître avant de recâbler.** Piloter chaque brûleur individuellement paraît plus précis — c'est l'inverse si les brûleurs sont en tout ou rien. Quatre brûleurs allumés/éteints ne donnent que **5 niveaux**. Quatre brûleurs 0-15 en donnent **61**. Un simple couple grossier/fin en donne **256**.
+>
+> Le pilotage individuel se justifie pour la **redondance** (détecter un brûleur mort), l'**équilibrage** (ne pas faire piquer le ballon) et un futur contrôle d'assiette — **pas pour la finesse**. Si vos brûleurs acceptent une intensité, vous pouvez avoir les deux : poids inégaux sur plusieurs brûleurs.
+
 ### `peripherique` — appel direct
 
 Si un bloc du véhicule est pilotable comme périphérique CC, on l'appelle directement :
@@ -173,6 +240,9 @@ L'autopilote s'arrête au signal redstone : c'est le montage Create qui le trans
 | Marche / arrêt | `bipolaire` (ou `analogique` avec `amplitude = 15`) |
 | Deux sens, deux entrées séparées | `bipolaire` |
 | Une intensité proportionnelle | `analogique` |
+| **Une boîte à crans, montée/descente par impulsion** | **`boite_vitesses`** |
+| **Deux signaux, un grossier et un fin** | **`double`** |
+| **Plusieurs sorties (brûleurs) pour un même axe** | **`reparti`** |
 | Piloté par un bloc exposé à CC | `peripherique` |
 
 Montages courants côté Create, à adapter à votre appareil :
