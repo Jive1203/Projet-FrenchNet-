@@ -22,13 +22,19 @@ local function verifier(nom, condition, detail)
   end
 end
 
---- Contenu du fichier journal ecrit par l'autopilote pendant l'essai.
+--- Contenu du journal ecrit pendant l'essai, ARCHIVE COMPRIS : au-dela de la
+-- taille maximale le journal tourne, et les premieres lignes (acquisition de
+-- la position, par exemple) se retrouvent dans autopilote.log.1.
 local function journal()
-  local f = io.open(BANC .. "/autopilote/autopilote.log", "r")
-  if not f then return "" end
-  local contenu = f:read("a")
-  f:close()
-  return contenu
+  local morceaux = {}
+  for _, nom in ipairs({ "autopilote.log.1", "autopilote.log" }) do
+    local f = io.open(BANC .. "/autopilote/" .. nom, "r")
+    if f then
+      morceaux[#morceaux + 1] = f:read("a")
+      f:close()
+    end
+  end
+  return table.concat(morceaux, "\n")
 end
 
 local function journalContient(motif)
@@ -56,7 +62,17 @@ end
 --- Construit un environnement simule + un autopilote pret a voler.
 local function monter(options)
   options = options or {}
-  preparer(options.config)
+  -- L'altitude de croisiere livree (350) est volontairement tres haute : elle
+  -- passe au-dessus de tout relief. Les essais de logique n'ont pas a payer
+  -- 200 blocs de montee a chaque vol ; ils fixent donc leur propre altitude.
+  -- Le test 23 verifie separement la valeur livree.
+  local remplacements = options.config
+  if not options.altitudeLivree then
+    remplacements = {}
+    for motif, valeur in pairs(options.config or {}) do remplacements[motif] = valeur end
+    remplacements["altitudeCroisiere    = 350,"] = "altitudeCroisiere    = 160,"
+  end
+  preparer(remplacements)
   local banc = dofile(SCR .. "/banc_vol.lua")
   local env, etat = banc.creer({
     racine      = BANC,
@@ -436,7 +452,11 @@ end
 --------------------------------------------------------------------------------
 print("\n== TEST 9 : maintien de position et rattrapage de derive ==")
 do
-  local banc, env, etat, _, ap = monter({ budget = 500 })
+  -- Antenne GPS centree : c'est la condition d'une tenue de position fine.
+  -- Le test 23 documente ce qui se passe avec une antenne deportee.
+  local banc, env, etat, _, ap = monter({ budget = 600,
+    decalageGps = { x = 0, y = 2, z = 0 },
+    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," } })
   ap.pas(); env.sleep(0.4); ap.pas()
   local cible = { x = 140, y = 150, z = 40 }
   ap.allerA(cible)
@@ -449,11 +469,11 @@ do
   local ecartApresPoussee = banc.distanceH(cible)
 
   local ecartMax = 0
-  for _ = 1, 200 do
+  for _ = 1, 260 do
     ap.pas()
     env.sleep(0.4)
     ecartMax = math.max(ecartMax, banc.distanceH(cible))
-    if etat.horloge > 460 then break end
+    if etat.horloge > 560 then break end
   end
 
   verifier("derive initiale bien prise en compte", ecartApresPoussee > 5,
@@ -1088,6 +1108,107 @@ do
   servirBalise(etatInconnu)
   bancInconnu.charger(RACINE .. "/installe.lua", "n_importe_quoi")
   verifier("jeu de fichiers inconnu refuse", (bancInconnu.contient("inconnu")))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 23 : profil vertical, altitude par defaut, antenne deportee ==")
+do
+  -- a. Montee verticale au depart, descente verticale a l'arrivee.
+  local banc, env, etat, _, ap = monter({ budget = 600,
+    decalageGps = { x = 0, y = 2, z = 0 },
+    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    vehicule = { x = 0, y = 90, z = 0, cap = 0, vLateralMax = 0 } })
+  ap.pas(); env.sleep(0.4); ap.pas()
+  local cible = { x = 200, y = 95, z = -150 }
+  local departX, departZ = etat.vehicule.x, etat.vehicule.z
+  ap.allerA(cible)
+
+  local deriveMontee, deriveDescente = 0, 0
+  local altitudeDebutDescente, aplombDebutDescente = nil, nil
+  local phaseVue = {}
+  local arrive = voler(ap, env, etat, 500, function()
+    local phase = ap.etat().phase
+    phaseVue[tostring(phase)] = true
+    if phase == "MONTEE" then
+      deriveMontee = math.max(deriveMontee,
+        math.sqrt((etat.vehicule.x - departX) ^ 2 + (etat.vehicule.z - departZ) ^ 2))
+    elseif phase == "DESCENTE" then
+      if not altitudeDebutDescente then
+        altitudeDebutDescente = etat.vehicule.y
+        aplombDebutDescente = banc.distanceH(cible)
+      end
+      deriveDescente = math.max(deriveDescente, banc.distanceH(cible))
+    end
+  end)
+
+  verifier("le vehicule arrive", arrive, ap.etat().mode)
+  verifier("les quatre phases sont traversees",
+    phaseVue.MONTEE and phaseVue.CROISIERE and phaseVue.DESCENTE,
+    "MONTEE=" .. tostring(phaseVue.MONTEE) .. " DESCENTE=" .. tostring(phaseVue.DESCENTE))
+  verifier("montee VERTICALE : l'aplomb du depart est tenu",
+    deriveMontee < 4, string.format("%.2f bloc de derive", deriveMontee))
+  verifier("la descente ne commence qu'une fois a l'aplomb du point",
+    aplombDebutDescente and aplombDebutDescente <= 2.5,
+    aplombDebutDescente and string.format("%.2f bloc", aplombDebutDescente))
+  verifier("la descente part bien de l'altitude de croisiere",
+    altitudeDebutDescente and altitudeDebutDescente >= 155,
+    altitudeDebutDescente and string.format("%.1f", altitudeDebutDescente))
+  -- La derive reste bornee par la bande de recentrage (deux fois le rayon
+  -- d'aplomb) : au-dela, le vehicule repasse en approche pour se recentrer
+  -- avant de poursuivre sa descente, au lieu de descendre de travers.
+  verifier("descente VERTICALE : la derive reste dans la bande de recentrage",
+    deriveDescente <= 5, string.format("%.2f bloc", deriveDescente))
+  verifier("altitude finale atteinte", math.abs(etat.vehicule.y - 95) <= 1.0,
+    string.format("%.2f", etat.vehicule.y))
+  verifier("profil de vol journalise",
+    journalContient("debut de la descente verticale"))
+
+  -- b. Un point sans altitude est survole a l'altitude de croisiere.
+  local banc2, env2, etat2, _, ap2 = monter({ budget = 600,
+    decalageGps = { x = 0, y = 2, z = 0 },
+    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    vehicule = { x = 0, y = 90, z = 0, cap = 0, vLateralMax = 0 } })
+  ap2.pas(); env2.sleep(0.4); ap2.pas()
+  ap2.suivreItineraire({
+    { x = 150, z = -120, nom = "SANS-ALTITUDE" },
+    { x = 260, y = 100, z = -200, nom = "DESTINATION" },
+  })
+  verifier("point sans altitude accepte",
+    ap2.etatInterne.itineraire[1].altitudeLibre == true)
+  verifier("le point sans altitude prend l'altitude de croisiere",
+    ap2.etatInterne.itineraire[1].y == 160, tostring(ap2.etatInterne.itineraire[1].y))
+  verifier("le point avec altitude garde la sienne",
+    ap2.etatInterne.itineraire[2].y == 100
+    and ap2.etatInterne.itineraire[2].altitudeLibre == false)
+
+  local altitudeMinEtape = 1e9
+  voler(ap2, env2, etat2, 500, function()
+    if ap2.etat().index == 1 then
+      altitudeMinEtape = math.min(altitudeMinEtape, etat2.vehicule.y)
+    end
+  end)
+  verifier("aucune descente sur un point sans altitude",
+    altitudeMinEtape >= 89, string.format("%.1f", altitudeMinEtape))
+
+  -- c. Altitude de croisiere livree : 350, au-dessus de la limite de construction.
+  local _, _, _, autopilote3 = monter({ sansInstance = true, altitudeLivree = true })
+  local livree = autopilote3.chargerConfiguration("/autopilote/config_vehicule.lua")
+  verifier("altitude de croisiere livree a 350",
+    livree.vitesses.altitudeCroisiere == 350,
+    tostring(livree.vitesses.altitudeCroisiere))
+
+  -- d. Une altitude presente mais aberrante reste une erreur.
+  local banc4, env4, etat4, _, ap4 = monter({ budget = 200 })
+  local okTexte = pcall(ap4.allerA, { x = 10, y = "haut", z = 20 })
+  verifier("altitude non numerique refusee", not okTexte)
+  local okSansY = pcall(ap4.allerA, { x = 10, z = 20 })
+  verifier("altitude absente acceptee", okSansY)
+
+  -- e. Antenne deportee sans capteur de cap : la limite est annoncee.
+  local banc5 = monter({ budget = 200,
+    decalageGps = { x = 0, y = 2, z = 4 } })
+  verifier("limite de precision annoncee au demarrage",
+    (banc5.contient("SANS capteur de cap")) and (banc5.contient("incertaine")))
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))

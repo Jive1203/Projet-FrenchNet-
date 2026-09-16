@@ -80,12 +80,21 @@ return {
     tauxVirageMax        = 40,    -- degres/s
     marcheArriere        = 0,     -- blocs/s de recul autorise (0 = interdit)
 
-    altitudeCroisiere    = 160,   -- altitude de securite du transit
+    -- Altitude de securite du transit. 350 passe au-dessus de tout relief ET
+    -- au-dessus de la limite de construction (319) : rien ne peut s'y trouver.
+    -- Un point de passage qui ne precise pas d'altitude est survole ici.
+    -- Descendre a 300 si votre serveur n'aime pas les entites hors du monde bati.
+    altitudeCroisiere    = 350,
     margeAltitude        = 2.0,   -- tolerance pour declarer la croisiere atteinte
     distanceApproche     = 30,    -- blocs : debut du ralentissement et de la descente
     distanceMinCroisiere = 60,    -- en deca, vol direct sans monter en croisiere
     avanceEnMontee       = 0,     -- blocs/s pendant la montee initiale (0 = montee pure)
     rayonValidationEtape = 5,     -- blocs : validation d'un point intermediaire
+    rayonDescenteVerticale = 2.0, -- aplomb a tenir avant d'amorcer la descente
+    vitesseDescenteFinale  = 1.5, -- vitesse de descente sur les derniers blocs
+    hauteurFinale          = 8,   -- hauteur a laquelle ce bridage s'applique
+    seuilImmobile          = 0.25,-- blocs/s en deca desquels on est immobile
+    delaiImpasse           = 5.0, -- s sans progres avant reptation forcee
     acquisitionCap       = 2.5,   -- blocs/s : reptation quand le cap est encore inconnu
   },
 
@@ -344,6 +353,7 @@ return {
   -------------------------------------------------------------------- MISSION --
 
   mission = {
+    descenteVerticale          = true,   -- palier, puis descente verticale sur le point
     reprendreApresRedemarrage  = true,   -- reprend la mission apres un plantage
     reprendreApresPerteGps     = true,   -- reprend la mission apres retour du GPS
     respecterAltitudeCroisiere = true,   -- plancher de securite pendant le transit

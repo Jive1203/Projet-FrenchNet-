@@ -94,10 +94,10 @@ autopilote.MODES = MODES
 
 -- Phases d'un transit (sous-etat de MODES.TRANSIT).
 local PHASES = {
-  MONTEE    = "MONTEE",    -- montee a l'altitude de croisiere avant transit
+  MONTEE    = "MONTEE",    -- montee VERTICALE au depart, a l'aplomb du point de depart
   CROISIERE = "CROISIERE", -- transit horizontal a l'altitude de securite
-  APPROCHE  = "APPROCHE",  -- ralentissement a l'approche du point
-  FINALE    = "FINALE",    -- descente sur le point final / de depot
+  APPROCHE  = "APPROCHE",  -- ralentissement a l'aplomb du point vise
+  DESCENTE  = "DESCENTE",  -- descente VERTICALE sur le point final
 }
 autopilote.PHASES = PHASES
 
@@ -353,6 +353,11 @@ local DEFAUTS = {
     marcheArriere        = 0,   -- vitesse de recul autorisee (0 = pas de marche arriere)
     rayonValidationEtape = 4,   -- rayon de validation d'un point intermediaire
     acquisitionCap       = 2.5, -- vitesse de reptation quand le cap est inconnu
+    rayonDescenteVerticale = 2.0, -- rayon d'aplomb avant d'amorcer la descente
+    vitesseDescenteFinale  = 1.5, -- vitesse de descente sur les derniers blocs
+    hauteurFinale          = 8,   -- hauteur a laquelle ce bridage s'applique
+    seuilImmobile          = 0.25,-- blocs/s en deca desquels on est immobile
+    delaiImpasse           = 5.0, -- s sans progres avant reptation forcee
   },
 
   gps = {
@@ -402,6 +407,8 @@ local DEFAUTS = {
     decalage      = 0,
     vitesseMinRoute = 0.8,    -- blocs/s en dessous desquels la route n'est pas fiable
     dureeCapValide  = 2.0,    -- secondes pendant lesquelles un cap non mesure reste utilisable
+    seuilLacetRotation = 0.08,-- commande de lacet moyenne au-dela de laquelle on tourne
+    delaiApresRotation = 1.0, -- constante de lissage de la commande de lacet
     capParDefaut  = 0,
     filtre        = { constanteTemps = 0.35 },
   },
@@ -430,6 +437,7 @@ local DEFAUTS = {
   },
 
   mission = {
+    descenteVerticale         = true,  -- palier puis descente verticale sur le point
     reprendreApresRedemarrage = true,
     reprendreApresPerteGps    = true,
     fichierEtat = "/autopilote/etat_mission.txt",
@@ -1258,6 +1266,18 @@ local function creerCapteurCap(config, journal)
   local reglages = config.cap
   local c = { valeur = reglages.capParDefaut or 0, source = "defaut", filtre = Filtre.nouveau(reglages.filtre) }
 
+  -- Rayon horizontal de l'antenne GPS autour du centre du vehicule. Un
+  -- vehicule qui pivote sur place fait decrire a son antenne un cercle de ce
+  -- rayon : le GPS mesure alors une vitesse bien reelle, mais qui ne dit RIEN
+  -- de la direction de deplacement du vehicule. Sans cette correction, un
+  -- vehicule immobile qui tourne croit avancer de travers, corrige son cap
+  -- vers cette fausse route, tourne davantage, et s'entretient lui-meme.
+  c.rayonAntenne = 0
+  if config.decalageDansRepereVehicule then
+    c.rayonAntenne = normeHorizontale(config.decalageGps.x, config.decalageGps.z)
+  end
+  c.tauxVirageMax = config.vitesses and config.vitesses.tauxVirageMax or 45
+
   local function lirePeripherique()
     if not (peripheral and reglages.peripherique) then return nil end
     local materiel = peripheral.wrap(reglages.peripherique)
@@ -1274,9 +1294,14 @@ local function creerCapteurCap(config, journal)
     return normaliserAngle(valeur)
   end
 
-  --- @param vitesse vecteur vitesse monde lisse
-  --- @param dt      temps reellement ecoule
-  function c.mesurer(vitesse, dt)
+  --- @param vitesse   vecteur vitesse monde lisse
+  --- @param dt        temps reellement ecoule
+  --- @param tauxLacet vitesse de rotation courante, en degres par seconde
+  --- @param lacetCommande commande de lacet moyenne, entre 0 et 1. Elle sert a
+  ---        estimer la vitesse parasite de l'antenne : on se fie a NOTRE PROPRE
+  ---        COMMANDE, jamais a la vitesse de lacet mesuree, qui derive du cap
+  ---        que l'on cherche justement a valider.
+  function c.mesurer(vitesse, dt, lacetCommande)
     if reglages.source == "peripherique" then
       local mesure = lirePeripherique()
       if mesure then
@@ -1291,7 +1316,20 @@ local function creerCapteurCap(config, journal)
     end
 
     local norme = normeHorizontale(vitesse.x, vitesse.z)
-    if norme >= (reglages.vitesseMinRoute or 0.35) then
+    -- Part de la vitesse mesuree imputable a la seule rotation de l'antenne :
+    -- rayon x vitesse de rotation. En croisiere, le deplacement la depasse
+    -- largement et la route reste exploitable ; a basse vitesse, elle la noie
+    -- et la route ne veut plus rien dire.
+    local rotationEstimee = (lacetCommande or 0) * (c.tauxVirageMax or 45)
+    local parasite = c.rayonAntenne * rotationEstimee * RAD
+    local seuilRoute = (reglages.vitesseMinRoute or 0.8) + parasite
+    if parasite > 0.05 then
+      c.parasite = parasite
+    else
+      c.parasite = 0
+    end
+
+    if norme >= seuilRoute then
       local capRoute = capVers(vitesse.x, vitesse.z)
       if capRoute then
         -- Lissage angulaire : on filtre l'ecart, jamais l'angle absolu, sinon
@@ -1467,9 +1505,16 @@ function autopilote.nouveau(options)
   end
   if (config.decalageGps.x ~= 0 or config.decalageGps.z ~= 0)
      and config.decalageDansRepereVehicule and config.cap.source ~= "peripherique" then
-    journal.avert(ETAPES.DECALAGE,
-      "decalage GPS horizontal non nul sans capteur de cap : le decalage sera "
-      .. "tourne selon le cap deduit de la route, imprecis a l'arret")
+    local rayon = normeHorizontale(config.decalageGps.x, config.decalageGps.z)
+    journal.avert(ETAPES.DECALAGE, string.format(
+      "antenne GPS a %.1f bloc(s) du centre SANS capteur de cap : la position "
+      .. "du centre se deduit du cap, lui-meme deduit de la route. A l'arret le "
+      .. "cap n'est plus observable, donc la position du centre est incertaine "
+      .. "de +/- %.1f bloc(s). La tenue de position ne pourra pas descendre sous "
+      .. "cet ordre de grandeur, quels que soient les gains (tolerance demandee "
+      .. "%.1f). Deux remedes : rapprocher l'ordinateur du centre, ou installer "
+      .. "un capteur de cap (cap.source = 'peripherique').",
+      rayon, rayon, config.tolerances.horizontale))
   end
 
   ----------------------------------------------------------------------- organes
@@ -1480,14 +1525,14 @@ function autopilote.nouveau(options)
   if type(options.cap) == "function" then
     -- Capteur de cap fourni par le programme appelant : priorite absolue.
     local mesurerOrigine = capteurCap.mesurer
-    capteurCap.mesurer = function(vitesse, dt)
+    capteurCap.mesurer = function(vitesse, dt, tauxLacet)
       local ok, valeur = pcall(options.cap)
       if ok and nombreValide(valeur) then
         capteurCap.valeur = normaliserAngle(valeur)
         capteurCap.source = "injecte"
         return capteurCap.valeur, capteurCap.source
       end
-      return mesurerOrigine(vitesse, dt)
+      return mesurerOrigine(vitesse, dt, lacetCommande)
     end
   end
 
@@ -1714,8 +1759,13 @@ function autopilote.nouveau(options)
     etat.positionGps = brut
 
     -- Decalage du point de reference GPS -> centre reel du vehicule.
-    local decalage = decalageVersMonde(config.decalageGps, etat.cap,
-      config.decalageDansRepereVehicule)
+    -- Le cap employe est le dernier JUGE FIABLE, jamais une estimation en
+    -- train de deriver : sinon une erreur de cap se transforme en erreur de
+    -- POSITION (jusqu'a deux fois le rayon de l'antenne), et le vehicule se
+    -- croit arrive alors qu'il est a plusieurs blocs de sa cible.
+    if etat.capFiable ~= false then etat.capReference = etat.cap end
+    local decalage = decalageVersMonde(config.decalageGps,
+      etat.capReference or etat.cap, config.decalageDansRepereVehicule)
     local centre = { x = brut.x - decalage.x, y = brut.y - decalage.y, z = brut.z - decalage.z }
 
     local positionPrec = etat.position
@@ -1736,8 +1786,18 @@ function autopilote.nouveau(options)
     end
 
     -- Cap et vitesse de lacet.
+    -- Rotation en cours ? On le sait par la commande que l'on vient d'emettre,
+    -- donnee sure, independante de toute la chaine de mesure.
+    -- Moyenne glissante et non test instantane : une commande de lacet qui
+    -- alterne d'un cycle a l'autre fait tourner le vehicule tout autant, et
+    -- doit donc disqualifier la route de la meme facon.
+    local lacetCommande = math.abs((etat.commandes or {}).lacet or 0)
+    local tauLacet = config.cap.delaiApresRotation or 1.0
+    local alphaLacet = dt / (tauLacet + dt)
+    etat.lacetMoyen = (etat.lacetMoyen or 0) + alphaLacet * (lacetCommande - (etat.lacetMoyen or 0))
+
     local capPrec, sourcePrec = etat.cap, etat.sourceCap
-    local cap, sourceCap = capteurCap.mesurer(etat.vitesse, dt)
+    local cap, sourceCap = capteurCap.mesurer(etat.vitesse, dt, etat.lacetMoyen)
     etat.cap, etat.sourceCap = cap, sourceCap
 
     -- La vitesse de lacet n'est derivable que de deux mesures COMPARABLES.
@@ -1747,6 +1807,7 @@ function autopilote.nouveau(options)
     -- qui affolerait la boucle de lacet.
     local mesureFraiche = (sourceCap == "route" or sourceCap == "peripherique"
       or sourceCap == "injecte")
+
     -- Un cap non mesure depuis trop longtemps n'est plus exploitable : sans
     -- capteur dedie, un vehicule immobile ne sait pas ou pointe son nez.
     if mesureFraiche then
@@ -2004,13 +2065,54 @@ function autopilote.nouveau(options)
     -- La reptation est plafonnee par ce que le guidage demande reellement, et
     -- annulee dans les marges : sinon un vehicule en maintien de position se
     -- pousserait lui-meme hors de sa cible, puis tournerait autour sans fin.
-    if etat.capFiable == false then
-      local normeDesiree = normeHorizontale(desireX, desireZ)
-      local reptation = math.min(config.vitesses.acquisitionCap,
-        limites.vitesseMax, normeDesiree)
-      if distanceH <= (etat.tolerances or config.tolerances).horizontale then
-        reptation = 0
+    -- CHIEN DE GARDE D'IMPASSE. Si le cap estime est faux, la projection dans
+    -- le repere du vehicule donne une vitesse d'avance nulle ou negative : le
+    -- vehicule ne pousse plus, donc ne bouge plus, donc la route n'est plus
+    -- observable, donc le cap ne se corrige jamais. L'estimateur s'enferme
+    -- dans une impasse coherente avec elle-meme.
+    -- On surveille donc le RESULTAT et non ses causes : le guidage demande
+    -- d'avancer mais rien ne bouge, quelle qu'en soit la raison (cap faux,
+    -- axe mal cable, moteur absent). C'est le seul garde-fou qui sorte de
+    -- n'importe quelle impasse de ce type.
+    local normeDesiree = normeHorizontale(desireX, desireZ)
+    local margeArret = (etat.tolerances or config.tolerances).horizontale
+
+    -- On mesure le PROGRES REEL vers la cible, jamais une vitesse : un
+    -- vehicule qui pivote sur place avec une antenne deportee affiche une
+    -- vitesse bien reelle tout en ne progressant pas d'un bloc.
+    if distanceH > margeArret and normeDesiree > 0.05 then
+      local reference = etat.progresReference
+      if reference == nil or distanceH < reference - 0.5 then
+        etat.progresReference = distanceH
+        etat.immobileDepuis = 0
+      else
+        etat.immobileDepuis = (etat.immobileDepuis or 0) + dt
       end
+    else
+      etat.immobileDepuis = 0
+      etat.progresReference = nil
+    end
+
+    local impasse = etat.immobileDepuis > (config.vitesses.delaiImpasse or 3.0)
+    if impasse and not etat.impasseSignalee then
+      etat.impasseSignalee = true
+      journal.avert(ETAPES.BOUCLE_POSITION, string.format(
+        "IMPASSE : %.1fs sans deplacement alors que le guidage demande %.2f "
+        .. "bloc/s a %.1fm de la cible. Cap estime probablement faux : "
+        .. "reptation forcee pour rendre la route observable.",
+        etat.immobileDepuis, normeDesiree, distanceH))
+      -- Le cap estime n'est plus credible : on le declare tel quel, ce qui
+      -- neutralise le lacet et laisse la reptation le reacquerir proprement.
+      etat.capFiable = false
+      etat.capNonMesureDepuis = (config.cap.dureeCapValide or 2) + 1
+    elseif not impasse then
+      etat.impasseSignalee = false
+    end
+
+    if etat.capFiable == false or impasse then
+      local reptation = math.min(config.vitesses.acquisitionCap,
+        limites.vitesseMax, math.max(normeDesiree, impasse and 0.5 or 0))
+      if distanceH <= margeArret and not impasse then reptation = 0 end
       vitesseAvanceCible = reptation
       vitesseLateraleCible = 0
     end
@@ -2130,13 +2232,28 @@ function autopilote.nouveau(options)
   end
 
   --- Normalise un point fourni par un programme appelant.
-  local function normaliserPoint(point)
+  --- @param altitudeTransit altitude de croisiere a appliquer si le point n'en
+  ---        precise aucune ; le point est alors simplement survole.
+  local function normaliserPoint(point, altitudeTransit)
     if type(point) ~= "table" then error("point de passage invalide (table attendue)", 0) end
-    if not (nombreValide(point.x) and nombreValide(point.y) and nombreValide(point.z)) then
-      error("point de passage invalide : x, y et z doivent etre numeriques", 0)
+    if not (nombreValide(point.x) and nombreValide(point.z)) then
+      error("point de passage invalide : x et z doivent etre numeriques", 0)
+    end
+    -- L'altitude est FACULTATIVE : sans altitude, le point est survole a
+    -- l'altitude de croisiere, sans descente verticale. En revanche une
+    -- altitude PRESENTE mais aberrante reste une erreur : la confondre avec
+    -- une absence ferait survoler en silence un point cense etre un depot.
+    if point.y ~= nil and not nombreValide(point.y) then
+      error("point de passage invalide : 'y' doit etre numerique, ou absent "
+        .. "pour un survol a l'altitude de croisiere", 0)
+    end
+    local altitudeLibre = (point.y == nil)
+    if altitudeLibre and not nombreValide(altitudeTransit) then
+      error("point de passage sans altitude et aucune altitude de croisiere connue", 0)
     end
     return {
-      x = point.x, y = point.y, z = point.z,
+      x = point.x, y = altitudeLibre and altitudeTransit or point.y, z = point.z,
+      altitudeLibre = altitudeLibre,
       type = point.type or "survol",  -- "survol"|"depot"|"atterrissage"|"amarrage"
       cap  = nombreValide(point.cap) and normaliserAngle(point.cap) or nil,
       arret = point.arret and true or false,
@@ -2295,6 +2412,10 @@ function autopilote.nouveau(options)
   end
 
   --- Determine la phase de vol du cycle courant.
+  --- Profil de vol : montee verticale au depart, transit, puis descente
+  -- strictement verticale sur le point. Le vehicule ne descend qu'une fois
+  -- REELLEMENT a l'aplomb de sa cible : c'est ce qui evite les approches en
+  -- pente au-dessus d'un relief ou d'un batiment.
   local function determinerPhase(distanceH, point, estDernier, altitudeTransit)
     if etat.transitHaute and etat.phase == PHASES.MONTEE then
       local marge = config.vitesses.margeAltitude
@@ -2306,8 +2427,31 @@ function autopilote.nouveau(options)
       end
       return PHASES.MONTEE
     end
+
+    -- Un point sans altitude propre est survole : aucune descente.
+    local descenteAttendue = estDernier and not point.altitudeLibre
+    local rayon = config.vitesses.rayonDescenteVerticale
+
+    if etat.phase == PHASES.DESCENTE then
+      -- Hysteresis : une derive momentanee ne doit pas faire remonter le
+      -- vehicule, mais une derive franche impose de se recentrer d'abord.
+      if distanceH > rayon * 2 then
+        journal.avert(ETAPES.NAVIGATION, string.format(
+          "derive de %.2fm pendant la descente verticale : recentrage avant de "
+          .. "poursuivre", distanceH))
+        return PHASES.APPROCHE
+      end
+      return PHASES.DESCENTE
+    end
+
+    if descenteAttendue and distanceH <= rayon then
+      journal.info(ETAPES.NAVIGATION, string.format(
+        "a l'aplomb du point (%.2fm) : debut de la descente verticale", distanceH))
+      return PHASES.DESCENTE
+    end
+
     if distanceH <= config.vitesses.distanceApproche and (estDernier or point.arret) then
-      return estDernier and PHASES.FINALE or PHASES.APPROCHE
+      return PHASES.APPROCHE
     end
     return PHASES.CROISIERE
   end
@@ -2461,32 +2605,67 @@ function autopilote.nouveau(options)
       end
 
       cible = { x = centre.x, y = centre.y, z = centre.z }
-      if etat.transitHaute and config.mission.respecterAltitudeCroisiere
-         and (phase == PHASES.MONTEE or phase == PHASES.CROISIERE) then
-        -- On ne redescend qu'a l'approche : l'altitude de croisiere sert de
-        -- plancher de securite pendant tout le transit.
-        cible.y = math.max(centre.y, altitudeTransit)
+
+      -- MONTEE : on tient l'aplomb du point de DEPART pendant toute la montee.
+      -- Sans cela, le vehicule part en biais des les premiers metres et la
+      -- montee n'a plus rien de verticale.
+      if phase == PHASES.MONTEE and etat.depart then
+        cible.x, cible.z = etat.depart.x, etat.depart.z
+      end
+
+      -- Tant que la descente verticale n'a pas commence, on tient un PALIER :
+      -- l'altitude de croisiere en transit haute altitude, l'altitude de
+      -- depart sinon. Le vehicule arrive donc a l'aplomb de sa cible avant de
+      -- descendre, au lieu de l'approcher en pente au-dessus du relief.
+      if phase ~= PHASES.DESCENTE then
+        local palier = nil
+        if point.altitudeLibre then
+          palier = altitudeTransit
+        elseif etat.transitHaute and config.mission.respecterAltitudeCroisiere then
+          palier = altitudeTransit
+        elseif config.mission.descenteVerticale then
+          palier = etat.altitudeDepart
+        end
+        if nombreValide(palier) then cible.y = math.max(centre.y, palier) end
       end
 
       local vitesseMax = config.vitesses.croisiere
       if phase == PHASES.MONTEE then
         vitesseMax = config.vitesses.avanceEnMontee
-      elseif phase == PHASES.APPROCHE or phase == PHASES.FINALE then
+      elseif phase == PHASES.APPROCHE then
         vitesseMax = config.vitesses.approche
+      elseif phase == PHASES.DESCENTE then
+        -- En descente verticale, le deplacement horizontal n'est plus qu'une
+        -- correction de derive : on le bride franchement.
+        vitesseMax = config.vitesses.approche * 0.5
       end
       if nombreValide(etat.optionsMission.vitesseMax) then
         vitesseMax = math.min(vitesseMax, etat.optionsMission.vitesseMax)
       end
 
+      -- La descente verticale se fait a vitesse normale : c'est la cascade qui
+      -- la ralentit a l'approche. Le bridage final ne s'applique que sur les
+      -- derniers blocs, la ou la precision compte. Brider les 250 blocs d'une
+      -- descente depuis l'altitude de croisiere prendrait plusieurs minutes.
+      local vitesseVerticale = config.vitesses.verticaleMax
+      if phase == PHASES.DESCENTE
+         and nombreValide(config.vitesses.vitesseDescenteFinale) then
+        local restant = math.abs(centre.y - etat.position.y)
+        if restant <= (config.vitesses.hauteurFinale or 8) then
+          vitesseVerticale = math.min(vitesseVerticale, config.vitesses.vitesseDescenteFinale)
+        end
+      end
+
       local capImpose = nil
-      if phase == PHASES.FINALE and point.cap
-         and distanceH <= config.vitesses.distanceApproche * 0.4 then
+      if phase == PHASES.DESCENTE and point.cap then
+        -- Le cap final est tenu pendant toute la descente : un depot ou un
+        -- amarrage exige la bonne orientation avant le contact.
         capImpose = point.cap
       end
 
       limites = {
         vitesseMax       = vitesseMax,
-        vitesseVerticale = config.vitesses.verticaleMax,
+        vitesseVerticale = vitesseVerticale,
         vitesseLaterale  = config.vitesses.lateraleMax,
         tauxVirage       = config.vitesses.tauxVirageMax,
         marcheArriere    = config.vitesses.marcheArriere,
@@ -2496,7 +2675,7 @@ function autopilote.nouveau(options)
       -- vehicule ne pourrait jamais se poser ni s'amarrer.
       local poseVolontaire = (point.type == "atterrissage" or point.type == "depot"
         or point.type == "amarrage")
-      appliquerEnveloppeSol(limites, poseVolontaire and phase == PHASES.FINALE)
+      appliquerEnveloppeSol(limites, poseVolontaire and phase == PHASES.DESCENTE)
       appliquerJeuGains("croisiere")
 
     else -- MODES.MAINTIEN
@@ -2644,8 +2823,14 @@ function autopilote.nouveau(options)
     if type(points) ~= "table" or #points == 0 then
       error("itineraire vide : au moins un point de passage est attendu", 0)
     end
+    -- L'altitude de croisiere est resolue AVANT la normalisation : c'est elle
+    -- qui sert d'altitude aux points de passage qui n'en precisent aucune.
+    local altitudeTransit = (optionsMission or {}).altitudeCroisiere
+      or config.vitesses.altitudeCroisiere
     local itineraire = {}
-    for i, point in ipairs(points) do itineraire[i] = normaliserPoint(point) end
+    for i, point in ipairs(points) do
+      itineraire[i] = normaliserPoint(point, altitudeTransit)
+    end
 
     etat.itineraire     = itineraire
     etat.index          = math.max(1, math.min(indexDepart or 1, #itineraire))
@@ -2662,6 +2847,9 @@ function autopilote.nouveau(options)
     etat.capMaintienImpose = nil
     etat.maintienApresAcquisition = nil
     etat.depart         = etat.position and copierProfond(etat.position) or nil
+    etat.altitudeDepart = etat.position and etat.position.y or nil
+    etat.progresReference = nil
+    etat.immobileDepuis = 0
     etat.mode           = MODES.TRANSIT
     appliquerJeuGains("croisiere")
 
@@ -2696,7 +2884,8 @@ function autopilote.nouveau(options)
 
   --- Tenir la position : le point courant si aucun n'est precise.
   function ap.maintenirPosition(point, capImpose)
-    local cible = point and normaliserPoint(point) or nil
+    local cible = point and normaliserPoint(point,
+      etat.position and etat.position.y or config.vitesses.altitudeCroisiere) or nil
     etat.tolerances = config.tolerances
     etat.itineraire = nil
     etat.index = 0
