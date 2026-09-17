@@ -89,10 +89,30 @@ local function monter(options)
   -- chose que sa mise en page.
   if options.ajusterConfig then
     local configuration = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    -- La position d'antenne SIMULEE et celle DECLAREE doivent coincider, sinon
+    -- l'autopilote retranche un decalage qui n'existe pas et vole avec un biais
+    -- permanent. C'est un piege d'essai, pas un comportement a eprouver.
+    if options.decalageGps then
+      configuration.decalageGps = {
+        x = options.decalageGps.x, y = options.decalageGps.y, z = options.decalageGps.z }
+    end
     options.ajusterConfig(configuration)
     local fichier = env.fs.open("/autopilote/config_vehicule.lua", "w")
     fichier.write(autopilote.serialiserConfig(configuration))
     fichier.close()
+  end
+
+  -- Garde-fou : le meme piege ne doit pas revenir par une autre porte.
+  if not options.decalageGpsDesaccord then
+    local declare = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua").decalageGps
+    local simule = options.decalageGps or { x = 0, y = 2, z = 4 }
+    for _, axe in ipairs({ "x", "y", "z" }) do
+      if math.abs((declare[axe] or 0) - (simule[axe] or 0)) > 1e-9 then
+        error(string.format(
+          "montage incoherent : antenne simulee %s=%.2f mais configuration %s=%.2f",
+          axe, simule[axe] or 0, axe, declare[axe] or 0), 2)
+      end
+    end
   end
 
   local ap
@@ -1669,6 +1689,212 @@ do
   verifier("2 signaux ponderes 16 et 1 : 256 positions", 17 * 15 + 1 == 256)
   verifier("un couple pondere bat quatre bruleurs en finesse",
     (17 * 15 + 1) > (4 * 15 + 1))
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 28 : ordinateur de sortie deporte (satellite) ==")
+do
+  local banc, env, etat = monter({ budget = 200, sansInstance = true })
+  local satellite = banc.charger(SRC .. "/satellite.lua")
+  verifier("satellite chargeable comme bibliotheque",
+    type(satellite) == "table" and type(satellite.creerSatellite) == "function")
+
+  local config = {
+    identifiant = "SAT-AVANT", vehicule = "AER-CARGO-01",
+    protocole = "frenchnet_sortie", delaiChienDeGarde = 1.5,
+    repos = { left = 0, right = 0 },
+    cotesAutorises = { "left", "right" },
+    remonterEntrees = true,
+  }
+  local sat = satellite.creerSatellite(config)
+
+  verifier("au demarrage, les faces sont posees au repos", sat.neutralise == true)
+
+  -- Trame nominale.
+  local acceptee, acquittement = sat.traiterTrame(7, {
+    protocole = "FRENCHNET_SORTIE", vehicule = "AER-CARGO-01", sequence = 12,
+    sorties = { left = 11, right = 0 }, repos = { left = 4, right = 0 },
+  })
+  verifier("trame nominale acceptee", acceptee == true)
+  verifier("niveaux appliques sur les faces", etat.redstone.left == 11)
+  verifier("acquittement renvoye au maitre",
+    acquittement and acquittement.protocole == "FRENCHNET_SORTIE_ACK"
+    and acquittement.sequence == 12 and acquittement.identifiant == "SAT-AVANT")
+  verifier("l'acquittement remonte les entrees redstone",
+    acquittement and type(acquittement.entrees) == "table")
+
+  -- Trame d'un autre vehicule : deux appareils cote a cote ne se commandent pas.
+  local avant = etat.redstone.left
+  local refusee = sat.traiterTrame(9, {
+    protocole = "FRENCHNET_SORTIE", vehicule = "AER-CHASSE-02", sequence = 99,
+    sorties = { left = 15 },
+  })
+  verifier("trame d'un autre vehicule ignoree", refusee == false)
+  verifier("les faces ne bougent pas pour un autre vehicule", etat.redstone.left == avant)
+
+  -- Face non autorisee.
+  sat.traiterTrame(7, {
+    protocole = "FRENCHNET_SORTIE", vehicule = "AER-CARGO-01", sequence = 13,
+    sorties = { top = 15 },
+  })
+  verifier("face non autorisee refusee", (etat.redstone.top or 0) == 0)
+  verifier("le refus est compte", sat.refus >= 1, tostring(sat.refus))
+
+  -- Chien de garde : c'est LA securite du montage deporte.
+  verifier("pas de neutralisation tant que les trames arrivent",
+    sat.surveiller(sat.derniereTrame + 1.0) == false)
+  local neutralise = sat.surveiller(sat.derniereTrame + 2.0)
+  verifier("neutralisation au-dela du delai", neutralise == true)
+  verifier("les faces retombent aux niveaux de REPOS envoyes par le maitre",
+    etat.redstone.left == 4,
+    "un axe analogique dont le neutre vaut 4 ne doit pas retomber a 0")
+  verifier("chien de garde journalise", (banc.contient("liaison perdue")))
+
+  -- Une entree redstone est bien remontee au maitre.
+  banc.entree("right", 9)
+  local sat2 = satellite.creerSatellite(config)
+  local _, ack2 = sat2.traiterTrame(7, {
+    protocole = "FRENCHNET_SORTIE", vehicule = "AER-CARGO-01", sequence = 1,
+    sorties = {},
+  })
+  verifier("entree redstone remontee au maitre",
+    ack2 and ack2.entrees and ack2.entrees.right == 9,
+    ack2 and ack2.entrees and tostring(ack2.entrees.right))
+
+  -- Cote maitre : l'acquittement met le satellite a jour et leve le silence.
+  local banc3, env3, etat3, autopilote3 = monter({ budget = 200, sansInstance = true })
+  local config3 = autopilote3.chargerConfiguration("/autopilote/config_vehicule.lua")
+  config3.sorties.distant.actif = false
+  local sorties3 = autopilote3.creerSorties(config3)
+  verifier("acquittement d'un autre vehicule rejete",
+    sorties3.traiterAck(12, { protocole = "FRENCHNET_SORTIE_ACK",
+      vehicule = "AUTRE", identifiant = "X" }) == false)
+  verifier("acquittement du bon vehicule accepte",
+    sorties3.traiterAck(12, { protocole = "FRENCHNET_SORTIE_ACK",
+      vehicule = config3.identifiant, identifiant = "SAT-AVANT", sequence = 3,
+      entrees = { back = 7 } }) == true)
+  verifier("entree distante lisible par le maitre",
+    sorties3.entreeDistante(12, "back") == 7)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 29 : surveillance carburant et ravitaillement automatique ==")
+do
+  --- Prepare un vehicule dont la jauge est un reservoir expose a CC.
+  local function avecReservoir(contenu, capacite, options)
+    options = options or {}
+    local banc, env, etat, autopilote = monter({
+      budget = options.budget or 900, sansInstance = true,
+      decalageGps = { x = 0, y = 2, z = 0 },
+      vehicule = options.vehicule
+        or { x = 120, y = 100, z = -740, cap = 0, vLateralMax = 0 },
+      ajusterConfig = function(config)
+        config.vitesses.altitudeCroisiere = 140
+        config.carburant = config.carburant or {}
+        config.carburant.actif = true
+        config.carburant.source = "peripherique"
+        config.carburant.peripherique = { nom = "reservoir_0", methode = "tanks" }
+        config.carburant.seuilBas = 0.25
+        config.carburant.seuilPlein = 0.9
+        config.carburant.periode = 2
+        config.carburant.coteAmarre = "back"
+        config.carburant.amarrage = config.carburant.amarrage or {}
+        config.carburant.amarrage.altitudeApproche = 10
+        config.carburant.amarrage.delaiMax = 400
+        config.carburant.amarrage.attenteMax = 200
+        if options.ajusterConfig then options.ajusterConfig(config) end
+      end,
+    })
+    local niveau = { quantite = contenu }
+    banc.brancher("reservoir_0", "fluid_storage", {
+      tanks = function()
+        return { { name = "create:fuel", amount = niveau.quantite, capacity = capacite } }
+      end,
+    })
+    local ap = autopilote.nouveau({
+      config = "/autopilote/config_vehicule.lua", commandes = banc.pilote() })
+    local carburant = banc.charger(SRC .. "/carburant.lua")
+    return banc, env, etat, autopilote, ap, carburant, niveau
+  end
+
+  ------------------------------------------------------------------ lecture
+  local banc, env, etat, autopilote, ap, carburant, niveau = avecReservoir(500, 1000)
+  local jauge = carburant.nouveau(ap)
+  verifier("niveau lu sur le reservoir", math.abs(jauge.niveau() - 0.5) < 1e-6,
+    tostring(jauge.niveau()))
+  niveau.quantite = 100
+  verifier("le niveau suit le reservoir", math.abs(jauge.niveau() - 0.1) < 1e-6)
+
+  -- Jauge illisible : anomalie signalee, pas de valeur inventee.
+  local bancX, envX, etatX, autopiloteX, apX, carburantX = avecReservoir(0, 1000)
+  local apXjauge = carburantX.nouveau(apX, { config = {
+    source = "peripherique",
+    peripherique = { nom = "absent_0", methode = "tanks" } } })
+  local valeur, motif = apXjauge.niveau()
+  verifier("peripherique absent : aucun niveau invente", valeur == nil)
+  verifier("l'anomalie nomme la cause",
+    motif and motif:find("introuvable", 1, true) ~= nil, tostring(motif))
+
+  -- Lecture par redstone, en jauge et en tout ou rien.
+  local bancR, envR, etatR, autopiloteR, apR, carburantR = avecReservoir(0, 1000)
+  bancR.entree("back", 12)
+  local jaugeR = carburantR.nouveau(apR, { config = {
+    source = "redstone", redstone = { cote = "back", mode = "analogique", max = 15 } } })
+  verifier("jauge redstone analogique", math.abs(jaugeR.niveau() - 12 / 15) < 1e-6,
+    tostring(jaugeR.niveau()))
+  local jaugeS = carburantR.nouveau(apR, { config = {
+    source = "redstone", redstone = { cote = "back", mode = "signal" } } })
+  verifier("signal tout ou rien : courant = carburant bas", jaugeS.niveau() == 0)
+  bancR.entree("back", 0)
+  verifier("signal eteint = reservoir considere plein", jaugeS.niveau() == 1)
+
+  ----------------------------------------------- retour et amarrage complets
+  local banc2, env2, etat2, autopilote2, ap2, carburant2, niveau2 =
+    avecReservoir(200, 1000, { budget = 1200 })
+  local evenements = {}
+  local jauge2 = carburant2.nouveau(ap2, {})
+  jauge2.surEvenement(function(typeEvenement) evenements[typeEvenement] = true end)
+  ap2.initialiser()
+
+  local station = ap2.ravitaillement().position
+  local termine = false
+  local ok = pcall(env2.parallel.waitForAny,
+    function() ap2.executer() end,
+    function() jauge2.executer() end,
+    function()
+      -- On attend l'amarrage, puis on remplit le reservoir pour liberer.
+      for _ = 1, 600 do
+        if jauge2.estAmarre() then break end
+        env2.sleep(1)
+      end
+      if jauge2.estAmarre() then
+        niveau2.quantite = 980
+        for _ = 1, 200 do
+          if not jauge2.estOccupe() then break end
+          env2.sleep(1)
+        end
+      end
+      termine = true
+    end)
+
+  verifier("le retour au ravitaillement se declenche sous le seuil",
+    evenements.retour == true)
+  verifier("le vehicule s'amarre a la station", evenements.amarre == true,
+    jauge2.etat().etat)
+  verifier("amarrage sur la station verrouillee",
+    banc2.distanceH(station) <= 1.5,
+    string.format("%.2f bloc de la station", banc2.distanceH(station)))
+  verifier("altitude d'amarrage atteinte",
+    math.abs(etat2.vehicule.y - (station.y + 2)) <= 1.0,
+    string.format("%.2f (decalage d'amarrage -2)", etat2.vehicule.y))
+  verifier("le plein libere le vehicule", evenements.depart == true)
+  verifier("retour en veille apres liberation",
+    jauge2.etat().etat == "VEILLE", jauge2.etat().etat)
+  verifier("signal d'amarrage retombe au depart",
+    (etat2.redstone.back or 0) == 0)
+  verifier("manoeuvre journalisee",
+    journalContient("retour au ravitaillement declenche")
+    and journalContient("descente de precision"))
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))

@@ -2681,6 +2681,7 @@ function autopilote.nouveau(options)
 
   local function pointFranchi(estDernier)
     local point = etat.itineraire[etat.index]
+    etat.capArriveeNonVerifie = false   -- l'avertissement vaut par point
     journal.info(ETAPES.ETAPE_FRANCHIE, string.format(
       "point %d/%d franchi%s : X=%.1f Y=%.1f Z=%.1f",
       etat.index, #etat.itineraire,
@@ -2831,7 +2832,25 @@ function autopilote.nouveau(options)
     local ok = diagnostic.distanceH <= marges.horizontale
       and math.abs(diagnostic.distanceY) <= marges.altitude
     if ok and point.cap then
-      ok = math.abs(normaliserAngle(point.cap - etat.cap)) <= marges.cap
+      -- Un cap final ne se verifie que si le cap est OBSERVABLE. Sans capteur
+      -- dedie, le cap se deduit de la route : un vehicule pose sur son point
+      -- d'arrivee n'avance plus, le cap se fige, et le lacet est neutralise
+      -- (voir BOUCLE_POSITION). Exiger malgre tout le cap reviendrait a
+      -- attendre une correction que l'autopilote s'interdit lui-meme de
+      -- commander : le point ne serait JAMAIS franchi.
+      if etat.capFiable == false then
+        if not etat.capArriveeNonVerifie then
+          etat.capArriveeNonVerifie = true
+          journal.avert(ETAPES.ARRIVEE, string.format(
+            "cap final %.0f non verifiable a l'arret (cap non mesure depuis %.1fs) : "
+            .. "le point est valide sur la position seule. Un capteur de cap "
+            .. "(config.cap.source = \"peripherique\") leve cette limite.",
+            point.cap, etat.capNonMesureDepuis or 0))
+        end
+      else
+        etat.capArriveeNonVerifie = false
+        ok = math.abs(normaliserAngle(point.cap - etat.cap)) <= marges.cap
+      end
     end
     return ok
   end

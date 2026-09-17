@@ -82,8 +82,12 @@ local DEFAUTS = {
 
   amarrage = {
     altitudeApproche     = 12,   -- hauteur tenue a la verticale avant descente
-    toleranceHorizontale = 0.6,
-    toleranceAltitude    = 0.4,
+    -- ATTENTION : une tolerance plus fine que ce que le vehicule sait tenir
+    -- rend l'amarrage IMPOSSIBLE, pas plus precis. Sans capteur de cap, la
+    -- tenue de position est bornee par le rayon de l'antenne GPS ; descendre
+    -- sous 1 bloc demande une antenne centree et un capteur de cap.
+    toleranceHorizontale = 1.2,
+    toleranceAltitude    = 0.6,
     toleranceCap         = 3,
     dureeArrivee         = 3,
     vitesseApproche      = 1.2,
@@ -332,13 +336,18 @@ function carburant.nouveau(ap, options)
     journal.info(ETAPES.APPROCHE, string.format(
       "route vers la verticale de %s, %d bloc(s) au-dessus",
       station.nom, a.altitudeApproche))
+    -- Marges NORMALES pour rejoindre la verticale : exiger ici la precision de
+    -- l'amarrage empecherait simplement d'y arriver, et la manoeuvre serait
+    -- declaree en echec avant meme d'avoir commence a descendre.
+    -- Aucun cap impose ici : ce point n'est qu'un passage, et exiger une
+    -- orientation a l'arret sur un vehicule sans capteur de cap ne fait
+    -- qu'immobiliser la manoeuvre. L'orientation se joue a la descente.
     ap.allerA({
       x = station.position.x,
       y = station.position.y + a.altitudeApproche,
       z = station.position.z,
-      cap = station.capFinal,
       nom = "VERTICALE " .. station.nom,
-    }, { tolerances = tolerancesAmarrage() })
+    }, { vitesseMax = a.vitesseApproche * 3 })
 
     local arrive = ap.attendreArrivee(a.delaiMax)
     if not arrive then
@@ -445,6 +454,29 @@ function carburant.nouveau(ap, options)
     journal.info(ETAPES.DEMARRAGE, string.format(
       "surveillance carburant : source '%s', retour sous %.0f %%, depart au-dessus de %.0f %%",
       tostring(reglages.source), reglages.seuilBas * 100, reglages.seuilPlein * 100))
+
+    -- Une tolerance d'amarrage plus fine que la tolerance de vol courante ne
+    -- s'obtient pas par decret : on previent plutot que d'echouer en vol.
+    local marge = ap.config.tolerances.horizontale
+    if a.toleranceHorizontale < marge * 0.5 then
+      journal.avert(ETAPES.DEMARRAGE, string.format(
+        "tolerance d'amarrage (%.2f) tres inferieure a la tolerance de vol "
+        .. "(%.2f) : si le vehicule ne sait pas tenir cette precision, la "
+        .. "manoeuvre echouera au lieu d'etre plus fine",
+        a.toleranceHorizontale, marge))
+    end
+
+    -- Le cap d'amarrage n'est tenable que si le cap est MESURE. Deduit de la
+    -- route, il se fige des que le vehicule ralentit : la descente finale se
+    -- fera alors au cap qu'avait le vehicule en arrivant, et le decalage du
+    -- docker sera applique dans cette direction-la.
+    if station.capFinal and (ap.config.cap or {}).source ~= "peripherique" then
+      journal.avert(ETAPES.DEMARRAGE, string.format(
+        "cap d'amarrage %.0f demande sans capteur de cap : l'orientation finale "
+        .. "ne sera pas garantie a l'arret. Si la prise du docker est decalee "
+        .. "(decalageAmarrage), montez un capteur de cap ou centrez la prise",
+        station.capFinal))
+    end
 
     if not reglages.actif then
       journal.avert(ETAPES.DEMARRAGE, "surveillance carburant desactivee par la configuration")

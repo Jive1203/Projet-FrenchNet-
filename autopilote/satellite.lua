@@ -179,7 +179,122 @@ local function lireEntrees()
 end
 
 --------------------------------------------------------------------------------
--- 6. CYCLE DE VIE
+-- 6. COEUR DU SATELLITE
+--    Isole du programme : ni modem, ni boucle infinie, ni ecran. C'est cette
+--    partie qui porte la securite du montage deporte, donc c'est elle que le
+--    banc d'essai doit pouvoir eprouver directement.
+--------------------------------------------------------------------------------
+
+local M = {}
+
+function M.creerSatellite(config, journalUtilise)
+  local j = journalUtilise or journal
+  local autorises = {}
+  for _, cote in ipairs(config.cotesAutorises or COTES) do autorises[cote] = true end
+
+  local sat = {
+    config        = config,
+    repos         = config.repos or {},
+    niveaux       = {},
+    derniereTrame = nil,
+    neutralise    = true,
+    trames        = 0,
+    refus         = 0,
+    sequence      = 0,
+    maitre        = nil,
+  }
+
+  --- Applique un jeu de niveaux, en refusant les faces non autorisees.
+  function sat.appliquer(niveaux, motif)
+    for cote, niveau in pairs(niveaux or {}) do
+      if autorises[cote] then
+        sat.niveaux[cote] = ecrireCote(cote, niveau)
+      else
+        sat.refus = sat.refus + 1
+        j.avert(ETAPES.APPLICATION, string.format(
+          "face '%s' non autorisee sur ce satellite : commande ignoree (%s)",
+          tostring(cote), tostring(motif)))
+      end
+    end
+  end
+
+  --- Chien de garde : c'est LA securite du montage deporte. Un ordinateur
+  -- principal qui plante ne doit pas laisser les moteurs bloques a fond.
+  function sat.neutraliser(motif)
+    if sat.neutralise then return false end
+    sat.neutralise = true
+    sat.appliquer(sat.repos, "repos")
+    -- Toute face non couverte par les niveaux de repos retombe a zero.
+    for cote in pairs(sat.niveaux) do
+      if sat.repos[cote] == nil then sat.niveaux[cote] = ecrireCote(cote, 0) end
+    end
+    j.avert(ETAPES.CHIEN_DE_GARDE,
+      "liaison perdue (" .. tostring(motif) .. ") : faces remises au repos")
+    return true
+  end
+
+  --- Traite une trame de commande.
+  -- @return acceptee (booleen), acquittement a renvoyer (table ou nil)
+  function sat.traiterTrame(expediteur, message)
+    if type(message) ~= "table" or message.protocole ~= "FRENCHNET_SORTIE" then
+      return false, nil
+    end
+    -- Filtre vehicule : deux appareils cote a cote ne se commandent pas.
+    if config.vehicule and message.vehicule and message.vehicule ~= config.vehicule then
+      j.debug(ETAPES.RECEPTION,
+        "trame d'un autre vehicule ignoree : " .. tostring(message.vehicule))
+      return false, nil
+    end
+
+    sat.maitre = expediteur
+    sat.sequence = message.sequence or 0
+    sat.derniereTrame = os.clock()
+    sat.neutralise = false
+    if type(message.repos) == "table" then sat.repos = message.repos end
+    if message.delai then config.delaiChienDeGarde = message.delai end
+    sat.appliquer(message.sorties, "trame " .. tostring(message.sequence))
+    sat.trames = sat.trames + 1
+
+    return true, {
+      protocole    = "FRENCHNET_SORTIE_ACK",
+      version      = 1,
+      identifiant  = config.identifiant,
+      vehicule     = config.vehicule,
+      idOrdinateur = os.getComputerID(),
+      sequence     = sat.sequence,
+      entrees      = config.remonterEntrees and lireEntrees() or nil,
+      neutralise   = false,
+    }
+  end
+
+  --- Verifie l'age de la derniere trame et neutralise si besoin.
+  -- @return true si la neutralisation vient d'avoir lieu
+  function sat.surveiller(maintenant)
+    maintenant = maintenant or os.clock()
+    local age = sat.derniereTrame and (maintenant - sat.derniereTrame) or math.huge
+    if age > (config.delaiChienDeGarde or 1.5) then
+      return sat.neutraliser(string.format("%.1fs sans trame",
+        age == math.huge and -1 or age))
+    end
+    return false
+  end
+
+  function sat.age(maintenant)
+    if not sat.derniereTrame then return nil end
+    return (maintenant or os.clock()) - sat.derniereTrame
+  end
+
+  -- Au demarrage, on ne sait pas dans quel etat sont les faces : on les pose.
+  sat.neutralise = false
+  sat.neutraliser("demarrage")
+  return sat
+end
+
+M.ETAPES = ETAPES
+M.COTES  = COTES
+
+--------------------------------------------------------------------------------
+-- 7. CYCLE DE VIE
 --------------------------------------------------------------------------------
 
 local function cycleDeVie()
@@ -206,46 +321,7 @@ local function cycleDeVie()
     "REPORTEZ le numero #" .. os.getComputerID()
     .. " dans la configuration du vehicule (champ 'ordinateur' de l'axe)")
 
-  local etat = {
-    repos       = config.repos or {},
-    niveaux     = {},
-    derniereTrame = nil,
-    neutralise  = true,
-    trames      = 0,
-    refus       = 0,
-    maitre      = nil,
-    sequence    = 0,
-  }
-
-  --- Applique un jeu de niveaux, en refusant les faces non autorisees.
-  local function appliquer(niveaux, motif)
-    for cote_, niveau in pairs(niveaux or {}) do
-      if autorises[cote_] then
-        etat.niveaux[cote_] = ecrireCote(cote_, niveau)
-      else
-        etat.refus = etat.refus + 1
-        journal.avert(ETAPES.APPLICATION, string.format(
-          "face '%s' non autorisee sur ce satellite : commande ignoree (%s)",
-          tostring(cote_), tostring(motif)))
-      end
-    end
-  end
-
-  --- Chien de garde : c'est LA securite du montage deporte.
-  local function neutraliser(motif)
-    if etat.neutralise then return end
-    etat.neutralise = true
-    appliquer(etat.repos, "repos")
-    -- Toute face non couverte par les niveaux de repos retombe a zero.
-    for cote_ in pairs(etat.niveaux) do
-      if etat.repos[cote_] == nil then etat.niveaux[cote_] = ecrireCote(cote_, 0) end
-    end
-    journal.avert(ETAPES.CHIEN_DE_GARDE,
-      "liaison perdue (" .. tostring(motif) .. ") : faces remises au repos")
-  end
-
-  neutraliser("demarrage")
-  etat.neutralise = true
+  local sat = M.creerSatellite(config)
 
   local function afficher()
     term.clear()
@@ -253,57 +329,33 @@ local function cycleDeVie()
     print("=== FRENCHNET - SORTIE DEPORTEE ===")
     print(string.format("%s  |  ordinateur #%d", config.identifiant, os.getComputerID()))
     print(string.format("vehicule : %s", tostring(config.vehicule)))
-    local age = etat.derniereTrame and (os.clock() - etat.derniereTrame) or nil
-    if etat.neutralise then
+    local age = sat.age()
+    if sat.neutralise then
       print(string.format("LIAISON  : PERDUE - faces au repos%s",
         age and string.format(" (%.1fs)", age) or ""))
     else
-      print(string.format("LIAISON  : OK - trame %d, il y a %.1fs", etat.sequence, age or 0))
+      print(string.format("LIAISON  : OK - trame %d, il y a %.1fs", sat.sequence, age or 0))
     end
     print(string.rep("-", 30))
     for _, cote_ in ipairs(COTES) do
-      if etat.niveaux[cote_] ~= nil then
-        print(string.format("  %-7s %2d", cote_, etat.niveaux[cote_]))
+      if sat.niveaux[cote_] ~= nil then
+        print(string.format("  %-7s %2d", cote_, sat.niveaux[cote_]))
       end
     end
     print(string.rep("-", 30))
-    print(string.format("trames %d  refus %d", etat.trames, etat.refus))
+    print(string.format("trames %d  refus %d", sat.trames, sat.refus))
     print("Ctrl+T pour arreter")
   end
 
-  --- Reception des trames de commande.
+  --- Reception des trames de commande : plus que du reseau, la logique est
+  -- dans l'objet satellite.
   local function boucleReception()
     while true do
       local expediteur, message = rednet.receive(config.protocole, 1)
-
-      if expediteur and type(message) == "table"
-         and message.protocole == "FRENCHNET_SORTIE" then
-        -- Filtre vehicule : deux appareils cote a cote ne se commandent pas.
-        if config.vehicule and message.vehicule and message.vehicule ~= config.vehicule then
-          journal.debug(ETAPES.RECEPTION, "trame d'un autre vehicule ignoree : "
-            .. tostring(message.vehicule))
-        else
-          etat.maitre = expediteur
-          etat.sequence = message.sequence or 0
-          etat.derniereTrame = os.clock()
-          etat.neutralise = false
-          if type(message.repos) == "table" then etat.repos = message.repos end
-          if message.delai then config.delaiChienDeGarde = message.delai end
-          appliquer(message.sorties, "trame " .. tostring(message.sequence))
-          etat.trames = etat.trames + 1
-
-          -- Acquittement : c'est ce qui permet au maitre de savoir que ce
-          -- groupe de moteurs repond encore, et de lire nos entrees.
-          pcall(rednet.send, expediteur, {
-            protocole   = "FRENCHNET_SORTIE_ACK",
-            version     = 1,
-            identifiant = config.identifiant,
-            vehicule    = config.vehicule,
-            idOrdinateur= os.getComputerID(),
-            sequence    = etat.sequence,
-            entrees     = config.remonterEntrees and lireEntrees() or nil,
-            neutralise  = false,
-          }, config.protocole)
+      if expediteur then
+        local acceptee, acquittement = sat.traiterTrame(expediteur, message)
+        if acceptee and acquittement then
+          pcall(rednet.send, expediteur, acquittement, config.protocole)
         end
       end
     end
@@ -313,17 +365,14 @@ local function cycleDeVie()
   local function boucleSurveillance()
     while true do
       sleep(0.25)
-      local age = etat.derniereTrame and (os.clock() - etat.derniereTrame) or math.huge
-      if age > (config.delaiChienDeGarde or 1.5) then
-        neutraliser(string.format("%.1fs sans trame", age == math.huge and -1 or age))
-      end
+      sat.surveiller(os.clock())
     end
   end
 
   local function boucleAnnonce()
     while true do
       sleep(config.periodeAnnonce or 3)
-      if etat.neutralise then
+      if sat.neutralise then
         pcall(rednet.broadcast, {
           protocole   = "FRENCHNET_SORTIE_ANNONCE",
           identifiant = config.identifiant,
@@ -358,26 +407,41 @@ local function neutraliserToutesLesFaces()
   for _, cote in ipairs(COTES) do pcall(ecrireCote, cote, 0) end
 end
 
-local echecs = 0
-while true do
-  local debut = os.clock()
-  local ok, err = pcall(cycleDeVie)
+--- Le superviseur ne tourne que si le fichier est lance depuis le shell ;
+--- charge comme bibliotheque, il se contente d'exposer sa fabrique.
+local function lanceDepuisLeShell()
+  if not (shell and shell.getRunningProgram) then return false end
+  local ok, chemin = pcall(shell.getRunningProgram)
+  if not ok or type(chemin) ~= "string" then return false end
+  return chemin:gsub("^/", "") == "autopilote/satellite.lua"
+end
 
-  if ok then
-    journal.avert(ETAPES.DEMARRAGE, "cycle termine sans erreur : relance immediate")
-    echecs = 0
-  else
-    if estTerminate(err) then
+local function superviser()
+  local echecs = 0
+  while true do
+    local debut = os.clock()
+    local ok, err = pcall(cycleDeVie)
+
+    if ok then
+      journal.avert(ETAPES.DEMARRAGE, "cycle termine sans erreur : relance immediate")
+      echecs = 0
+    else
+      if estTerminate(err) then
+        neutraliserToutesLesFaces()
+        journal.info(ETAPES.ARRET, "arret manuel : toutes les faces remises a zero")
+        return
+      end
+      -- Un satellite en erreur ne doit jamais laisser des moteurs sous tension.
       neutraliserToutesLesFaces()
-      journal.info(ETAPES.ARRET, "arret manuel : toutes les faces remises a zero")
-      return
+      echecs = (os.clock() - debut >= 60) and 1 or (echecs + 1)
+      journal.erreur(ETAPES.DEMARRAGE, "cycle interrompu : " .. tostring(err))
+      local delai = math.min(3 * 2 ^ (echecs - 1), 60)
+      journal.avert(ETAPES.DEMARRAGE, string.format("relance dans %ds", delai))
+      sleep(delai)
     end
-    -- Un satellite en erreur ne doit jamais laisser des moteurs sous tension.
-    neutraliserToutesLesFaces()
-    echecs = (os.clock() - debut >= 60) and 1 or (echecs + 1)
-    journal.erreur(ETAPES.DEMARRAGE, "cycle interrompu : " .. tostring(err))
-    local delai = math.min(3 * 2 ^ (echecs - 1), 60)
-    journal.avert(ETAPES.DEMARRAGE, string.format("relance dans %ds", delai))
-    sleep(delai)
   end
 end
+
+if lanceDepuisLeShell() then superviser() end
+
+return M

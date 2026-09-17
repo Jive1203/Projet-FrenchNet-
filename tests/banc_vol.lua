@@ -195,6 +195,24 @@ function M.creer(options)
     end
   end
 
+  --- Evenement suivant : la file d'abord, sinon on avance l'horloge jusqu'au
+  -- prochain minuteur. C'est le coeur de l'ordonnanceur : la simulation
+  -- n'avance que lorsque TOUTES les taches sont en attente.
+  local function prochainEvenement()
+    if #etat.file > 0 then
+      local e = table.remove(etat.file, 1)
+      return table.unpack(e, 1, e.n)
+    end
+    local meilleur, identifiant
+    for tid, echeance in pairs(etat.minuteurs) do
+      if not meilleur or echeance < meilleur then meilleur, identifiant = echeance, tid end
+    end
+    if not meilleur then return nil end
+    avancerSimulation(math.max(0, meilleur - etat.horloge))
+    etat.minuteurs[identifiant] = nil
+    return "timer", identifiant
+  end
+
   local osMock = {}
   osMock.clock = function() return etat.horloge end
   osMock.time  = function() return 6.0 end
@@ -215,28 +233,37 @@ function M.creer(options)
   end
   osMock.cancelTimer = function(id) etat.minuteurs[id] = nil end
   osMock.pullEvent = function(filtre)
-    while true do
-      if #etat.file > 0 then
-        local e = table.remove(etat.file, 1)
+    -- Dans une tache lancee par parallel : on cede la main a l'ordonnanceur,
+    -- qui dispatchera l'evenement. C'est ce qui permet d'eprouver pour de vrai
+    -- le code concurrent (satellites, surveillance carburant, ecrans de vol).
+    if coroutine.isyieldable() then
+      while true do
+        local e = table.pack(coroutine.yield(filtre))
+        if e[1] == "terminate" then error("Terminated", 0) end
         if filtre == nil or e[1] == filtre then return table.unpack(e, 1, e.n) end
-      else
-        -- Rien en attente : on laisse le temps s'ecouler jusqu'au minuteur suivant.
-        local meilleur, id
-        for tid, echeance in pairs(etat.minuteurs) do
-          if not meilleur or echeance < meilleur then meilleur, id = echeance, tid end
-        end
-        if not meilleur then error("Terminated", 0) end
-        avancerSimulation(math.max(0, meilleur - etat.horloge))
-        etat.minuteurs[id] = nil
-        if filtre == nil or filtre == "timer" then return "timer", id end
       end
+    end
+    while true do
+      local e = table.pack(prochainEvenement())
+      if e[1] == nil then error("Terminated", 0) end
+      if filtre == nil or e[1] == filtre then return table.unpack(e, 1, e.n) end
     end
   end
   osMock.reboot = function() error("REBOOT", 0) end
 
   --- sleep() fait avancer la simulation : c'est le moteur du banc d'essai.
   local function sleep(n)
-    avancerSimulation(n or 0)
+    if coroutine.isyieldable() then
+      -- Sous parallel : on attend un minuteur, et c'est l'ordonnanceur qui
+      -- fera avancer la simulation quand plus personne ne peut travailler.
+      local identifiant = osMock.startTimer(n or 0)
+      while true do
+        local _, tid = osMock.pullEvent("timer")
+        if tid == identifiant then break end
+      end
+    else
+      avancerSimulation(n or 0)
+    end
     if etat.horloge > etat.budget then
       -- Meme mecanisme que Ctrl+T : la seule erreur que ap.executer() laisse
       -- remonter, ce qui permet d'arreter proprement une boucle infinie.
@@ -262,11 +289,14 @@ function M.creer(options)
     end,
   }
 
+  etat.entrees = {}
   local redstoneMock = {
     setAnalogOutput = function(cote, valeur) etat.redstone[cote] = valeur end,
     getAnalogOutput = function(cote) return etat.redstone[cote] or 0 end,
     setOutput = function(cote, actif) etat.redstone[cote] = actif and 15 or 0 end,
     getOutput = function(cote) return (etat.redstone[cote] or 0) > 0 end,
+    getAnalogInput = function(cote) return etat.entrees[cote] or 0 end,
+    getInput = function(cote) return (etat.entrees[cote] or 0) > 0 end,
   }
 
   ------------------------------------------------------------------ terminal
@@ -369,11 +399,56 @@ function M.creer(options)
   env.redstone  = redstoneMock
   env.rs        = redstoneMock
   env.sleep     = sleep
-  env.peripheral= {
-    getNames = function() return {} end,
-    getType  = function() return nil end,
-    isPresent= function() return false end,
-    wrap     = function() return nil end,
+  -- Peripheriques declares par l'essai : etat.peripheriques[nom] = { methodes }
+  etat.peripheriques = {}
+  etat.typesPeripheriques = {}
+  env.peripheral = {
+    getNames = function()
+      local noms = {}
+      for nom in pairs(etat.peripheriques) do noms[#noms + 1] = nom end
+      table.sort(noms)
+      return noms
+    end,
+    getType  = function(nom) return etat.typesPeripheriques[nom] end,
+    isPresent= function(nom) return etat.peripheriques[nom] ~= nil end,
+    wrap     = function(nom) return etat.peripheriques[nom] end,
+    hasType  = function(nom, type_) return etat.typesPeripheriques[nom] == type_ end,
+  }
+
+  -- rednet en boucle locale : ce qui est envoye revient dans la file
+  -- d'evenements, ce qui permet d'eprouver l'ecoute des acquittements.
+  etat.rednetOuvert = {}
+  etat.rednetEnvoyes = {}
+  etat.rednetBoucle = false
+  env.rednet = {
+    open    = function(cote) etat.rednetOuvert[cote] = true end,
+    close   = function(cote) etat.rednetOuvert[cote] = nil end,
+    isOpen  = function(cote) return etat.rednetOuvert[cote] == true end,
+    send    = function(destinataire, message, protocole)
+      etat.rednetEnvoyes[#etat.rednetEnvoyes + 1] =
+        { destinataire = destinataire, message = message, protocole = protocole,
+          t = etat.horloge }
+      if etat.rednetBoucle then
+        queueEvent("rednet_message", destinataire, message, protocole)
+      end
+      return true
+    end,
+    broadcast = function(message, protocole)
+      etat.rednetEnvoyes[#etat.rednetEnvoyes + 1] =
+        { destinataire = "*", message = message, protocole = protocole, t = etat.horloge }
+      return true
+    end,
+    receive = function(protocole, delai)
+      local minuteur = delai and osMock.startTimer(delai) or nil
+      while true do
+        local e = table.pack(osMock.pullEvent())
+        if e[1] == "rednet_message" and (protocole == nil or e[4] == protocole) then
+          return e[2], e[3], e[4]
+        elseif e[1] == "timer" and minuteur and e[2] == minuteur then
+          return nil
+        end
+      end
+    end,
   }
   env.colors  = setmetatable({}, { __index = function() return 1 end })
   env.colours = env.colors
@@ -382,11 +457,37 @@ function M.creer(options)
     unserialise = deserialiser, unserialize = deserialiser,
     formatTime = function() return "06:00" end,
   }
+  -- Ordonnancement cooperatif fidele a CC: Tweaked : chaque tache tourne
+  -- jusqu'a ce qu'elle attende un evenement, puis la suivante. Sans cela, tout
+  -- le code concurrent du projet resterait non eprouve.
+  local function courir(fns, limite)
+    local routines, filtres = {}, {}
+    for index, fonction in ipairs(fns) do routines[index] = coroutine.create(fonction) end
+    local evenement = { n = 0 }
+    local mortes = 0
+
+    while true do
+      for index, routine in ipairs(routines) do
+        if routine and (filtres[index] == nil or filtres[index] == evenement[1]
+           or evenement[1] == "terminate") then
+          local ok, param = coroutine.resume(routine, table.unpack(evenement, 1, evenement.n))
+          if not ok then error(param, 0) end
+          filtres[index] = param
+          if coroutine.status(routine) == "dead" then
+            routines[index] = false
+            mortes = mortes + 1
+            if mortes >= limite then return index end
+          end
+        end
+      end
+      evenement = table.pack(prochainEvenement())
+      if evenement[1] == nil then error("Terminated", 0) end
+    end
+  end
+
   env.parallel = {
-    waitForAny = function(...)
-      local fns = { ... }
-      return fns[1]()
-    end,
+    waitForAny = function(...) return courir({ ... }, 1) end,
+    waitForAll = function(...) return courir({ ... }, select("#", ...)) end,
   }
   env.shell = { getRunningProgram = function()
     return options.programme or "missions/banc.lua"
@@ -438,6 +539,22 @@ end
 --- Empile un evenement clavier a destination de l'interface.
 function M.taper(touche)
   M.env.os.queueEvent("key", M.env.keys[touche] or touche)
+end
+
+--- Declare un peripherique visible par le programme teste.
+function M.brancher(nom, type_, methodes)
+  M.etat.peripheriques[nom] = methodes
+  M.etat.typesPeripheriques[nom] = type_
+end
+
+--- Impose le niveau d'une entree redstone.
+function M.entree(cote, niveau)
+  M.etat.entrees[cote] = niveau
+end
+
+--- Empile un message rednet entrant.
+function M.injecterRednet(expediteur, message, protocole)
+  M.env.os.queueEvent("rednet_message", expediteur, message, protocole)
 end
 
 --- Empile un relachement de touche (pilotage manuel).

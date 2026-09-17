@@ -392,8 +392,10 @@ return {
 
     amarrage = {
       altitudeApproche     = 12,   -- hauteur tenue a la verticale avant descente
-      toleranceHorizontale = 0.6,  -- marges resserrees : c'est un amarrage
-      toleranceAltitude    = 0.4,
+      -- Marges resserrees, mais PAS plus fines que ce que le vehicule sait
+      -- tenir : sinon l'amarrage echoue au lieu d'etre plus precis.
+      toleranceHorizontale = 1.2,
+      toleranceAltitude    = 0.6,
       toleranceCap         = 3,
       dureeArrivee         = 3,
       vitesseApproche      = 1.2,
