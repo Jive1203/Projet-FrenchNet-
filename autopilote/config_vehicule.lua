@@ -372,6 +372,11 @@ return {
     seuilPlein = 0.92,   -- fraction du plein : autorise le depart
     periode    = 5,      -- secondes entre deux lectures
 
+    -- Les ENTREES peuvent partager une face avec une sortie : CC les lit et
+    -- les ecrit independamment. La SORTIE 'coteAmarre', elle, a besoin d'une
+    -- face libre -- et le cablage livre les consomme toutes les six. Elle va
+    -- donc sur un satellite : renseignez 'ordinateurOrdres'. L'autopilote
+    -- refuse de demarrer si deux sorties se disputent une face.
     coteRetour = nil,    -- entree : un courant force le retour immediat
     coteDepart = nil,    -- entree : un courant libere le vehicule
     coteAmarre = nil,    -- sortie : allumee tant que le vehicule est amarre
@@ -387,6 +392,8 @@ return {
       dureeArrivee         = 3,
       vitesseApproche      = 1.2,
       delaiMax             = 600,
+      tentatives           = 3,    -- essais avant de declarer l'anomalie
+      delaiImmobile        = 20,   -- s sans progres avant d'abandonner l'essai
       attenteMax           = 1800,
       maintenirPendantAttente = true,  -- false = moteurs coupes une fois amarre
     },

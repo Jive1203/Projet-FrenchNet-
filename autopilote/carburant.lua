@@ -92,6 +92,8 @@ local DEFAUTS = {
     dureeArrivee         = 3,
     vitesseApproche      = 1.2,
     delaiMax             = 600,  -- s pour rejoindre puis s'amarrer
+    tentatives           = 3,    -- essais avant de declarer l'anomalie
+    delaiImmobile        = 20,   -- s sans progres avant d'abandonner l'essai
     attenteMax           = 1800, -- s d'attente amarre avant alerte
     maintenirPendantAttente = true,
   },
@@ -327,15 +329,13 @@ function carburant.nouveau(ap, options)
   -- Le point d'amarrage est de type "amarrage" : l'autopilote applique le
   -- decalage du docker, de sorte que la PRISE tombe sur la zone, et non le
   -- centre geometrique du vehicule.
-  local function manoeuvreAmarrage()
-    changerEtat(ETATS.RETOUR, etat.motif)
-    emettre("retour", { station = station })
-    if options.surRetour then pcall(options.surRetour, etat.niveau, etat.motif) end
-
+  --- Une tentative complete : verticale, puis descente de precision.
+  -- @return true si amarre, sinon false et le motif de l'echec.
+  local function tenterAmarrage(tentative)
     -- 1. Verticale de la station, a l'altitude d'approche.
     journal.info(ETAPES.APPROCHE, string.format(
-      "route vers la verticale de %s, %d bloc(s) au-dessus",
-      station.nom, a.altitudeApproche))
+      "tentative %d : route vers la verticale de %s, %d bloc(s) au-dessus",
+      tentative, station.nom, a.altitudeApproche))
     -- Marges NORMALES pour rejoindre la verticale : exiger ici la precision de
     -- l'amarrage empecherait simplement d'y arriver, et la manoeuvre serait
     -- declaree en echec avant meme d'avoir commence a descendre.
@@ -349,13 +349,8 @@ function carburant.nouveau(ap, options)
       nom = "VERTICALE " .. station.nom,
     }, { vitesseMax = a.vitesseApproche * 3 })
 
-    local arrive = ap.attendreArrivee(a.delaiMax)
-    if not arrive then
-      changerEtat(ETATS.ANOMALIE, "verticale non atteinte")
-      journal.erreur(ETAPES.ANOMALIE, "verticale de la station non atteinte dans le delai")
-      emettre("anomalie", { motif = "verticale_non_atteinte" })
-      if options.surAnomalie then pcall(options.surAnomalie, "verticale_non_atteinte") end
-      return false
+    if not ap.attendreArrivee(a.delaiMax, { abandonSiImmobile = a.delaiImmobile }) then
+      return false, "verticale_non_atteinte"
     end
 
     -- 2. Descente de precision sur le docker.
@@ -372,11 +367,49 @@ function carburant.nouveau(ap, options)
       transitHaute = false,
     })
 
-    if not ap.attendreArrivee(a.delaiMax) then
-      changerEtat(ETATS.ANOMALIE, "amarrage non abouti")
-      journal.erreur(ETAPES.ANOMALIE, "amarrage non abouti dans le delai")
-      emettre("anomalie", { motif = "amarrage_non_abouti" })
-      if options.surAnomalie then pcall(options.surAnomalie, "amarrage_non_abouti") end
+    if not ap.attendreArrivee(a.delaiMax, { abandonSiImmobile = a.delaiImmobile }) then
+      return false, "amarrage_non_abouti"
+    end
+    return true
+  end
+
+  local function manoeuvreAmarrage()
+    changerEtat(ETATS.RETOUR, etat.motif)
+    emettre("retour", { station = station })
+    if options.surRetour then pcall(options.surRetour, etat.niveau, etat.motif) end
+
+    -- PLUSIEURS TENTATIVES. Sans capteur de cap, un vehicule immobile ne sait
+    -- plus ou pointe son nez : il pousse alors dans une direction approximative
+    -- et peut se stabiliser a deux ou trois blocs de sa cible. Mesure sur le
+    -- banc, seize approches depuis des directions differentes : sept reussites
+    -- sur seize sans capteur de cap, quatorze avec. Recommencer la manoeuvre
+    -- depuis l'altitude d'approche rattrape la plupart des echecs, parce que
+    -- chaque tentative repart d'une geometrie differente.
+    local tentatives = math.max(1, math.floor(a.tentatives or 3))
+    local motif = nil
+    for tentative = 1, tentatives do
+      local ok, echec = tenterAmarrage(tentative)
+      if ok then motif = nil break end
+      motif = echec
+      if tentative < tentatives then
+        journal.avert(ETAPES.AMARRAGE, string.format(
+          "tentative %d/%d echouee (%s) : remontee et nouvel essai",
+          tentative, tentatives, tostring(echec)))
+        emettre("tentative", { tentative = tentative, total = tentatives, motif = echec })
+        changerEtat(ETATS.RETOUR, "nouvelle tentative d'amarrage")
+      end
+    end
+
+    if motif then
+      local libelle = (motif == "verticale_non_atteinte")
+        and "verticale non atteinte" or "amarrage non abouti"
+      changerEtat(ETATS.ANOMALIE, libelle)
+      journal.erreur(ETAPES.ANOMALIE, string.format(
+        "%s apres %d tentative(s). Sans capteur de cap, un amarrage au bloc "
+        .. "pres n'est pas garanti : montez un lecteur de cap et renseignez "
+        .. "cap.source = \"peripherique\"", libelle, tentatives))
+      emettre("anomalie", { motif = motif })
+      if options.surAnomalie then pcall(options.surAnomalie, motif) end
       return false
     end
 

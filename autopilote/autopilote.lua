@@ -2356,6 +2356,35 @@ function autopilote.nouveau(options)
     end
     local routeDefinie = depart ~= nil and longueurRoute > 1e-6
 
+    -- SEGMENT PERIME. Le repere de route est ancre sur le point de depart de
+    -- l'etape. Si le vehicule DEPASSE la cible et ne sait pas reculer, la
+    -- distance projetee devient negative, la consigne d'avance est bornee a
+    -- zero, plus rien n'est demande -- et comme rien n'est demande, le chien
+    -- de garde d'impasse ne voit aucune anomalie. Le vehicule reste en l'air
+    -- a quelques metres de son point jusqu'a expiration du delai de mission.
+    -- Une fois la cible depassee, la route prevue n'existe plus : la seule
+    -- route qui ait un sens part d'ICI. On la reancre, le vehicule fait
+    -- demi-tour et revient.
+    if routeDefinie and (limites.marcheArriere or 0) <= 0
+       and etat.mode == MODES.TRANSIT then
+      local margeDepassement = (etat.tolerances or config.tolerances).horizontale
+      local uDepart = { x = (cibleCentre.x - depart.x) / longueurRoute,
+                        z = (cibleCentre.z - depart.z) / longueurRoute }
+      -- Deja dans les marges : il n'y a rien a rattraper, et reancrer ferait
+      -- perdre la discipline laterale de l'etape pour rien.
+      if distanceH > margeDepassement
+         and dx * uDepart.x + dz * uDepart.z < -margeDepassement then
+        journal.avert(ETAPES.BOUCLE_POSITION,
+          "cible depassee de %.1fm sans marche arriere : la route prevue est "
+          .. "perimee, nouveau segment depuis la position courante",
+          -(dx * uDepart.x + dz * uDepart.z))
+        etat.depart = copierProfond(pos)
+        depart = etat.depart
+        longueurRoute = distanceH
+        routeDefinie = longueurRoute > 1e-6
+      end
+    end
+
     local u
     if routeDefinie then
       u = { x = (cibleCentre.x - depart.x) / longueurRoute,
@@ -2473,6 +2502,24 @@ function autopilote.nouveau(options)
     -- On mesure le PROGRES REEL vers la cible, jamais une vitesse : un
     -- vehicule qui pivote sur place avec une antenne deportee affiche une
     -- vitesse bien reelle tout en ne progressant pas d'un bloc.
+    -- On ne regarde pas ce que le guidage DEMANDE quand le vehicule est loin :
+    -- un vehicule qui a depasse sa cible sans marche arriere se voit justement
+    -- demander zero. Mais tout pres du point, un guidage qui ne demande plus
+    -- rien est simplement en train de laisser le vehicule se poser : il ne
+    -- faut pas le pousser.
+    -- Changer de cible remet le compteur a zero : les distances a l'ancienne
+    -- et a la nouvelle n'ont rien a voir, et les comparer ferait passer pour
+    -- un blocage le simple fait d'avoir une nouvelle etape a parcourir.
+    local reperee = etat.progresCible
+    if not reperee
+       or math.abs(reperee.x - cibleCentre.x) > 0.5
+       or math.abs(reperee.y - cibleCentre.y) > 0.5
+       or math.abs(reperee.z - cibleCentre.z) > 0.5 then
+      etat.progresCible = { x = cibleCentre.x, y = cibleCentre.y, z = cibleCentre.z }
+      etat.progresReference = nil
+      etat.immobileDepuis = 0
+    end
+
     if distanceH > margeArret and normeDesiree > 0.05 then
       local reference = etat.progresReference
       if reference == nil or distanceH < reference - 0.5 then
@@ -3448,6 +3495,8 @@ function autopilote.nouveau(options)
       erreurCap     = diagnostic.erreurCap,
       diagnostics   = copierProfond(diagnostic),
       dansMarges  = etat.dansMarges,
+      immobileDepuis = etat.immobileDepuis,
+      capFiable   = etat.capFiable,
       perteGps    = etat.perteGps,
       cycles      = etat.cycles,
       anomalies   = etat.anomalies,
@@ -3467,16 +3516,35 @@ function autopilote.nouveau(options)
   end
 
   --- Attend l'arrivee (necessite que ap.executer() tourne en parallele).
+  -- @param delai    secondes avant d'abandonner, ou nil pour attendre sans fin
+  -- @param options  { abandonSiImmobile = secondes }. Un vehicule bloque hors
+  --   des marges -- cap estime faux, poussee insuffisante, obstacle -- ne
+  --   repartira pas tout seul : attendre le delai complet ne fait que perdre
+  --   le temps qu'une nouvelle tentative aurait mieux employe.
   -- @return true | false, motif
-  function ap.attendreArrivee(delai)
+  function ap.attendreArrivee(delai, options)
     if ap.estArrive() then return true end
+    options = options or {}
     local minuteur = delai and os.startTimer(delai) or nil
+    local surveillance = nil
+    local seuilImmobile = tonumber(options.abandonSiImmobile)
+    if seuilImmobile and seuilImmobile > 0 then
+      surveillance = os.startTimer(1)
+    end
     while true do
       local evenement = table.pack(os.pullEvent())
       if evenement[1] == "autopilote" and evenement[2] == config.identifiant then
         if evenement[3] == "arrivee" then return true, evenement[4] end
       elseif evenement[1] == "timer" and minuteur and evenement[2] == minuteur then
         return false, "delai depasse"
+      elseif evenement[1] == "timer" and surveillance and evenement[2] == surveillance then
+        if (etat.immobileDepuis or 0) >= seuilImmobile then
+          journal.avert(ETAPES.BOUCLE_POSITION, string.format(
+            "abandon de l'etape : %.0fs sans progres vers la cible",
+            etat.immobileDepuis))
+          return false, "immobile"
+        end
+        surveillance = os.startTimer(1)
       end
     end
   end

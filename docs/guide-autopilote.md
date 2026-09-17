@@ -145,6 +145,20 @@ Sans capteur, un véhicule **immobile ne sait pas où pointe son nez**. Le modul
 
 > **Propulsion latérale et cap déduit ne vont pas ensemble.** Une poussée latérale fait dériver la route par rapport au nez : le cap estimé devient faux. Le module l'avertit au démarrage. Pour un véhicule qui translate, installez un capteur de cap.
 
+#### Ce que coûte l'absence de capteur, mesuré
+
+Seize approches d'amarrage depuis seize directions différentes, jouées sur le banc avec le câblage livré (boîte à rapports, ballon à deux signaux, pas de poussée latérale) :
+
+| Montage | Amarrages réussis | Durée typique |
+|---|---|---|
+| Câblage livré, **cap déduit de la route** | **7 / 16** à la première tentative | — |
+| Câblage livré, cap déduit, **3 tentatives** (défaut) | **16 / 16** | 100 à 900 s |
+| Câblage livré + **capteur de cap** | **16 / 16** | **40 à 100 s** |
+
+La leçon tient en une ligne : **le capteur de cap ne change pas ce que le véhicule finit par réussir, il change le temps qu'il y met.** Sans lui, un véhicule immobile pousse dans une direction approximative et se stabilise parfois à deux ou trois blocs de sa cible ; la manœuvre est reprise depuis l'altitude d'approche, et comme chaque essai repart d'une géométrie différente, il finit par aboutir. Avec lui, il se pose du premier coup.
+
+Pour un véhicule qui fait des allers-retours toute la journée, le capteur se rentabilise vite. Pour un véhicule occasionnel, les tentatives suffisent.
+
 ---
 
 ## 5. Asservissement en cascade
@@ -352,7 +366,7 @@ Ordre de grandeur : la commande vaut 1 à pleine poussée. Si 0,2 de commande do
 
 ## 14. Limites connues
 
-- **Sans capteur de cap**, un véhicule immobile ne connaît pas son orientation. Le module le gère (lacet neutralisé, reptation d'acquisition), mais le maintien de position reste plus grossier qu'avec un capteur : comptez le double de tolérance. Pour du vol de précision — dépôt serré, appontage — installez un lecteur de cap et renseignez `cap.source = "peripherique"`.
+- **Sans capteur de cap**, un véhicule immobile ne connaît pas son orientation. Le module le gère (lacet neutralisé, reptation d'acquisition, manœuvre reprise autant de fois que nécessaire), mais une manœuvre de précision demande alors plusieurs essais au lieu d'un : 7 amarrages sur 16 du premier coup, 16 sur 16 en trois tentatives, contre 16 sur 16 du premier coup avec capteur. Pour du vol de précision — dépôt serré, appontage — installez un lecteur de cap et renseignez `cap.source = "peripherique"` (chiffres et protocole en §4).
 - **La propulsion latérale exige un capteur de cap** (voir §4).
 - Le module ne connaît **pas les obstacles**. L'altitude de croisière est une sécurité, pas un évitement : choisissez-la au-dessus du relief de la zone d'opération.
 - Les commandes sont normalisées dans `[−1, +1]` ; c'est le câblage décrit dans `sorties` qui les traduit en redstone ou en appels de périphérique. Un axe monté à l'envers se corrige par `inverse = true`, sans rien redémonter. Un programme peut aussi injecter son propre pilote de sorties (`options.commandes`). Voir le **[guide de câblage](guide-cablage.md)**.

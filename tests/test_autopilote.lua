@@ -2022,6 +2022,41 @@ do
   verifier("manoeuvre journalisee",
     journalContient("retour au ravitaillement declenche")
     and journalContient("descente de precision"))
+
+  ------------------------------------------------- amarrage impossible : essais
+  -- Sans capteur de cap, un vehicule immobile ignore ou pointe son nez et peut
+  -- se stabiliser a deux blocs de sa cible. Recommencer la manoeuvre rattrape
+  -- la plupart de ces echecs : le banc mesure 7 amarrages sur 16 a la premiere
+  -- tentative, 16 sur 16 avec trois essais. On verifie donc que les essais ont
+  -- bien lieu, et qu'une impossibilite finit quand meme par etre declaree.
+  local banc3, env3, etat3, autopilote3, ap3, carburant3 =
+    avecReservoir(200, 1000, { budget = 900, ajusterConfig = function(config)
+      -- Tolerance inatteignable : la manoeuvre ne peut pas aboutir.
+      config.carburant.amarrage.toleranceHorizontale = 0.001
+      config.carburant.amarrage.toleranceAltitude    = 0.001
+      config.carburant.amarrage.delaiMax   = 40
+      config.carburant.amarrage.tentatives = 2
+    end })
+  local anomalies3 = {}
+  local jauge3 = carburant3.nouveau(ap3, {
+    surAnomalie = function(motif) anomalies3[#anomalies3 + 1] = motif end })
+  ap3.initialiser()
+  pcall(env3.parallel.waitForAny,
+    function() ap3.executer() end,
+    function() jauge3.executer() end,
+    function()
+      for _ = 1, 400 do
+        env3.sleep(1)
+        if jauge3.etat().etat == "ANOMALIE" then return end
+      end
+    end)
+  verifier("amarrage impossible : l'anomalie est declaree",
+    jauge3.etat().etat == "ANOMALIE", jauge3.etat().etat)
+  verifier("la manoeuvre a bien ete retentee",
+    journalContient("tentative 1/2 echouee") or journalContient("tentative 2 :"),
+    tostring(anomalies3[1]))
+  verifier("l'anomalie dit quoi monter sur le vehicule",
+    journalContient("capteur de cap"))
 end
 
 print(string.format("\n===== %d/%d verifications reussies =====", total - echecs, total))
