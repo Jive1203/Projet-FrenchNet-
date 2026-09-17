@@ -1625,6 +1625,79 @@ do
     sorties.rapports().avance.rapport == "N",
     tostring(sorties.rapports().avance.rapport))
 
+  --------------------------------------------- rapports serres et hysteresis
+  -- Rapports tres proches les uns des autres : l'hysteresis se mesure contre
+  -- le rapport ENGAGE, jamais contre le meilleur candidat rencontre. On
+  -- verifie les deux bouts : assez fine, la boite atteint l'optimum ; trop
+  -- large, elle s'arrete avant et surtout NE CHASSE PAS.
+  local function boiteSerree(hysteresis)
+    local serree = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    serree.sorties.axes.avance.hysteresis = hysteresis
+    serree.sorties.axes.avance.rapports = {
+      { nom = "R", effet = 0, interdit = true },
+      { nom = "N", effet = 0 },
+      { nom = "1", effet = 0.50 },
+      { nom = "2", effet = 0.55 },
+      { nom = "3", effet = 0.60 },
+    }
+    local boite = autopilote.creerSorties(serree)
+    for _ = 1, 120 do boite.neutraliser() end
+    return boite
+  end
+
+  do
+    local fine = boiteSerree(0.02)
+    for _ = 1, 200 do
+      fine.appliquer({ avance = 0.60, vertical = 0, lacet = 0, lateral = 0 })
+    end
+    verifier("hysteresis fine : le meilleur cran est atteint malgre des crans serres",
+      fine.rapports().avance.rapport == "3",
+      tostring(fine.rapports().avance.rapport))
+
+    local large = boiteSerree(0.08)
+    for _ = 1, 200 do
+      large.appliquer({ avance = 0.60, vertical = 0, lacet = 0, lateral = 0 })
+    end
+    local atteint = large.rapports().avance.rapport
+    local changements = large.rapports().avance.changements
+    for _ = 1, 200 do
+      large.appliquer({ avance = 0.60, vertical = 0, lacet = 0, lateral = 0 })
+    end
+    verifier("hysteresis large : la boite s'arrete avant l'optimum sans chasser",
+      large.rapports().avance.rapport == atteint
+      and large.rapports().avance.changements == changements,
+      string.format("%s -> %s", atteint, large.rapports().avance.rapport))
+  end
+
+  --------------------------------------------- point mort declare interdit
+  -- Une butee inerte prise pour point mort bloquerait le vehicule des le
+  -- calage : la boite doit se replier sur un rapport utilisable et le dire.
+  do
+    local lignes = {}
+    local mouchard = { ecrire = function(_, _, message)
+      lignes[#lignes + 1] = tostring(message)
+    end }
+    local fautive = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    fautive.sorties.axes.avance.neutre = 1   -- "R", declare interdit
+    local boite = autopilote.creerSorties(fautive, mouchard)
+    for _ = 1, 200 do boite.neutraliser() end
+    verifier("point mort interdit : repli sur un rapport utilisable",
+      boite.rapports().avance.rapport ~= "R",
+      tostring(boite.rapports().avance.rapport))
+    verifier("le repli du point mort est signale",
+      table.concat(lignes, "\n"):find("point mort declare", 1, true) ~= nil,
+      table.concat(lignes, " | "))
+
+    -- Et le vehicule doit pouvoir repartir : une boite bloquee sur une butee
+    -- ne repond plus a aucune commande.
+    for _ = 1, 200 do
+      boite.appliquer({ avance = 1.0, vertical = 0, lacet = 0, lateral = 0 })
+    end
+    verifier("la boite repond encore aux commandes apres le repli",
+      boite.rapports().avance.rapport == "5",
+      tostring(boite.rapports().avance.rapport))
+  end
+
   ------------------------------------------------- commande a deux signaux
   -- neutre 128, amplitude 127, pas 16 : total = 128 + 127 x commande.
   local function verticalBrut(commande)

@@ -50,6 +50,7 @@ local function makeFs(racine)
       readLine = function() return f:read("l") end,
       writeLine = function(s) f:write(tostring(s), "\n") end,
       write = function(s) f:write(tostring(s)) end,
+      flush = function() f:flush() end,
       close = function() f:close() end,
     }
   end

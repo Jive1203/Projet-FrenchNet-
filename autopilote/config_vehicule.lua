@@ -406,6 +406,7 @@ return {
     chemin        = "/autopilote/autopilote.log",
     tailleMax     = 65536,
     niveauEcran   = "INFO",  -- DEBUG | INFO | AVERT | ERREUR
+    niveauFichier = "DEBUG", -- idem, pour le FICHIER : "INFO" allege le disque
     periodeCycles = 12,      -- 1 cycle sur N trace en DEBUG
     historique    = 120,     -- echantillons gardes par axe pour le reglage en vol
   },

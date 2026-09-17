@@ -244,6 +244,9 @@ local NIVEAUX = { DEBUG = 0, INFO = 1, AVERT = 2, ERREUR = 3, CRITIQUE = 4 }
 local function creerJournal(reglages, etiquette, journalExterne)
   local j = {
     seuilEcran = NIVEAUX[reglages.niveauEcran] or NIVEAUX.INFO,
+    -- Seuil propre au FICHIER : l'ecran peut rester lisible pendant que le
+    -- fichier garde tout, ou l'inverse quand le disque est petit.
+    seuilFichier = NIVEAUX[reglages.niveauFichier] or NIVEAUX.DEBUG,
     fichier    = reglages.fichier and true or false,
     chemin     = reglages.chemin,
     tailleMax  = reglages.tailleMax or 65536,
@@ -270,13 +273,44 @@ local function creerJournal(reglages, etiquette, journalExterne)
     if ok and fichier then fichier.close() else j.fichier = false end
   end
 
+  -- Le fichier reste OUVERT entre deux lignes. Ouvrir, ecrire et refermer a
+  -- chaque ligne coute trois appels systeme la ou il en faut un : en vol, le
+  -- journal est de loin le poste le plus lourd du cycle. On force l'ecriture
+  -- apres chaque ligne (flush) pour qu'un plantage ne perde rien : c'est
+  -- justement au moment du plantage que le journal sert.
+  local handle = nil
+  local octets = 0          -- taille courante, tenue a jour sans fs.getSize
+
+  local function fermer()
+    if handle then pcall(handle.close) handle = nil end
+  end
+
+  local function ouvrir()
+    if handle then return handle end
+    if not j.fichier then return nil end
+    local ok, fichier = pcall(fs.open, j.chemin, "a")
+    if not ok or not fichier then
+      j.fichier = false
+      return nil
+    end
+    handle = fichier
+    local okTaille, taille = pcall(fs.getSize, j.chemin)
+    octets = (okTaille and taille) or 0
+    return handle
+  end
+
   local function rotation()
-    if not j.fichier or not fs.exists(j.chemin) then return end
-    if fs.getSize(j.chemin) < j.tailleMax then return end
+    if not j.fichier or octets < j.tailleMax then return end
+    fermer()
+    if not fs.exists(j.chemin) then return end
     local archive = j.chemin .. ".1"
     if fs.exists(archive) then fs.delete(archive) end
     fs.move(j.chemin, archive)
+    octets = 0
   end
+
+  --- Ferme proprement le journal : a appeler avant d'arreter le programme.
+  function j.fermer() fermer() end
 
   function j.ecrire(niveau, etape, message)
     if journalExterne and journalExterne.ecrire then
@@ -296,24 +330,51 @@ local function creerJournal(reglages, etiquette, journalExterne)
       if couleur then pcall(term.setTextColour, COULEURS.INFO) end
     end
 
-    if j.fichier then
+    if j.fichier and (NIVEAUX[niveau] or 1) >= j.seuilFichier then
       pcall(rotation)
-      local ok, fichier = pcall(fs.open, j.chemin, "a")
-      if ok and fichier then
-        pcall(function()
-          fichier.writeLine(entete .. texte)
-          fichier.close()
+      local fichier = ouvrir()
+      if fichier then
+        local ligne = entete .. texte
+        local ok = pcall(function()
+          fichier.writeLine(ligne)
+          if fichier.flush then fichier.flush() end
         end)
-        j.ecrits = j.ecrits + 1
+        if ok then
+          octets = octets + #ligne + 1
+          j.ecrits = j.ecrits + 1
+        else
+          -- Poignee devenue invalide (disquette retiree, disque plein) : on
+          -- repart d'une ouverture propre au prochain appel.
+          fermer()
+        end
       end
     end
   end
 
-  function j.debug(e, m)    j.ecrire("DEBUG", e, m)    end
-  function j.info(e, m)     j.ecrire("INFO", e, m)     end
-  function j.avert(e, m)    j.ecrire("AVERT", e, m)    end
-  function j.erreur(e, m)   j.ecrire("ERREUR", e, m)   end
-  function j.critique(e, m) j.ecrire("CRITIQUE", e, m) end
+  --- Le message n'est FORMATE que s'il va reellement quelque part. En vol,
+  -- une ligne de debug sur douze est retenue : construire les onze autres,
+  -- pour les jeter aussitot, se paie a chaque cycle.
+  function j.retenu(niveau)
+    -- Un journal EXTERNE a ses propres regles : on lui transmet tout et on le
+    -- laisse trier, sinon nos seuils masqueraient des lignes qu'il voulait.
+    if journalExterne and journalExterne.ecrire then return true end
+    local rang = NIVEAUX[niveau] or 1
+    return rang >= j.seuilEcran or (j.fichier and rang >= j.seuilFichier)
+  end
+
+  local function emettre(niveau)
+    return function(e, m, ...)
+      if not j.retenu(niveau) then return end
+      if select("#", ...) > 0 then m = string.format(m, ...) end
+      j.ecrire(niveau, e, m)
+    end
+  end
+
+  j.debug    = emettre("DEBUG")
+  j.info     = emettre("INFO")
+  j.avert    = emettre("AVERT")
+  j.erreur   = emettre("ERREUR")
+  j.critique = emettre("CRITIQUE")
 
   return j
 end
@@ -323,7 +384,28 @@ local function journalMuet()
   local j = {}
   j.ecrire = function() end
   j.debug, j.info, j.avert, j.erreur, j.critique = j.ecrire, j.ecrire, j.ecrire, j.ecrire, j.ecrire
+  j.retenu = function() return false end
+  j.fermer = function() end
   return j
+end
+
+--- Complete un journal fourni de l'exterieur. Un programme appelant qui ne
+-- fournit qu'un 'ecrire' est parfaitement legitime : c'est a nous de combler
+-- le reste, pas a lui de connaitre notre interface interne.
+local function completerJournal(j)
+  if type(j) ~= "table" or type(j.ecrire) ~= "function" then return journalMuet() end
+  local complet = { ecrire = j.ecrire }
+  for niveau, nom in pairs({ DEBUG = "debug", INFO = "info", AVERT = "avert",
+                             ERREUR = "erreur", CRITIQUE = "critique" }) do
+    complet[nom] = type(j[nom]) == "function" and j[nom]
+      or function(etape, message, ...)
+        if select("#", ...) > 0 then message = string.format(message, ...) end
+        j.ecrire(niveau, etape, message)
+      end
+  end
+  complet.retenu = type(j.retenu) == "function" and j.retenu or function() return true end
+  complet.fermer = type(j.fermer) == "function" and j.fermer or function() end
+  return complet
 end
 
 local function gestionnaireErreur(err)
@@ -451,6 +533,7 @@ local DEFAUTS = {
     chemin        = "/autopilote/autopilote.log",
     tailleMax     = 65536,
     niveauEcran   = "INFO",
+    niveauFichier = "DEBUG",
     periodeCycles = 12,       -- 1 cycle sur N est journalise en DEBUG
     historique    = 120,      -- echantillons conserves par axe pour le reglage
   },
@@ -994,6 +1077,24 @@ local function creerBoite(reglageAxe, nomAxe, journal, ecrireFace)
     changements= 0,
   }
 
+  -- Un point mort declare sur une butee inerte bloquerait le vehicule des le
+  -- calage : on prend le rapport autorise le plus proche et on le dit.
+  if rapports[b.neutre] and rapports[b.neutre].interdit then
+    local remplacant = nil
+    for i, rapport in ipairs(rapports) do
+      if not rapport.interdit then
+        if not remplacant or math.abs(i - b.neutre) < math.abs(remplacant - b.neutre) then
+          remplacant = i
+        end
+      end
+    end
+    journal.avert(ETAPES.INIT_SORTIES, string.format(
+      "axe %s : le point mort declare (%s) est un rapport interdit ; "
+      .. "repli sur %s", nomAxe, tostring(rapports[b.neutre].nom),
+      remplacant and tostring(rapports[remplacant].nom) or "aucun"))
+    b.neutre = remplacant or b.neutre
+  end
+
   -- Calage : on descend d'autant de crans qu'il y a de rapports (une fois de
   -- plus que necessaire, quelle que soit la position de depart), puis on
   -- remonte au point mort.
@@ -1016,23 +1117,36 @@ local function creerBoite(reglageAxe, nomAxe, journal, ecrireFace)
     if not b.calage.termine or not b.index then return end
     commande = borner(commande or 0, -1, 1)
 
-    local courant = b.rapports[b.index]
-    local erreurCourante = math.abs((courant.effet or 0) - commande)
-    local meilleur, meilleureErreur = b.index, erreurCourante
-
+    -- Meilleur rapport dans l'absolu, parmi les rapports AUTORISES. Un rapport
+    -- declare sans effet utile (une marche arriere qui ne pousse pas) n'est
+    -- jamais choisi : il n'existe que comme butee de calage.
+    local meilleur, meilleureErreur = nil, nil
     for i, rapport in ipairs(b.rapports) do
-      -- Un rapport declare sans effet utile (une marche arriere qui ne pousse
-      -- pas, par exemple) n'est jamais choisi : il n'existe que comme butee.
       if not rapport.interdit then
         local erreur = math.abs((rapport.effet or 0) - commande)
-        -- L'hysteresis exige un gain REEL : sans elle, le selecteur passerait
-        -- son temps a monter et descendre autour d'un point d'equilibre.
-        if erreur < meilleureErreur - b.hysteresis then
+        if not meilleureErreur or erreur < meilleureErreur then
           meilleur, meilleureErreur = i, erreur
         end
       end
     end
-    b.cible = meilleur
+    if not meilleur then return end   -- tous interdits : boite inerte
+
+    -- L'hysteresis se mesure contre le rapport ENGAGE, jamais contre le
+    -- meilleur candidat trouve jusque-la : sinon le seuil s'accumule d'un
+    -- rapport a l'autre et le selecteur refuse un cran qu'il devrait prendre.
+    local courant = b.rapports[b.index]
+    if courant.interdit then
+      -- On ne reste pas sur une butee : n'importe quel rapport autorise vaut
+      -- mieux, sans quoi une marche arriere inerte immobiliserait le vehicule.
+      b.cible = meilleur
+      return
+    end
+    local erreurCourante = math.abs((courant.effet or 0) - commande)
+    if meilleureErreur < erreurCourante - b.hysteresis then
+      b.cible = meilleur
+    else
+      b.cible = b.index
+    end
   end
 
   --- Avance d'un cycle : entretient l'impulsion en cours, ou en declenche une.
@@ -1113,7 +1227,7 @@ local function creerSorties(config, journal, commandesInjectees)
     derniere = { avance = 0, vertical = 0, lacet = 0, lateral = 0 },
     niveaux  = {},   -- dernier niveau redstone ecrit, par cote : outil de cablage
   }
-  journal = journal or journalMuet()
+  journal = completerJournal(journal)
 
   if type(commandesInjectees) == "table" and type(commandesInjectees.appliquer) == "function" then
     -- Pilote fourni par le programme appelant : on lui delegue tout.
@@ -1860,11 +1974,14 @@ function autopilote.nouveau(options)
   --- Journalisation DEBUG des grandeurs de cycle, limitee a 1 cycle sur N :
   -- tracer chaque cycle rendrait le journal illisible et userait le disque,
   -- mais on veut quand meme la trace complete de la chaine de calcul.
-  local function debugCycle(etape, message)
+  --- Trace de cycle : une ligne sur N, et le message n'est FORMATE que si
+  -- cette ligne-la est retenue. C'est ce qui evite de construire douze
+  -- chaines par cycle pour en garder une.
+  local function debugCycle(etape, format, ...)
     local periode = config.journal.periodeCycles or 12
-    if periode <= 1 or (etat.cycles % periode) == 0 then
-      journal.debug(etape, message)
-    end
+    if periode > 1 and (etat.cycles % periode) ~= 0 then return end
+    if journal.retenu and not journal.retenu("DEBUG") then return end
+    journal.debug(etape, select("#", ...) > 0 and string.format(format, ...) or format)
   end
 
   --------------------------------------------------------------------------------
@@ -2349,11 +2466,11 @@ function autopilote.nouveau(options)
       vitesseLateraleCible = 0
     end
 
-    debugCycle(ETAPES.BOUCLE_POSITION, string.format(
+    debugCycle(ETAPES.BOUCLE_POSITION,
       "reste %.2fm (route %.2fm, lateral %.2fm) dy %.2fm capCible %.1f erreurCap %.1f "
       .. "-> vAv %.2f vLat %.2f vZ %.2f taux %.1f",
       distanceH, resteRoute, ecartLateral, dy, capCible, erreurCap,
-      vitesseAvanceCible, vitesseLateraleCible, vitesseVerticaleCible, tauxLacetCible))
+      vitesseAvanceCible, vitesseLateraleCible, vitesseVerticaleCible, tauxLacetCible)
 
     ------------------------------------------------- BOUCLE INTERNE (vitesses)
     local commandes = {}
@@ -2402,8 +2519,8 @@ function autopilote.nouveau(options)
       commandes.lateral = 0
       etat.axes.avance.pid.reinitialiser(0)
       etat.axes.derive.pid.reinitialiser(0)
-      debugCycle(ETAPES.MAINTIEN, string.format(
-        "dans les marges (%.2fm) : poussee horizontale coupee", distanceH))
+      debugCycle(ETAPES.MAINTIEN,
+        "dans les marges (%.2fm) : poussee horizontale coupee", distanceH)
     end
 
     -- En repli zone morte, l'avance ne se declenche que si le nez est
@@ -2416,9 +2533,9 @@ function autopilote.nouveau(options)
       end
     end
 
-    debugCycle(ETAPES.BOUCLE_VITESSE, string.format(
+    debugCycle(ETAPES.BOUCLE_VITESSE,
       "commandes : avance %.2f lateral %.2f vertical %.2f lacet %.2f",
-      commandes.avance, commandes.lateral, commandes.vertical, commandes.lacet))
+      commandes.avance, commandes.lateral, commandes.vertical, commandes.lacet)
 
     local diagnostic = {
       distanceH = distanceH, distanceY = dy, resteRoute = resteRoute,
@@ -2735,9 +2852,9 @@ function autopilote.nouveau(options)
       etat.brideSol = (facteur < 1) and "bride" or nil
     end
 
-    debugCycle(ETAPES.ENVELOPPE_SOL, string.format(
+    debugCycle(ETAPES.ENVELOPPE_SOL,
       "hauteur sol %.1f (%s) -> vitesse max %.2f, descente max %.2f",
-      agl, tostring(etat.sourceSol), limites.vitesseMax, limites.vitesseDescente))
+      agl, tostring(etat.sourceSol), limites.vitesseMax, limites.vitesseDescente)
     return limites
   end
 
@@ -2856,10 +2973,10 @@ function autopilote.nouveau(options)
         lateral  = borner(etat.commandesManuelles.lateral or 0, -1, 1),
       }
       sorties.appliquer(etat.commandes)
-      debugCycle(ETAPES.APPLICATION_CMD, string.format(
+      debugCycle(ETAPES.APPLICATION_CMD,
         "manuel : avance %.2f lacet %.2f vertical %.2f lateral %.2f",
         etat.commandes.avance, etat.commandes.lacet,
-        etat.commandes.vertical, etat.commandes.lateral))
+        etat.commandes.vertical, etat.commandes.lateral)
       return etat
     end
 
@@ -3041,9 +3158,9 @@ function autopilote.nouveau(options)
         pointFranchi(estDernier)
       end
     else
-      debugCycle(ETAPES.MAINTIEN, string.format(
+      debugCycle(ETAPES.MAINTIEN,
         "derive %.2fm / altitude %.2fm / cap %.1f",
-        diagnostic.distanceH, diagnostic.distanceY, etat.cap))
+        diagnostic.distanceH, diagnostic.distanceY, etat.cap)
     end
 
     return etat
