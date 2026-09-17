@@ -145,19 +145,21 @@ Sans capteur, un véhicule **immobile ne sait pas où pointe son nez**. Le modul
 
 > **Propulsion latérale et cap déduit ne vont pas ensemble.** Une poussée latérale fait dériver la route par rapport au nez : le cap estimé devient faux. Le module l'avertit au démarrage. Pour un véhicule qui translate, installez un capteur de cap.
 
-#### Ce que coûte l'absence de capteur, mesuré
+#### Ce que ça coûte vraiment, mesuré
 
-Seize approches d'amarrage depuis seize directions différentes, jouées sur le banc avec le câblage livré (boîte à rapports, ballon à deux signaux, pas de poussée latérale) :
+Seize approches d'amarrage depuis seize directions différentes, jouées sur le banc avec le câblage livré (boîte à rapports pour l'avance, boîte symétrique pour le lacet, ballon à deux signaux, pas de poussée latérale) :
 
-| Montage | Amarrages réussis | Durée typique |
+| Montage | 1 tentative | 3 tentatives (défaut) |
 |---|---|---|
-| Câblage livré, **cap déduit de la route** | **7 / 16** à la première tentative | — |
-| Câblage livré, cap déduit, **3 tentatives** (défaut) | **16 / 16** | 100 à 900 s |
-| Câblage livré + **capteur de cap** | **16 / 16** | **40 à 100 s** |
+| Câblage livré, cap déduit de la route | 11 / 16 | **16 / 16** |
+| Câblage livré + capteur de cap | 12 / 16 | **16 / 16** |
+| Câblage livré, **antenne 4 blocs à l'arrière**, cap déduit | 7 / 16 | 16 / 16 |
 
-La leçon tient en une ligne : **le capteur de cap ne change pas ce que le véhicule finit par réussir, il change le temps qu'il y met.** Sans lui, un véhicule immobile pousse dans une direction approximative et se stabilise parfois à deux ou trois blocs de sa cible ; la manœuvre est reprise depuis l'altitude d'approche, et comme chaque essai repart d'une géométrie différente, il finit par aboutir. Avec lui, il se pose du premier coup.
+Trois enseignements, dans l'ordre d'importance :
 
-Pour un véhicule qui fait des allers-retours toute la journée, le capteur se rentabilise vite. Pour un véhicule occasionnel, les tentatives suffisent.
+1. **Ce qui coûte le plus cher, c'est une antenne GPS décalée**, pas l'absence de capteur. Le décalage horizontal doit être retranché dans la bonne direction, donc tourné selon le cap ; si le cap est estimé, l'erreur d'estimation devient une erreur de position permanente. Même mission, même câblage : **0,7 bloc** d'erreur finale avec l'ordinateur sur l'axe, **2,4 blocs** avec l'ordinateur 4 blocs à l'arrière. Posez l'ordinateur sur l'axe du véhicule (`decalageGps.x = 0`, `decalageGps.z = 0`) ; le décalage vertical, lui, ne coûte rien.
+2. **Ce qui rend l'amarrage fiable, ce sont les tentatives.** Un véhicule immobile sans capteur pousse dans une direction approximative et se stabilise parfois à deux blocs de sa cible ; la manœuvre est alors reprise depuis l'altitude d'approche, et comme chaque essai repart d'une géométrie différente, elle finit par aboutir (`carburant.amarrage.tentatives`).
+3. **Le capteur de cap reste indispensable** pour la propulsion latérale (voir ci-dessus) et pour tout ce qui exige une *orientation* finale : sans lui, un véhicule à l'arrêt ne sait pas où pointe son nez, et l'autopilote valide alors le point sur la position seule en le disant au journal.
 
 ---
 
@@ -366,7 +368,9 @@ Ordre de grandeur : la commande vaut 1 à pleine poussée. Si 0,2 de commande do
 
 ## 14. Limites connues
 
-- **Sans capteur de cap**, un véhicule immobile ne connaît pas son orientation. Le module le gère (lacet neutralisé, reptation d'acquisition, manœuvre reprise autant de fois que nécessaire), mais une manœuvre de précision demande alors plusieurs essais au lieu d'un : 7 amarrages sur 16 du premier coup, 16 sur 16 en trois tentatives, contre 16 sur 16 du premier coup avec capteur. Pour du vol de précision — dépôt serré, appontage — installez un lecteur de cap et renseignez `cap.source = "peripherique"` (chiffres et protocole en §4).
+- **Sans capteur de cap**, un véhicule immobile ne connaît pas son orientation. Le module le gère (lacet neutralisé, reptation d'acquisition, manœuvre reprise autant de fois que nécessaire), et une arrivée qui impose un cap est alors validée sur la position seule, avec une ligne de journal qui le dit. Une manœuvre de précision demande plusieurs essais au lieu d'un : 11 amarrages sur 16 du premier coup, 16 sur 16 en trois tentatives (§4).
+- **Une antenne GPS décalée horizontalement coûte plus cher que l'absence de capteur** : 0,7 bloc d'erreur finale avec l'ordinateur sur l'axe, 2,4 blocs avec 4 blocs de décalage. Le module l'avertit au démarrage.
+- **Un actionneur à crans ne corrige pas plus finement qu'un cran.** Un lacet à boîte dont le plus petit cran tourne de 4,5° par cycle ne tiendra jamais une tolérance de cap de 3° : elle n'est pas plus précise, elle est inatteignable. Le module calcule ce quantum au démarrage et refuse de laisser passer une tolérance plus fine sans le dire. Ses gains de boucle doivent aussi être plus doux qu'en continu : une boucle plus vive que son actionneur ne fait qu'osciller.
 - **La propulsion latérale exige un capteur de cap** (voir §4).
 - Le module ne connaît **pas les obstacles**. L'altitude de croisière est une sécurité, pas un évitement : choisissez-la au-dessus du relief de la zone d'opération.
 - Les commandes sont normalisées dans `[−1, +1]` ; c'est le câblage décrit dans `sorties` qui les traduit en redstone ou en appels de périphérique. Un axe monté à l'envers se corrige par `inverse = true`, sans rien redémonter. Un programme peut aussi injecter son propre pilote de sorties (`options.commandes`). Voir le **[guide de câblage](guide-cablage.md)**.

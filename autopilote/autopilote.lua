@@ -1906,6 +1906,44 @@ function autopilote.nouveau(options)
       rayon, rayon, config.tolerances.horizontale))
   end
 
+  -- Un actionneur A CRANS ne sait pas corriger plus finement qu'un cran. Une
+  -- tolerance plus fine que ce quantum n'est pas atteinte : elle est ratee,
+  -- indefiniment, et la manoeuvre echoue au lieu d'etre plus precise.
+  do
+    local axes = (config.sorties or {}).axes or {}
+    local function quantum(reglageAxe, vitesseMax)
+      if not reglageAxe or reglageAxe.mode ~= "boite_vitesses" then return nil end
+      local plusPetit = nil
+      for _, rapport in ipairs(reglageAxe.rapports or {}) do
+        local effet = math.abs(rapport.effet or 0)
+        if not rapport.interdit and effet > 0 and (not plusPetit or effet < plusPetit) then
+          plusPetit = effet
+        end
+      end
+      if not plusPetit then return nil end
+      return plusPetit * vitesseMax * (config.gps.intervalle or 0.4)
+    end
+
+    local quantumCap = quantum(axes.lacet, config.vitesses.tauxVirageMax or 45)
+    if quantumCap and config.tolerances.cap < quantumCap then
+      journal.avert(ETAPES.INIT_SORTIES, string.format(
+        "lacet a crans : le plus petit cran fait tourner de %.1f degre(s) par "
+        .. "cycle, la tolerance de cap demandee est de %.1f. Elle ne sera pas "
+        .. "tenue : elevez tolerances.cap a %.0f au moins, ou ajoutez un cran "
+        .. "plus doux",
+        quantumCap, config.tolerances.cap, math.ceil(quantumCap * 1.5)))
+    end
+
+    local quantumAvance = quantum(axes.avance, config.vitesses.croisiere or 8)
+    if quantumAvance and config.tolerances.horizontale < quantumAvance then
+      journal.avert(ETAPES.INIT_SORTIES, string.format(
+        "avance a rapports : le premier rapport parcourt environ %.1f bloc(s) "
+        .. "par cycle, la tolerance horizontale demandee est de %.1f. Le "
+        .. "vehicule depassera son point aussi souvent qu'il l'atteindra",
+        quantumAvance, config.tolerances.horizontale))
+    end
+  end
+
   ----------------------------------------------------------------------- organes
   local sorties = creerSorties(config, journal, options.commandes)
   journal.info(ETAPES.INIT_SORTIES, "sorties moteur de type '" .. tostring(sorties.type) .. "'")
@@ -1914,13 +1952,15 @@ function autopilote.nouveau(options)
   if type(options.cap) == "function" then
     -- Capteur de cap fourni par le programme appelant : priorite absolue.
     local mesurerOrigine = capteurCap.mesurer
-    capteurCap.mesurer = function(vitesse, dt, tauxLacet)
+    capteurCap.mesurer = function(vitesse, dt, lacetCommande)
       local ok, valeur = pcall(options.cap)
       if ok and nombreValide(valeur) then
         capteurCap.valeur = normaliserAngle(valeur)
         capteurCap.source = "injecte"
         return capteurCap.valeur, capteurCap.source
       end
+      -- Repli : le parametre doit etre transmis tel quel, sinon l'estimation
+      -- de vitesse parasite de l'antenne perd sa seule entree.
       return mesurerOrigine(vitesse, dt, lacetCommande)
     end
   end

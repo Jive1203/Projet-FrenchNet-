@@ -38,7 +38,15 @@ return {
 
   -- Position de l'ordinateur (point de reference GPS) par rapport au CENTRE
   -- du vehicule. Le pilotage raisonne toujours sur le centre reel.
-  decalageGps = { x = 0, y = 2, z = 4 },
+  --
+  -- POSEZ L'ORDINATEUR SUR L'AXE DU VEHICULE (x = 0, z = 0). Un decalage
+  -- HORIZONTAL doit etre retranche dans la bonne direction, donc tourne selon
+  -- le CAP -- et sans capteur de cap, le cap est estime. L'erreur d'estimation
+  -- se transforme alors en erreur de position permanente. Mesure sur le banc,
+  -- meme vol, meme cablage : antenne centree, 0.7 bloc d'erreur finale ;
+  -- antenne 4 blocs a l'arriere, 2.4 blocs. Le decalage VERTICAL, lui, ne
+  -- coute rien : il ne depend pas du cap.
+  decalageGps = { x = 0, y = 2, z = 0 },
 
   -- Position du point de depot / des patins d'atterrissage par rapport au
   -- CENTRE. C'est ce point-la qui tombera sur la cible quand le point de
@@ -61,7 +69,12 @@ return {
   tolerances = {
     horizontale  = 1.5,   -- blocs : rayon d'acceptation autour du point
     altitude     = 1.0,   -- blocs : zone morte en altitude
-    cap          = 5.0,   -- degres : zone morte en cap
+    -- Degres : zone morte en cap. Avec un lacet A CRANS, elle ne peut pas
+    -- descendre sous ce qu'un cran fait tourner en un cycle : ici le plus
+    -- petit cran vaut 0.25 x 45 deg/s x 0.4 s, soit 4.5 degres. Une tolerance
+    -- plus fine n'est pas plus precise, elle est simplement inatteignable.
+    -- L'autopilote le verifie et le dit au demarrage.
+    cap          = 8.0,
     dureeArrivee = 2.0,   -- secondes CONTINUES dans les marges avant "arrive"
 
     -- Hysteresis du repli zone morte : la correction s'engage au-dela de
@@ -118,11 +131,17 @@ return {
                     integraleMax = 0.7, penteMax = 2.0, filtreDerivee = 0.25 },
     },
 
+    -- CAP. Ces gains sont ceux d'un lacet a CRANS : le selecteur ne change
+    -- que d'un cran toutes les cyclesEntreRapports + cyclesImpulsion periodes,
+    -- soit plus d'une seconde de retard pur. Une boucle plus vive que son
+    -- actionneur ne fait qu'osciller : le vehicule part en lacet d'un bord a
+    -- l'autre et parcourt vingt fois la distance utile. Un lacet CONTINU
+    -- (mode bipolaire) supporte trois a quatre fois ces valeurs.
     cap = {
-      position  = { kp = 1.20 },
-      croisiere = { kp = 0.030, ki = 0.0080, kd = 0.0060,
+      position  = { kp = 0.35 },
+      croisiere = { kp = 0.015, ki = 0.0040, kd = 0.0030,
                     integraleMax = 0.5, penteMax = 3.0, filtreDerivee = 0.25 },
-      maintien  = { kp = 0.045, ki = 0.0150, kd = 0.0090,
+      maintien  = { kp = 0.022, ki = 0.0075, kd = 0.0045,
                     integraleMax = 0.5, penteMax = 2.0, filtreDerivee = 0.25 },
     },
 
@@ -340,12 +359,37 @@ return {
         amplitude = 127,   -- ecart maximal de part et d'autre
       },
 
-      -- LACET : deux faces opposees, une par sens. ATTENTION : un ordinateur
-      -- n'a que six faces et la boite occupe deja left/right, le vertical
-      -- top/bottom. Il reste front/back. Deux axes ne peuvent pas partager
-      -- une face : l'autopilote refuse de demarrer si c'est le cas.
-      lacet    = { mode = "bipolaire", cotePositif = "front", coteNegatif = "back",
-                   amplitude = 15, seuil = 0.08 },
+      -- LACET : boite sequentielle elle aussi, mais SYMETRIQUE. Un selecteur
+      -- de virage n'a pas de "marche arriere" : il a autant de crans a
+      -- gauche qu'a droite, et un point mort au milieu. Le calage descend
+      -- jusqu'a la butee gauche puis remonte de 'neutre - 1' crans.
+      -- ATTENTION : un ordinateur n'a que six faces. La boite d'avance
+      -- occupe left/right, le vertical top/bottom, celle-ci front/back.
+      -- Il ne reste plus rien : tout signal supplementaire (amarrage, radar)
+      -- part sur un satellite. L'autopilote refuse de demarrer si deux
+      -- sorties se disputent une face.
+      lacet = {
+        mode = "boite_vitesses",
+        coteMontee = "front", coteDescente = "back",
+        cyclesImpulsion = 1,
+        cyclesEntreRapports = 2,
+        hysteresis = 0.10,
+        neutre = 4,            -- le cran "N" ci-dessous
+        rapports = {
+          { nom = "G3", effet = -1.00 },
+          { nom = "G2", effet = -0.60 },
+          { nom = "G1", effet = -0.25 },
+          { nom = "N",  effet =  0    },
+          { nom = "D1", effet =  0.25 },
+          { nom = "D2", effet =  0.60 },
+          { nom = "D3", effet =  1.00 },
+        },
+      },
+
+      -- VARIANTE, si le lacet est pilote en continu plutot qu'a crans :
+      --   lacet = { mode = "bipolaire", cotePositif = "front",
+      --             coteNegatif = "back", amplitude = 15, seuil = 0.08 },
+
       lateral  = { mode = "aucun" },
     },
   },
@@ -388,7 +432,7 @@ return {
       -- tenir : sinon l'amarrage echoue au lieu d'etre plus precis.
       toleranceHorizontale = 1.2,
       toleranceAltitude    = 0.6,
-      toleranceCap         = 3,
+      toleranceCap         = 8,
       dureeArrivee         = 3,
       vitesseApproche      = 1.2,
       delaiMax             = 600,

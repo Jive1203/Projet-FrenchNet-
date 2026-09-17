@@ -108,9 +108,9 @@ Chaque axe se configure indépendamment, dans la section `sorties` de `config_ve
 >
 > | Face | Rôle |
 > |---|---|
-> | `left` / `right` | boîte à rapports : cran + / cran − |
+> | `left` / `right` | boîte d'avance : cran + / cran − |
 > | `top` / `bottom` | montée : signal grossier / signal fin |
-> | `front` / `back` | lacet : tribord / bâbord |
+> | `front` / `back` | boîte de lacet : cran + / cran − |
 >
 > Il ne reste donc **rien** pour le signal d'amarrage, un radar sol ou une jauge de carburant. C'est exactement pour cela que les **satellites** existent (§ *Sorties déportées*) : un second ordinateur, relié par modem courte portée, tient ses propres six faces. Une entrée et une sortie **peuvent**, elles, partager une face : CC les lit et les écrit indépendamment.
 
@@ -201,6 +201,37 @@ vertical = {
 
 **256 positions au lieu de 16.** C'est ce qui permet de tenir une altitude au lieu d'osciller entre deux paliers de chauffe. `neutre` est la chauffe de sustentation : montez jusqu'à ce que le véhicule ne monte ni ne descende, et inscrivez la valeur.
 
+### Un lacet à crans, c'est une boîte **symétrique**
+
+Un sélecteur de virage n'a pas de marche arrière : il a autant de crans à gauche qu'à droite et un point mort au milieu. C'est ce que livre le gabarit :
+
+```lua
+lacet = {
+  mode = "boite_vitesses",
+  coteMontee = "front", coteDescente = "back",
+  neutre = 4,                      -- le cran "N" ci-dessous
+  rapports = {
+    { nom = "G3", effet = -1.00 }, { nom = "G2", effet = -0.60 },
+    { nom = "G1", effet = -0.25 }, { nom = "N",  effet =  0    },
+    { nom = "D1", effet =  0.25 }, { nom = "D2", effet =  0.60 },
+    { nom = "D3", effet =  1.00 },
+  },
+},
+```
+
+> ### ⚠️ Un axe à crans demande des gains plus doux
+>
+> Le sélecteur ne change que d'un cran toutes les `cyclesEntreRapports + cyclesImpulsion` périodes, soit **plus d'une seconde de retard pur**. Une boucle plus vive que son actionneur ne fait qu'osciller. Mesure sur le banc, même mission de trois points de passage :
+>
+> | Gains de cap | Résultat |
+> |---|---|
+> | Ceux d'un lacet continu (`position.kp = 1.20`) | **jamais arrivé**, 3 960 blocs parcourus pour 200 utiles |
+> | Ceux livrés pour un lacet à crans (`position.kp = 0.35`, boucle interne divisée par deux) | **arrivé en 85 s**, 206 blocs parcourus |
+>
+> Un lacet **continu** (`bipolaire`) supporte trois à quatre fois les gains livrés. Si vous repassez le lacet en continu, remontez `gains.cap` d'autant.
+>
+> Même règle pour les **tolérances** : le plus petit cran du lacet livré tourne de `0,25 × 45 °/s × 0,4 s ≈ 4,5°` par cycle. Une tolérance de cap de 3° n'est pas plus précise, elle est **inatteignable** — l'autopilote calcule ce quantum au démarrage et vous le dit.
+
 ### `peripherique` — appel direct
 
 Si un bloc du véhicule est pilotable comme périphérique CC, on l'appelle directement :
@@ -230,7 +261,7 @@ L'autopilote s'arrête au signal redstone : c'est le montage Create qui le trans
 | Marche / arrêt | `bipolaire` (ou `analogique` avec `amplitude = 15`) |
 | Deux sens, deux entrées séparées | `bipolaire` |
 | Une intensité proportionnelle | `analogique` |
-| **Une boîte à crans, montée/descente par impulsion** | **`boite_vitesses`** |
+| **Une boîte à crans, montée/descente par impulsion** | **`boite_vitesses`** (symétrique pour un axe à deux sens) |
 | **Deux signaux, un grossier et un fin** | **`double`** |
 | Piloté par un bloc exposé à CC | `peripherique` |
 

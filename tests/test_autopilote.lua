@@ -78,7 +78,7 @@ local function monter(options)
     racine      = BANC,
     budget      = options.budget or 400,
     bruitGps    = options.bruitGps,
-    decalageGps = options.decalageGps or { x = 0, y = 2, z = 4 },
+    decalageGps = options.decalageGps or { x = 0, y = 2, z = 0 },
     facteurTempsReel = options.facteurTempsReel,
     vehicule    = options.vehicule or { x = 100, y = 150, z = 100, cap = 0, vLateralMax = 0 },
   })
@@ -105,7 +105,7 @@ local function monter(options)
   -- Garde-fou : le meme piege ne doit pas revenir par une autre porte.
   if not options.decalageGpsDesaccord then
     local declare = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua").decalageGps
-    local simule = options.decalageGps or { x = 0, y = 2, z = 4 }
+    local simule = options.decalageGps or { x = 0, y = 2, z = 0 }
     for _, axe in ipairs({ "x", "y", "z" }) do
       if math.abs((declare[axe] or 0) - (simule[axe] or 0)) > 1e-9 then
         error(string.format(
@@ -306,7 +306,7 @@ do
   -- b. Gains PID manquants : meme traitement.
   local _, _, _, autopilote2 = monter({
     sansInstance = true,
-    config = { ["position  = { kp = 1%.20 },"] = "position = {}," },
+    config = { ["position  = { kp = 0%.35 },"] = "position = {}," },
   })
   local ok2, err2 = pcall(autopilote2.nouveau, { config = "/autopilote/config_vehicule.lua" })
   verifier("refus de demarrer sans gain PID obligatoire", not ok2)
@@ -449,7 +449,7 @@ do
   local banc, env, etat, _, ap = monter({
     budget = 400,
     decalageGps = { x = 0, y = 2, z = 6 },
-    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 6 }," },
+    config = { ["decalageGps = { x = 0, y = 2, z = 0 },"] = "decalageGps = { x = 0, y = 2, z = 6 }," },
     vehicule = { x = 50, y = 120, z = 50, cap = 0, vLateralMax = 0 },
   })
   ap.pas(); env.sleep(0.4); ap.pas()
@@ -489,8 +489,13 @@ do
   verifier("le vehicule entre bien dans les marges", premiereEntree ~= nil)
   verifier("une lecture isolee dans les marges ne vaut pas arrivee",
     arriveALEntree == false)
+  -- L'observateur echantillonne au meme rythme que l'autopilote, mais pas au
+  -- meme instant : il peut voir l'entree dans les marges un cycle apres elle.
+  -- On tolere donc un cycle de lecture, pas davantage.
+  local uncycle = 0.4
   verifier("arrivee prononcee apres la duree continue configuree",
-    instantArrivee and premiereEntree and (instantArrivee - premiereEntree) >= 2.0,
+    instantArrivee and premiereEntree
+      and (instantArrivee - premiereEntree) >= 2.0 - uncycle,
     instantArrivee and premiereEntree
       and string.format("%.2fs de marges continues", instantArrivee - premiereEntree))
 end
@@ -502,7 +507,7 @@ do
   -- Le test 23 documente ce qui se passe avec une antenne deportee.
   local banc, env, etat, _, ap = monter({ budget = 600,
     decalageGps = { x = 0, y = 2, z = 0 },
-    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," } })
+    config = { ["decalageGps = { x = 0, y = 2, z = 0 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," } })
   ap.pas(); env.sleep(0.4); ap.pas()
   local cible = { x = 140, y = 150, z = 40 }
   ap.allerA(cible)
@@ -1250,7 +1255,7 @@ do
   -- a. Montee verticale au depart, descente verticale a l'arrivee.
   local banc, env, etat, _, ap = monter({ budget = 600,
     decalageGps = { x = 0, y = 2, z = 0 },
-    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    config = { ["decalageGps = { x = 0, y = 2, z = 0 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
     vehicule = { x = 0, y = 90, z = 0, cap = 0, vLateralMax = 0 } })
   ap.pas(); env.sleep(0.4); ap.pas()
   local cible = { x = 200, y = 95, z = -150 }
@@ -1300,7 +1305,7 @@ do
   -- b. Un point sans altitude est survole a l'altitude de croisiere.
   local banc2, env2, etat2, _, ap2 = monter({ budget = 600,
     decalageGps = { x = 0, y = 2, z = 0 },
-    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    config = { ["decalageGps = { x = 0, y = 2, z = 0 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
     vehicule = { x = 0, y = 90, z = 0, cap = 0, vLateralMax = 0 } })
   ap2.pas(); env2.sleep(0.4); ap2.pas()
   ap2.suivreItineraire({
@@ -1340,7 +1345,8 @@ do
 
   -- e. Antenne deportee sans capteur de cap : la limite est annoncee.
   local banc5 = monter({ budget = 200,
-    decalageGps = { x = 0, y = 2, z = 4 } })
+    decalageGps = { x = 0, y = 2, z = 4 },
+    ajusterConfig = function() end })
   verifier("limite de precision annoncee au demarrage",
     (banc5.contient("SANS capteur de cap")) and (banc5.contient("incertaine")))
 end
@@ -1387,7 +1393,7 @@ do
   local banc2, env2, etat2, autopilote2 = monter({
     budget = 400, sansInstance = true,
     decalageGps = { x = 0, y = 2, z = 0 },
-    config = { ["decalageGps = { x = 0, y = 2, z = 4 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
+    config = { ["decalageGps = { x = 0, y = 2, z = 0 },"] = "decalageGps = { x = 0, y = 2, z = 0 }," },
     vehicule = { x = 0, y = 150, z = 0, cap = 0, vLateralMax = 0 },
   })
   local calibration2 = banc2.charger(SRC .. "/calibration.lua")
@@ -1796,12 +1802,31 @@ do
     table.concat(etapes, ","))
   verifier("la commande a deux signaux tient l'altitude de croisiere",
     math.abs(altitudeMax - 200) < 6, string.format("%.1f", altitudeMax))
+  -- Precision reelle du cablage livre, antenne CENTREE : moins d'un bloc.
+  -- Avec l'antenne 4 blocs a l'arriere que livrait le gabarit avant, la meme
+  -- mission finissait a 2.4 blocs -- le cap estime tourne le decalage dans la
+  -- mauvaise direction. C'est pour cela que le gabarit livre x = 0, z = 0.
   verifier("la boite a rapports amene le vehicule sur son point",
-    banc.distanceH({ x = 180, z = 60 }) < config.tolerances.horizontale,
+    banc.distanceH({ x = 180, z = 60 }) < 1.0,
     string.format("%.2f", banc.distanceH({ x = 180, z = 60 })))
   verifier("la descente finale est verticale et aboutit",
     math.abs(etat.vehicule.y - 150) < config.tolerances.altitude + 1,
     string.format("%.2f", etat.vehicule.y))
+
+  -- Une tolerance plus fine qu'un cran n'est pas atteinte, elle est ratee
+  -- indefiniment : l'autopilote le dit au demarrage plutot que de laisser la
+  -- manoeuvre echouer sans explication.
+  do
+    local trop = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    trop.tolerances.cap = 1.0
+    local fichier = env.fs.open("/autopilote/config_serre.lua", "w")
+    fichier.write(autopilote.serialiserConfig(trop))
+    fichier.close()
+    autopilote.nouveau({ config = "/autopilote/config_serre.lua",
+                         commandes = banc.pilote() })
+    verifier("tolerance de cap plus fine qu'un cran : annoncee au demarrage",
+      journalContient("lacet a crans"))
+  end
 
   -- Le piege qui a rendu ce cablage muet : un ordinateur n'a que six faces.
   do

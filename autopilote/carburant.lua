@@ -88,7 +88,7 @@ local DEFAUTS = {
     -- sous 1 bloc demande une antenne centree et un capteur de cap.
     toleranceHorizontale = 1.2,
     toleranceAltitude    = 0.6,
-    toleranceCap         = 3,
+    toleranceCap         = 8,
     dureeArrivee         = 3,
     vitesseApproche      = 1.2,
     delaiMax             = 600,  -- s pour rejoindre puis s'amarrer
