@@ -184,6 +184,11 @@ function M.creer(options)
     local restant = duree
     while restant > 1e-9 do
       local pas = math.min(etat.pasSimulation, restant)
+      -- Cablage reel : la poussee ne vient pas des commandes calculees mais
+      -- des NIVEAUX REDSTONE reellement emis. C'est la seule facon d'eprouver
+      -- la quantification d'une boite a rapports ou le biais de sustentation
+      -- d'une commande a deux signaux.
+      if etat.decodeur then etat.vehicule.commandes = etat.decodeur(etat.redstone) end
       etat.vehicule.avancer(pas)
       etat.horloge = etat.horloge + pas
       restant = restant - pas
@@ -578,6 +583,83 @@ end
 --- Contenu du seul ecran courant.
 function M.ecranCourant()
   return table.concat(M.etat.tampon, "\n")
+end
+
+--- Decodeur de cablage : reconstruit la poussee a partir des NIVEAUX REDSTONE,
+-- en lisant la configuration du vehicule comme le ferait le montage Create.
+-- C'est le pendant physique de la couche de sorties : ce que l'autopilote
+-- ecrit sur ses faces, le vehicule le subit.
+function M.brancherDecodeur(config)
+  local axes = (config.sorties or {}).axes or {}
+
+  -- Boite a rapports : on suit le rapport engage a l'impulsion, exactement
+  -- comme le ferait la mecanique -- sans jamais regarder l'etat interne de
+  -- l'autopilote, sinon l'essai ne prouverait rien.
+  local boites = {}
+  for nom, reglage in pairs(axes) do
+    if reglage.mode == "boite_vitesses" then
+      boites[nom] = { index = 1, montee = false, descente = false }
+    end
+  end
+
+  local function niveau(redstone, cote)
+    if not cote then return 0 end
+    return tonumber(redstone[cote]) or 0
+  end
+
+  local function decoderAxe(nom, reglage, redstone)
+    local mode = reglage.mode
+    local valeur = 0
+
+    if mode == "boite_vitesses" then
+      local rapports = reglage.rapports or {}
+      local suivi = boites[nom]
+      local montee = niveau(redstone, reglage.coteMontee) > 0
+      local descente = niveau(redstone, reglage.coteDescente) > 0
+      -- Front montant = une impulsion = un cran.
+      if montee and not suivi.montee then
+        suivi.index = math.min(#rapports, suivi.index + 1)
+      elseif descente and not suivi.descente then
+        suivi.index = math.max(1, suivi.index - 1)
+      end
+      suivi.montee, suivi.descente = montee, descente
+      local rapport = rapports[suivi.index]
+      -- Un rapport declare interdit ne pousse pas : c'est sa definition.
+      valeur = (rapport and not rapport.interdit and rapport.effet) or 0
+
+    elseif mode == "double" then
+      local pas = math.max(1, math.floor(reglage.pas or 16))
+      local total = niveau(redstone, reglage.coteGrossier) * pas
+        + niveau(redstone, reglage.coteFin)
+      local neutre = reglage.neutre or 0
+      local amplitude = reglage.amplitude or (15 * pas + pas - 1)
+      valeur = amplitude > 0 and (total - neutre) / amplitude or 0
+
+    elseif mode == "bipolaire" then
+      local amplitude = reglage.amplitude or 15
+      valeur = (niveau(redstone, reglage.cotePositif)
+                - niveau(redstone, reglage.coteNegatif)) / amplitude
+
+    elseif mode == "analogique" then
+      local amplitude = reglage.amplitude or 15
+      local neutre = reglage.neutre or 0
+      valeur = amplitude > 0 and (niveau(redstone, reglage.cote) - neutre) / amplitude or 0
+    end
+
+    if reglage.inverse then valeur = -valeur end
+    return borner(valeur, -1, 1)
+  end
+
+  M.etat.decodeur = function(redstone)
+    local commandes = { avance = 0, vertical = 0, lacet = 0, lateral = 0 }
+    for nom, reglage in pairs(axes) do
+      if commandes[nom] ~= nil and reglage.mode and reglage.mode ~= "aucun" then
+        commandes[nom] = decoderAxe(nom, reglage, redstone)
+      end
+    end
+    return commandes
+  end
+  return M.etat.decodeur
 end
 
 --- Pilote de sorties injectable : relie directement les commandes calculees

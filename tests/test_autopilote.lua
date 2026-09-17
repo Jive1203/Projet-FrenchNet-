@@ -1751,6 +1751,70 @@ do
 end
 
 --------------------------------------------------------------------------------
+print("\n== TEST 26 bis : vol complet sur le cablage REELLEMENT livre ==")
+do
+  -- Les autres essais injectent les commandes calculees directement dans la
+  -- physique. Ici, la poussee est reconstruite a partir des NIVEAUX REDSTONE
+  -- reellement emis, comme le ferait le montage Create : c'est le seul essai
+  -- qui eprouve la quantification d'une boite a rapports et le biais de
+  -- sustentation d'une commande a deux signaux en boucle fermee.
+  local banc, env, etat, autopilote = monter({
+    budget = 1500, sansInstance = true,
+    vehicule = { x = 100, y = 150, z = 100, cap = 0, vLateralMax = 0 },
+    ajusterConfig = function(config) config.vitesses.altitudeCroisiere = 200 end,
+  })
+  local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+  banc.brancherDecodeur(config)
+
+  local ap = autopilote.nouveau({ config = "/autopilote/config_vehicule.lua" })
+  ap.initialiser()
+  local etapes = {}
+  ap.surEvenement(function(typeEvenement, donnees)
+    if typeEvenement == "etape" then etapes[#etapes + 1] = donnees.index end
+  end)
+  ap.suivreItineraire({
+    { x = 160, z = 140 },
+    { x = 200, z = 100 },
+    { x = 180, y = 150, z = 60, arret = true },
+  })
+
+  local arrive = false
+  local altitudeMax = etat.vehicule.y
+  pcall(env.parallel.waitForAny,
+    function() ap.executer() end,
+    function() arrive = ap.attendreArrivee(1200) end,
+    function()
+      for _ = 1, 600 do
+        env.sleep(2)
+        if etat.vehicule.y > altitudeMax then altitudeMax = etat.vehicule.y end
+      end
+    end)
+
+  verifier("le vehicule arrive en pilotant par la redstone seule", arrive == true)
+  verifier("les trois etapes sont franchies dans l'ordre",
+    #etapes == 3 and etapes[1] == 1 and etapes[2] == 2 and etapes[3] == 3,
+    table.concat(etapes, ","))
+  verifier("la commande a deux signaux tient l'altitude de croisiere",
+    math.abs(altitudeMax - 200) < 6, string.format("%.1f", altitudeMax))
+  verifier("la boite a rapports amene le vehicule sur son point",
+    banc.distanceH({ x = 180, z = 60 }) < config.tolerances.horizontale,
+    string.format("%.2f", banc.distanceH({ x = 180, z = 60 })))
+  verifier("la descente finale est verticale et aboutit",
+    math.abs(etat.vehicule.y - 150) < config.tolerances.altitude + 1,
+    string.format("%.2f", etat.vehicule.y))
+
+  -- Le piege qui a rendu ce cablage muet : un ordinateur n'a que six faces.
+  do
+    local fautive = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+    fautive.sorties.axes.lacet.cotePositif = fautive.sorties.axes.avance.coteMontee
+    local valide, motif = autopilote.verifierConfiguration(fautive)
+    verifier("deux axes sur la meme face : la configuration est refusee",
+      valide == false and tostring(motif):find("six faces", 1, true) ~= nil,
+      tostring(motif))
+  end
+end
+
+--------------------------------------------------------------------------------
 print("\n== TEST 27 : ordinateur de sortie deporte (satellite) ==")
 do
   local banc, env, etat = monter({ budget = 200, sansInstance = true })
@@ -1849,6 +1913,10 @@ do
         or { x = 120, y = 100, z = -740, cap = 0, vLateralMax = 0 },
       ajusterConfig = function(config)
         config.vitesses.altitudeCroisiere = 140
+        -- Le cablage livre sature les six faces (boite + double + lacet) : il
+        -- ne reste rien pour le signal d'amarrage. Sur un vrai vehicule il
+        -- part sur un satellite ; ici, un cablage continu libere 'back'.
+        cablageClassique(config)
         config.carburant = config.carburant or {}
         config.carburant.actif = true
         config.carburant.source = "peripherique"

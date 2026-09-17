@@ -96,9 +96,23 @@ Deux remarques qui évitent des heures de perplexité :
 
 ---
 
-## 5. Les quatre modes de sortie
+## 5. Les modes de sortie
 
 Chaque axe se configure indépendamment, dans la section `sorties` de `config_vehicule.lua` (ou dans l'interface, sections *Sorties avance / vertical / lacet / lateral*).
+
+> ### ⚠️ Un ordinateur n'a que six faces
+>
+> `front`, `back`, `left`, `right`, `top`, `bottom`. **Deux sorties ne peuvent pas partager une face** : elles s'écrasent l'une l'autre à chaque cycle, et rien dans le comportement du véhicule ne désigne la cause — il part tout droit sans jamais tourner, ou une impulsion de passage de rapport devient un ordre de lacet. L'autopilote **refuse de démarrer** si deux axes revendiquent la même face, et dit lesquels.
+>
+> Le câblage livré les consomme **toutes les six** :
+>
+> | Face | Rôle |
+> |---|---|
+> | `left` / `right` | boîte à rapports : cran + / cran − |
+> | `top` / `bottom` | montée : signal grossier / signal fin |
+> | `front` / `back` | lacet : tribord / bâbord |
+>
+> Il ne reste donc **rien** pour le signal d'amarrage, un radar sol ou une jauge de carburant. C'est exactement pour cela que les **satellites** existent (§ *Sorties déportées*) : un second ordinateur, relié par modem courte portée, tient ses propres six faces. Une entrée et une sortie **peuvent**, elles, partager une face : CC les lit et les écrit indépendamment.
 
 ### `aucun` — axe non équipé
 

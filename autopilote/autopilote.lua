@@ -695,6 +695,50 @@ local function validerConfiguration(config)
     anomalies[#anomalies + 1] = "'pilotage.mode' doit valoir 'auto', 'pid' ou 'zone_morte'"
   end
 
+  -- Un ordinateur n'a que six faces. Deux axes qui en revendiquent une meme
+  -- s'ecrasent l'un l'autre a chaque cycle : le vehicule part tout droit sans
+  -- jamais tourner, ou pire, une impulsion de passage de rapport devient un
+  -- ordre de lacet. Rien dans le comportement ne designe la cause, d'ou ce
+  -- controle au demarrage.
+  local proprietaire = {}   -- ["ordinateur/face"] = "axe (role)"
+  local CLES_FACES = {
+    "cote", "cotePositif", "coteNegatif", "coteMontee", "coteDescente",
+    "coteGrossier", "coteFin",
+  }
+  local function reserverFace(face, ordinateur, role)
+    if type(face) ~= "string" or face == "" then return end
+    -- Deux satellites differents peuvent parfaitement utiliser la meme face :
+    -- ce sont deux ordinateurs distincts.
+    local identifiant = tostring(ordinateur or "local") .. "/" .. face
+    if proprietaire[identifiant] then
+      anomalies[#anomalies + 1] = string.format(
+        "face '%s' revendiquee par %s ET %s : un ordinateur n'a que six faces "
+        .. "et deux sorties ne peuvent pas partager la meme",
+        face, proprietaire[identifiant], role)
+    else
+      proprietaire[identifiant] = role
+    end
+  end
+
+  for _, axe in ipairs({ "avance", "vertical", "lacet", "lateral" }) do
+    local reglage = ((config.sorties or {}).axes or {})[axe]
+    if type(reglage) == "table" and reglage.mode and reglage.mode ~= "aucun" then
+      for _, cle in ipairs(CLES_FACES) do
+        reserverFace(reglage[cle], reglage.ordinateur,
+          string.format("%s.%s", axe, cle))
+      end
+    end
+  end
+
+  -- Les ENTREES (jauge, radar, ordres) peuvent partager une face avec une
+  -- sortie : CC lit l'entree et ecrit la sortie independamment. Seules les
+  -- SORTIES s'ecrasent entre elles.
+  local carburant = config.carburant or {}
+  if carburant.actif then
+    reserverFace(carburant.coteAmarre, carburant.ordinateurOrdres,
+      "carburant.coteAmarre")
+  end
+
   if #anomalies > 0 then
     error("configuration vehicule invalide -> " .. table.concat(anomalies, " | "), 0)
   end

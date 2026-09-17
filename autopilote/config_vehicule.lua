@@ -340,7 +340,11 @@ return {
         amplitude = 127,   -- ecart maximal de part et d'autre
       },
 
-      lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",
+      -- LACET : deux faces opposees, une par sens. ATTENTION : un ordinateur
+      -- n'a que six faces et la boite occupe deja left/right, le vertical
+      -- top/bottom. Il reste front/back. Deux axes ne peuvent pas partager
+      -- une face : l'autopilote refuse de demarrer si c'est le cas.
+      lacet    = { mode = "bipolaire", cotePositif = "front", coteNegatif = "back",
                    amplitude = 15, seuil = 0.08 },
       lateral  = { mode = "aucun" },
     },
