@@ -872,7 +872,7 @@ do
   -- Section verrouillee : la station de ravitaillement se consulte, pas plus.
   local banc2, env2, etat2, autopilote2 = monter({ budget = 200, sansInstance = true })
   local interface2 = banc2.charger(SRC .. "/interface.lua")
-  for _ = 1, 25 do banc2.taper("down") end  -- descendre jusqu'a la derniere section
+  for _ = 1, 60 do banc2.taper("down") end  -- descendre jusqu a la derniere section
   banc2.taper("tab")
   banc2.taper("enter")                      -- tentative de modification
   banc2.taper("q")
@@ -882,6 +882,77 @@ do
     ecran:find("verrouillee", 1, true) ~= nil)
   verifier("la station de ravitaillement reste affichee",
     ecran:find("Position X", 1, true) ~= nil or ecran:find("Station", 1, true) ~= nil)
+end
+
+--------------------------------------------------------------------------------
+print("\n== TEST 18 bis : le schema de l'interface couvre la configuration ==")
+do
+  local banc, env, etat, autopilote = monter({ budget = 200, sansInstance = true })
+  local interface = banc.charger(SRC .. "/interface.lua")
+  local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
+  local sections = interface.interne.construireSections(config)
+
+  -- 1. Toute cle du schema doit exister dans le gabarit livre. Une cle mal
+  -- orthographiee ne provoque aucune erreur a l'execution : elle cree
+  -- silencieusement un reglage que l'autopilote ne lira jamais.
+  local inconnues = {}
+  for _, section in ipairs(sections) do
+    for _, champ in ipairs(section.champs or {}) do
+      if champ.cle then
+        local parent, dernier = config, nil
+        for morceau in tostring(champ.cle):gmatch("[^.]+") do
+          if dernier then
+            parent = type(parent) == "table" and parent[dernier] or nil
+          end
+          dernier = morceau
+        end
+        if type(parent) ~= "table" or not rawget(parent, dernier) then
+          -- Une valeur nil legitime (face non cablee) n'est pas une erreur :
+          -- on exige seulement que la TABLE parente existe.
+          if type(parent) ~= "table" then inconnues[#inconnues + 1] = champ.cle end
+        end
+      end
+    end
+  end
+  verifier("aucune cle du schema ne pointe hors de la configuration",
+    #inconnues == 0, table.concat(inconnues, ", "))
+
+  -- 2. Les sections ajoutees apres coup doivent etre la : sans elles, ces
+  -- reglages ne s'editent qu'au bloc-notes.
+  local titres = {}
+  for _, section in ipairs(sections) do titres[section.titre] = true end
+  for _, attendu in ipairs({ "Hauteur sol", "Enveloppe sol", "Sorties deportees",
+                             "Carburant", "Amarrage", "Conteneurs" }) do
+    verifier("section '" .. attendu .. "' presente a l'ecran", titres[attendu] == true)
+  end
+
+  -- 3. Reciproquement : les grandes familles du gabarit doivent etre editables.
+  local couvertes = {}
+  for _, section in ipairs(sections) do
+    for _, champ in ipairs(section.champs or {}) do
+      if champ.cle then couvertes[tostring(champ.cle):match("^[^.]+")] = true end
+    end
+  end
+  local oubliees = {}
+  for _, famille in ipairs({ "tolerances", "vitesses", "gains", "pilotage", "maintien",
+                             "gps", "cap", "sol", "enveloppeSol", "sorties", "mission",
+                             "journal", "carburant", "ravitaillement" }) do
+    if not couvertes[famille] then oubliees[#oubliees + 1] = famille end
+  end
+  verifier("toutes les familles de reglages sont editables",
+    #oubliees == 0, table.concat(oubliees, ", "))
+
+  -- 4. Un champ optionnel doit pouvoir revenir a vide : une face non cablee
+  -- vaut nil, et un cycle qui ne propose que des faces enfermerait
+  -- l'utilisateur dans un cablage qu'il n'a pas.
+  local optionnel = nil
+  for _, section in ipairs(sections) do
+    for _, champ in ipairs(section.champs or {}) do
+      if champ.cle == "carburant.coteRetour" then optionnel = champ end
+    end
+  end
+  verifier("la face 'forcer le retour' est declaree optionnelle",
+    optionnel ~= nil and optionnel.optionnel == true)
 end
 
 --------------------------------------------------------------------------------
@@ -1607,92 +1678,7 @@ do
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 27 : bruleurs pilotes individuellement (mode reparti) ==")
-do
-  local banc, env, etat, autopilote = monter({ budget = 200, sansInstance = true })
-
-  --- Construit une couche de sorties avec un axe vertical reparti.
-  local function avecBruleurs(sorties, options)
-    local config = autopilote.chargerConfiguration("/autopilote/config_vehicule.lua")
-    config.sorties.axes.vertical = {
-      mode = "reparti",
-      sorties = sorties,
-      neutre = (options or {}).neutre or 0,
-      amplitude = (options or {}).amplitude,
-      repartition = (options or {}).repartition,
-    }
-    config.sorties.axes.avance = { mode = "aucun" }
-    config.sorties.axes.lacet = { mode = "aucun" }
-    return autopilote.creerSorties(config)
-  end
-
-  ------------------------------------------------- quatre bruleurs egaux
-  local quatre = avecBruleurs({
-    { cote = "top" }, { cote = "bottom" }, { cote = "left" }, { cote = "right" },
-  })
-  local function pousser(s, commande)
-    s.appliquer({ avance = 0, vertical = commande, lacet = 0, lateral = 0 })
-    return etat.redstone.top or 0, etat.redstone.bottom or 0,
-           etat.redstone.left or 0, etat.redstone.right or 0
-  end
-
-  local a, b, c, d = pousser(quatre, 0.5)   -- total = 0.5 x 60 = 30
-  verifier("la demande est etalee sur tous les bruleurs",
-    a + b + c + d == 30, string.format("%d+%d+%d+%d", a, b, c, d))
-  verifier("aucun bruleur ne porte la charge tout seul",
-    math.max(a, b, c, d) - math.min(a, b, c, d) <= 1,
-    string.format("%d..%d", math.min(a, b, c, d), math.max(a, b, c, d)))
-
-  a, b, c, d = pousser(quatre, 1)
-  verifier("pleine chauffe : tous les bruleurs au maximum",
-    a == 15 and b == 15 and c == 15 and d == 15)
-  a, b, c, d = pousser(quatre, 0)
-  verifier("chauffe nulle : tous eteints", a + b + c + d == 0)
-
-  -- Un cran de plus doit rester perceptible : c'est la resolution reelle.
-  local _, _, _, _ = pousser(quatre, 0)
-  local t1 = 0
-  for _, v in ipairs({ pousser(quatre, 1 / 60) }) do t1 = t1 + v end
-  verifier("resolution d'un cran sur soixante", t1 == 1, tostring(t1))
-
-  ------------------------------------------- deux signaux, poids inegaux
-  local grossierFin = avecBruleurs({
-    { cote = "top", poids = 16 }, { cote = "bottom", poids = 1 },
-  }, { neutre = 128, amplitude = 127 })
-
-  local grossier, fin = pousser(grossierFin, 0)
-  verifier("poids inegaux : encodage positionnel, commande nulle",
-    grossier == 8 and fin == 0, string.format("%d / %d", grossier, fin))
-  grossier, fin = pousser(grossierFin, 1)
-  verifier("poids inegaux : commande pleine",
-    grossier == 15 and fin == 15, string.format("%d / %d", grossier, fin))
-  grossier, fin = pousser(grossierFin, -1)
-  verifier("poids inegaux : commande minimale",
-    grossier == 0 and fin == 1, string.format("%d / %d", grossier, fin))
-
-  -- Le total reconstruit doit etre exact sur toute la plage : c'est ce qui
-  -- garantit qu'aucune position n'est inatteignable.
-  local exact = true
-  for pas = 0, 255 do
-    local commande = (pas - 128) / 127
-    if commande >= -1 and commande <= 1 then
-      local g, f = pousser(grossierFin, commande)
-      if g * 16 + f ~= pas then exact = false end
-    end
-  end
-  verifier("toutes les positions de 0 a 255 sont atteignables", exact)
-
-  ------------------------------------------------ comparaison des montages
-  -- Le point a connaitre avant de recabler : des bruleurs TOUT OU RIEN
-  -- donnent moins de finesse qu'un couple grossier/fin.
-  verifier("4 bruleurs 0-15 : 61 positions", 4 * 15 + 1 == 61)
-  verifier("2 signaux ponderes 16 et 1 : 256 positions", 17 * 15 + 1 == 256)
-  verifier("un couple pondere bat quatre bruleurs en finesse",
-    (17 * 15 + 1) > (4 * 15 + 1))
-end
-
---------------------------------------------------------------------------------
-print("\n== TEST 28 : ordinateur de sortie deporte (satellite) ==")
+print("\n== TEST 27 : ordinateur de sortie deporte (satellite) ==")
 do
   local banc, env, etat = monter({ budget = 200, sansInstance = true })
   local satellite = banc.charger(SRC .. "/satellite.lua")
@@ -1778,7 +1764,7 @@ do
 end
 
 --------------------------------------------------------------------------------
-print("\n== TEST 29 : surveillance carburant et ravitaillement automatique ==")
+print("\n== TEST 28 : surveillance carburant et ravitaillement automatique ==")
 do
   --- Prepare un vehicule dont la jauge est un reservoir expose a CC.
   local function avecReservoir(contenu, capacite, options)

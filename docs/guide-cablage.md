@@ -187,30 +187,6 @@ vertical = {
 
 **256 positions au lieu de 16.** C'est ce qui permet de tenir une altitude au lieu d'osciller entre deux paliers de chauffe. `neutre` est la chauffe de sustentation : montez jusqu'à ce que le véhicule ne monte ni ne descende, et inscrivez la valeur.
 
-### `reparti` — plusieurs sorties pondérées
-
-Généralisation du précédent : **N sorties**, chacune avec son **poids**. Deux usages, deux stratégies choisies automatiquement.
-
-| Poids | Stratégie | Usage |
-|---|---|---|
-| **Égaux** | Répartition **équitable** | Brûleurs pilotés un par un : la demande est étalée sur tous, on ne chauffe pas qu'un côté du ballon |
-| **Inégaux** (16 et 1…) | Encodage **positionnel** | Équivalent du mode `double`, exprimé autrement |
-
-```lua
-vertical = {
-  mode = "reparti",
-  sorties = {
-    { cote = "top" }, { cote = "bottom" },
-    { cote = "left", ordinateur = 12 },   -- une face sur un satellite
-  },
-  neutre = 22, amplitude = 22,            -- en unités de la somme (ici 0 à 45)
-},
-```
-
-> **Le piège à connaître avant de recâbler.** Piloter chaque brûleur individuellement paraît plus précis — c'est l'inverse si les brûleurs sont en tout ou rien. Quatre brûleurs allumés/éteints ne donnent que **5 niveaux**. Quatre brûleurs 0-15 en donnent **61**. Un simple couple grossier/fin en donne **256**.
->
-> Le pilotage individuel se justifie pour la **redondance** (détecter un brûleur mort), l'**équilibrage** (ne pas faire piquer le ballon) et un futur contrôle d'assiette — **pas pour la finesse**. Si vos brûleurs acceptent une intensité, vous pouvez avoir les deux : poids inégaux sur plusieurs brûleurs.
-
 ### `peripherique` — appel direct
 
 Si un bloc du véhicule est pilotable comme périphérique CC, on l'appelle directement :
@@ -242,7 +218,6 @@ L'autopilote s'arrête au signal redstone : c'est le montage Create qui le trans
 | Une intensité proportionnelle | `analogique` |
 | **Une boîte à crans, montée/descente par impulsion** | **`boite_vitesses`** |
 | **Deux signaux, un grossier et un fin** | **`double`** |
-| **Plusieurs sorties (brûleurs) pour un même axe** | **`reparti`** |
 | Piloté par un bloc exposé à CC | `peripherique` |
 
 Montages courants côté Create, à adapter à votre appareil :

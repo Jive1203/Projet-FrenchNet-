@@ -260,23 +260,31 @@ end
 --    'cle' est un chemin pointe dans la table de configuration.
 --------------------------------------------------------------------------------
 
+-- Sentinelle du choix VIDE : une table unique, jamais egale a une chaine
+-- saisie par l'utilisateur.
+local VIDE = setmetatable({}, { __tostring = function() return "" end })
+
 local CHOIX_COTES = { "front", "back", "left", "right", "top", "bottom" }
 
 local function champsSorties(axe, libelle)
   return {
     { cle = "sorties.axes." .. axe .. ".mode", libelle = libelle .. " : mode",
       type = "choix",
-      options = { "aucun", "analogique", "bipolaire", "double", "reparti",
+      options = { "aucun", "analogique", "bipolaire", "double",
                   "boite_vitesses", "peripherique" },
-      aide = "aucun = axe non equipe. double/reparti/boite_vitesses : voir le guide" },
+      aide = "aucun = axe non equipe. double / boite_vitesses : voir le guide" },
     { cle = "sorties.axes." .. axe .. ".coteMontee", libelle = libelle .. " : cran +",
-      type = "choix", options = CHOIX_COTES, aide = "boite a rapports : impulsion vers le haut" },
+      type = "choix", options = CHOIX_COTES, optionnel = true,
+      aide = "boite a rapports : impulsion vers le haut" },
     { cle = "sorties.axes." .. axe .. ".coteDescente", libelle = libelle .. " : cran -",
-      type = "choix", options = CHOIX_COTES, aide = "boite a rapports : impulsion vers le bas" },
+      type = "choix", options = CHOIX_COTES, optionnel = true,
+      aide = "boite a rapports : impulsion vers le bas" },
     { cle = "sorties.axes." .. axe .. ".coteGrossier", libelle = libelle .. " : grossier",
-      type = "choix", options = CHOIX_COTES, aide = "mode double : signal de forte amplitude" },
+      type = "choix", options = CHOIX_COTES, optionnel = true,
+      aide = "mode double : signal de forte amplitude" },
     { cle = "sorties.axes." .. axe .. ".coteFin", libelle = libelle .. " : fin",
-      type = "choix", options = CHOIX_COTES, aide = "mode double : signal d'ajustement" },
+      type = "choix", options = CHOIX_COTES, optionnel = true,
+      aide = "mode double : signal d'ajustement" },
     { cle = "sorties.axes." .. axe .. ".pas", libelle = libelle .. " : pas",
       type = "nombre", aide = "mode double : unites fines par cran grossier (16)" },
     { cle = "sorties.axes." .. axe .. ".hysteresis", libelle = libelle .. " : hysteresis",
@@ -285,15 +293,16 @@ local function champsSorties(axe, libelle)
       libelle = libelle .. " : cycles/cran", type = "nombre",
       aide = "boite : cycles minimum entre deux changements" },
     { cle = "sorties.axes." .. axe .. ".cote", libelle = libelle .. " : cote",
-      type = "choix", options = CHOIX_COTES, aide = "mode analogique uniquement" },
+      type = "choix", options = CHOIX_COTES, optionnel = true,
+      aide = "mode analogique uniquement" },
     { cle = "sorties.axes." .. axe .. ".neutre", libelle = libelle .. " : neutre",
       type = "nombre", aide = "niveau redstone au repos (mode analogique)" },
     { cle = "sorties.axes." .. axe .. ".amplitude", libelle = libelle .. " : amplitude",
       type = "nombre", aide = "amplitude du signal redstone" },
     { cle = "sorties.axes." .. axe .. ".cotePositif", libelle = libelle .. " : cote +",
-      type = "choix", options = CHOIX_COTES, aide = "mode bipolaire" },
+      type = "choix", options = CHOIX_COTES, optionnel = true, aide = "mode bipolaire" },
     { cle = "sorties.axes." .. axe .. ".coteNegatif", libelle = libelle .. " : cote -",
-      type = "choix", options = CHOIX_COTES, aide = "mode bipolaire" },
+      type = "choix", options = CHOIX_COTES, optionnel = true, aide = "mode bipolaire" },
     { cle = "sorties.axes." .. axe .. ".seuil", libelle = libelle .. " : seuil",
       type = "nombre", aide = "commande en deca de laquelle on n'emet rien" },
   }
@@ -478,10 +487,116 @@ local SCHEMA = {
     { cle = "cap.capParDefaut", libelle = "Cap par defaut", type = "nombre" },
   }},
 
+  { titre = "Hauteur sol", champs = {
+    { cle = "sol.source", libelle = "Source", type = "choix",
+      options = { "aucun", "altitudeDeclaree", "peripherique", "redstone" },
+      aide = "aucun = pas de mesure sol, l'enveloppe ne bride rien" },
+    { cle = "sol.altitudeDeclaree", libelle = "Altitude du terrain", type = "nombre",
+      aide = "Y du sol, quand il est plat et connu d'avance" },
+    { cle = "sol.peripherique.nom", libelle = "Radar : peripherique", type = "texte" },
+    { cle = "sol.peripherique.methode", libelle = "Radar : methode", type = "texte",
+      aide = "doit renvoyer une distance en blocs" },
+    { cle = "sol.peripherique.facteur", libelle = "Radar : facteur", type = "nombre" },
+    { cle = "sol.peripherique.decalage", libelle = "Radar : decalage", type = "nombre" },
+    { cle = "sol.redstone.cote", libelle = "Redstone : face", type = "choix",
+      options = CHOIX_COTES },
+    { cle = "sol.redstone.ordinateur", libelle = "Redstone : satellite", type = "nombre",
+      aide = "vide = face locale ; sinon numero du satellite qui la lit" },
+    { cle = "sol.redstone.blocsParNiveau", libelle = "Blocs par niveau", type = "nombre" },
+    { cle = "sol.redstone.inverse", libelle = "Redstone : inverse", type = "booleen" },
+    { cle = "sol.redstone.horsPortee", libelle = "Niveau hors portee", type = "nombre" },
+    { cle = "sol.hauteurMax", libelle = "Portee max", type = "nombre",
+      aide = "au-dela, le capteur est considere hors portee" },
+    { cle = "sol.filtre.constanteTemps", libelle = "Filtre : constante", type = "nombre" },
+  }},
+
+  { titre = "Enveloppe sol", champs = {
+    { cle = "enveloppeSol.actif", libelle = "Brider pres du sol", type = "booleen" },
+    { cle = "enveloppeSol.hauteurSecurite", libelle = "Hauteur de securite", type = "nombre",
+      aide = "au-dessus : plus aucun bridage" },
+    { cle = "enveloppeSol.hauteurMin", libelle = "Hauteur mini", type = "nombre",
+      aide = "en dessous : descente interdite hors pose volontaire" },
+    { cle = "enveloppeSol.vitesseAuSol", libelle = "Vitesse au ras du sol", type = "nombre" },
+    { cle = "enveloppeSol.vitesseDescenteAuSol", libelle = "Descente au ras du sol",
+      type = "nombre" },
+    { cle = "enveloppeSol.remonteeAutomatique", libelle = "Remonter si trop bas",
+      type = "booleen" },
+  }},
+
   { titre = "Sorties avance",   champs = champsSorties("avance", "Avance") },
   { titre = "Sorties vertical", champs = champsSorties("vertical", "Vertical") },
   { titre = "Sorties lacet",    champs = champsSorties("lacet", "Lacet") },
   { titre = "Sorties lateral",  champs = champsSorties("lateral", "Lateral") },
+
+  { titre = "Sorties deportees", champs = {
+    { cle = "sorties.distant.actif", libelle = "Satellites actifs", type = "booleen",
+      aide = "true = certaines faces sont portees par d'autres ordinateurs" },
+    { cle = "sorties.distant.protocole", libelle = "Protocole rednet", type = "texte" },
+    { cle = "sorties.distant.coteModem", libelle = "Face du modem", type = "choix",
+      options = CHOIX_COTES, optionnel = true,
+      aide = "vide = detection auto (courte portee d'abord)" },
+    { cle = "sorties.distant.delaiSatellite", libelle = "Silence tolere (satellite)",
+      type = "nombre", aide = "s sans trame avant qu'un satellite se neutralise" },
+    { cle = "sorties.distant.surveillance", libelle = "Ecouter les acquittements",
+      type = "booleen" },
+    { cle = "sorties.distant.delaiPerte", libelle = "Silence tolere (maitre)",
+      type = "nombre", aide = "s sans acquittement avant de declarer un satellite muet" },
+    { cle = "sorties.distant.secoursSiMuet", libelle = "Secours si satellite muet",
+      type = "booleen" },
+  }},
+
+  { titre = "Carburant", champs = {
+    { cle = "carburant.actif", libelle = "Surveillance active", type = "booleen" },
+    { cle = "carburant.source", libelle = "Source", type = "choix",
+      options = { "aucun", "peripherique", "redstone" } },
+    { cle = "carburant.peripherique.nom", libelle = "Jauge : peripherique", type = "texte" },
+    { cle = "carburant.peripherique.methode", libelle = "Jauge : methode", type = "texte",
+      aide = "tanks = API fluides generique de CC: Tweaked" },
+    { cle = "carburant.peripherique.fluide", libelle = "Jauge : fluide", type = "texte",
+      aide = "vide = tous les fluides du reservoir" },
+    { cle = "carburant.peripherique.max", libelle = "Jauge : capacite", type = "nombre",
+      aide = "a renseigner si le peripherique ne la donne pas" },
+    { cle = "carburant.redstone.cote", libelle = "Redstone : face", type = "choix",
+      options = CHOIX_COTES },
+    { cle = "carburant.redstone.ordinateur", libelle = "Redstone : satellite",
+      type = "nombre" },
+    { cle = "carburant.redstone.mode", libelle = "Redstone : mode", type = "choix",
+      options = { "analogique", "signal" },
+      aide = "analogique = jauge 0-15 ; signal = allume signifie bas" },
+    { cle = "carburant.redstone.inverse", libelle = "Redstone : inverse", type = "booleen" },
+    { cle = "carburant.redstone.max", libelle = "Redstone : niveau plein", type = "nombre" },
+    { cle = "carburant.seuilBas", libelle = "Seuil de retour", type = "nombre",
+      aide = "fraction du plein : en dessous, retour a la station" },
+    { cle = "carburant.seuilPlein", libelle = "Seuil de depart", type = "nombre" },
+    { cle = "carburant.periode", libelle = "Periode de lecture", type = "nombre" },
+    { cle = "carburant.coteRetour", libelle = "Entree : forcer le retour",
+      type = "choix", options = CHOIX_COTES, optionnel = true },
+    { cle = "carburant.coteDepart", libelle = "Entree : liberer", type = "choix",
+      options = CHOIX_COTES, optionnel = true },
+    { cle = "carburant.coteAmarre", libelle = "Sortie : amarre", type = "choix",
+      options = CHOIX_COTES, optionnel = true },
+    { cle = "carburant.ordinateurOrdres", libelle = "Satellite des ordres", type = "nombre" },
+  }},
+
+  { titre = "Amarrage", champs = {
+    { cle = "carburant.amarrage.altitudeApproche", libelle = "Altitude d'approche",
+      type = "nombre", aide = "hauteur tenue a la verticale avant de descendre" },
+    { cle = "carburant.amarrage.toleranceHorizontale", libelle = "Tolerance horizontale",
+      type = "nombre", aide = "plus fine que ce que le vehicule tient = amarrage impossible" },
+    { cle = "carburant.amarrage.toleranceAltitude", libelle = "Tolerance altitude",
+      type = "nombre" },
+    { cle = "carburant.amarrage.toleranceCap", libelle = "Tolerance cap", type = "nombre",
+      aide = "ignoree a l'arret sans capteur de cap" },
+    { cle = "carburant.amarrage.dureeArrivee", libelle = "Duree d'arrivee", type = "nombre" },
+    { cle = "carburant.amarrage.vitesseApproche", libelle = "Vitesse d'approche",
+      type = "nombre" },
+    { cle = "carburant.amarrage.delaiMax", libelle = "Delai max de manoeuvre",
+      type = "nombre" },
+    { cle = "carburant.amarrage.attenteMax", libelle = "Attente max du plein",
+      type = "nombre" },
+    { cle = "carburant.amarrage.maintenirPendantAttente", libelle = "Tenir la position amarre",
+      type = "booleen", aide = "false = moteurs coupes une fois amarre" },
+  }},
 
   { titre = "Mission", champs = {
     { cle = "mission.reprendreApresRedemarrage", libelle = "Reprise apres redemarrage",
@@ -919,14 +1034,26 @@ function interface.configurer(options)
     -- Une liste de choix vide (aucun inventaire detecte, par exemple) bascule
     -- en saisie libre : mieux vaut pouvoir taper le nom que rester bloque.
     if champ.type == "choix" and #(champ.options or {}) > 0 then
+      -- Un champ OPTIONNEL doit pouvoir revenir a vide : une face de redstone
+      -- non cablee vaut nil, et un cycle qui ne propose que des faces
+      -- enfermerait l'utilisateur dans un cablage qu'il n'a pas.
       local options = champ.options
-      local suivant = 1
-      for i, option in ipairs(options) do
-        if option == tostring(valeur) then suivant = i % #options + 1 break end
+      local cycle = options
+      if champ.optionnel then
+        cycle = { VIDE }
+        for _, option in ipairs(options) do cycle[#cycle + 1] = option end
       end
-      poser(config, champ, options[suivant])
+      local suivant = 1
+      for i, option in ipairs(cycle) do
+        local courant = (valeur == nil) and VIDE or tostring(valeur)
+        if option == courant then suivant = i % #cycle + 1 break end
+      end
+      local choisi = cycle[suivant]
+      if choisi == VIDE then choisi = nil end
+      poser(config, champ, choisi)
       etat.modifie = true
-      signaler(champ.libelle .. " -> " .. tostring(options[suivant]), PALETTE.bon)
+      signaler(champ.libelle .. " -> " .. (choisi == nil and "(aucune)" or tostring(choisi)),
+        PALETTE.bon)
       return
     end
 

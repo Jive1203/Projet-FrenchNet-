@@ -340,23 +340,6 @@ return {
         amplitude = 127,   -- ecart maximal de part et d'autre
       },
 
-      -- VARIANTE : bruleurs pilotes UN PAR UN (mode "reparti"). A poids egaux,
-      -- la demande est etalee sur tous les bruleurs, ce qui evite de ne
-      -- chauffer qu'un cote du ballon. Attention a la finesse : quatre
-      -- bruleurs 0-15 donnent 61 positions, la contre 256 pour le couple
-      -- grossier/fin ci-dessus. Ne vaut le cablage que si chaque bruleur
-      -- accepte lui aussi une intensite, et pour la redondance.
-      --
-      -- vertical = {
-      --   mode = "reparti",
-      --   sorties = {
-      --     { cote = "top" }, { cote = "bottom" },
-      --     { cote = "left", ordinateur = 12 },   -- une face sur un satellite
-      --     { cote = "right", ordinateur = 12 },
-      --   },
-      --   neutre = 30, amplitude = 30,   -- en unites de la somme (0 a 60)
-      -- },
-
       lacet    = { mode = "bipolaire", cotePositif = "right", coteNegatif = "left",
                    amplitude = 15, seuil = 0.08 },
       lateral  = { mode = "aucun" },

@@ -244,6 +244,8 @@ interface journal    -- consultation du journal
 
 **Écran de configuration** — barre de titre, panneau de sections à gauche, champs à droite, aide contextuelle et barre d'état. Clavier (flèches, `Tab`, `Entrée`, `S` sauvegarder, `J` journal, `Q` quitter) **et souris** sur les ordinateurs avancés. La saisie remplace la valeur à la première frappe. Une configuration invalide n'est pas enregistrée sans confirmation, et l'anomalie est affichée en clair. La section *Ravitaillement* est marquée d'un cadenas : consultable, non modifiable.
 
+**Toute la configuration s'édite ici** — y compris les réglages ajoutés en dernier : *Hauteur sol* (le radar et sa source), *Enveloppe sol* (le bridage à basse altitude), *Sorties déportées* (les satellites redstone), *Carburant* (la jauge et ses seuils) et *Amarrage* (la manœuvre de ravitaillement). Un champ facultatif — une face de redstone non câblée, par exemple — se remet à vide en continuant à faire défiler les choix : `(aucune)` fait partie du cycle.
+
 **Section *Conteneurs*** — seule section à longueur variable, juste avant le cadenas du ravitaillement. Elle décrit les conteneurs embarqués d'un véhicule cargo : périphérique, rôle et position par rapport au centre. C'est la page que consomme le système de livraison FrenchNet ; un véhicule sans soute la laisse simplement vide.
 
 | Champ | Rôle |
