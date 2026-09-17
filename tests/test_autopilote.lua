@@ -1138,6 +1138,27 @@ do
   verifier("test guide : les deux sens sont annonces a l'operateur",
     banc6.ecranTexte():find("avance (nez en avant)", 1, true) ~= nil
     and banc6.ecranTexte():find("recule", 1, true) ~= nil)
+
+  -- Cablage LIVRE : deux axes a crans. Un axe a crans ne repond pas a une
+  -- commande, il change de rapport -- et il passe d'abord plusieurs secondes
+  -- a se caler. Sans affichage, l'operateur croit que rien ne marche.
+  local banc7 = monter({ budget = 300, sansInstance = true })
+  banc7.taper("tab")
+  banc7.taper("q")
+  banc7.charger(SRC .. "/cablage.lua")
+  local ecran7 = banc7.ecranTexte()
+  verifier("boite a rapports : le calage est annonce a l'operateur",
+    ecran7:find("CALAGE EN COURS", 1, true) ~= nil,
+    ecran7:sub(1, 200))
+
+  -- Une fois cale, c'est le rapport engage qui doit s'afficher.
+  local banc8 = monter({ budget = 600, sansInstance = true })
+  banc8.taperApres(40, "tab")   -- 40 s simulees : le calage a largement abouti
+  banc8.taperApres(41, "q")
+  banc8.charger(SRC .. "/cablage.lua")
+  verifier("boite a rapports : le rapport engage est affiche une fois cale",
+    banc8.ecranTexte():find("rapport N", 1, true) ~= nil,
+    banc8.ecranTexte():sub(1, 200))
 end
 
 --------------------------------------------------------------------------------
@@ -1435,6 +1456,35 @@ do
     verifier("gains de maintien plus fermes que ceux de croisiere",
       propositions.gains.avance.maintien.kp > propositions.gains.avance.croisiere.kp)
     verifier("compte rendu lisible produit", #detail >= 3, "#" .. #detail)
+
+    -- Un axe A CRANS ne change que d'un cran toutes les quelques periodes :
+    -- c'est du temps mort, pas de l'inertie. Une boucle reglee comme si
+    -- l'actionneur etait continu oscille au lieu de converger. La calibration
+    -- doit donc proposer des gains PLUS DOUX pour le meme vehicule.
+    do
+      local continu = { sorties = { axes = {
+        avance = { mode = "analogique", cote = "front" } } },
+        gps = { intervalle = 0.4 } }
+      local crans = { sorties = { axes = {
+        avance = { mode = "boite_vitesses", cyclesEntreRapports = 2,
+                   cyclesImpulsion = 1,
+                   rapports = { { nom = "N", effet = 0 }, { nom = "1", effet = 1 } } } } },
+        gps = { intervalle = 0.4 } }
+      local pContinu = calibration2.proposer(resultats, continu)
+      local pCrans   = calibration2.proposer(resultats, crans)
+      verifier("axe a crans : boucle de position plus douce",
+        pCrans.gains.avance.position.kp < pContinu.gains.avance.position.kp,
+        string.format("%.3f contre %.3f", pCrans.gains.avance.position.kp,
+          pContinu.gains.avance.position.kp))
+      verifier("axe a crans : boucle interne plus douce",
+        pCrans.gains.avance.croisiere.kp < pContinu.gains.avance.croisiere.kp,
+        string.format("%.3f contre %.3f", pCrans.gains.avance.croisiere.kp,
+          pContinu.gains.avance.croisiere.kp))
+      local _, detailCrans = calibration2.proposer(resultats, crans)
+      local texte = table.concat(detailCrans, "\n")
+      verifier("le temps mort de l'actionneur est annonce",
+        texte:find("A CRANS", 1, true) ~= nil, texte)
+    end
 
     calibration2.appliquer(ap2.config, propositions)
     verifier("configuration vive mise a jour",

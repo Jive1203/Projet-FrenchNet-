@@ -110,13 +110,15 @@ end)
 ### Ce qu'il fait tout seul
 
 - **Profil de vol vertical** : montée verticale au départ, transit en palier, arrivée à l'aplomb puis **descente verticale** — jamais d'approche en pente au-dessus du relief.
-- **Actionneurs réels** : boîte séquentielle à impulsions (R/N/1-5, avec calage au démarrage), double signal grossier/fin, redstone continu ou périphérique — au choix, axe par axe.
+- **Actionneurs réels** : boîtes séquentielles à impulsions — une boîte d'avance (R/N/1-5) et une boîte de lacet symétrique (3 crans par bord), toutes deux calées au démarrage —, double signal grossier/fin pour la montée, redstone continu ou périphérique. Au choix, axe par axe.
+- **Il refuse de démarrer sur un câblage impossible** : deux sorties sur la même face (un ordinateur n'en a que six), une tolérance plus fine que ce qu'un cran peut corriger. Ces deux erreurs ne produisent aucun symptôme lisible en vol — le véhicule part tout droit sans tourner, ou n'arrive jamais — d'où le contrôle au démarrage.
 - **Asservissement en cascade** sur quatre axes (altitude, cap, avance, dérive) : une boucle de position calcule une vitesse cible, une boucle de vitesse produit la commande — le véhicule ralentit progressivement au lieu de dépasser puis revenir.
 - **PID robustes** : intégrale bornée et gelée en saturation, dérivée sur la mesure, limitation de pente, temps réellement écoulé.
 - **Repli automatique en zone morte** si un axe devient instable, avec hystérésis, journalisation et forçage manuel.
 - **Arrivée** validée seulement après une durée continue dans les marges, puis **maintien de position** avec des gains plus serrés.
 - **Décalages** du point de référence GPS et du point de dépôt, tournés selon le cap : le pilotage vise le centre réel, et la charge tombe sur la cible.
-- **Robustesse** : perte GPS → estime puis mode secours, plantage → relance, redémarrage → relecture de la position avant tout mouvement, journal détaillé à chaque étape.
+- **Robustesse** : perte GPS → estime puis mode secours, plantage → relance, redémarrage → relecture de la position avant tout mouvement, journal détaillé à chaque étape. Une cible dépassée sans marche arrière fait demi-tour au lieu d'attendre le délai de mission ; une manœuvre d'amarrage ratée est reprise depuis l'altitude d'approche.
+- **Éprouvé en boucle fermée sur le câblage réel** : le banc reconstruit la poussée à partir des niveaux redstone réellement émis, comme le ferait le montage Create. Seize approches d'amarrage depuis seize directions, six montages différents : **16/16 partout**.
 
 ### Réglage
 

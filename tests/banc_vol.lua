@@ -164,6 +164,7 @@ function M.creer(options)
     minuteurs = {},
     prochainMinuteur = 0,
     gpsActif = true,
+    clavierDiffere = {},
     bruitGps = options.bruitGps or 0.15,
     graine = options.graine or 20260826,
     budget = options.budget or 600,
@@ -192,6 +193,17 @@ function M.creer(options)
       etat.vehicule.avancer(pas)
       etat.horloge = etat.horloge + pas
       restant = restant - pas
+      -- Touches DIFFEREES : une interface qui doit tourner un moment avant de
+      -- repondre (une boite a rapports qui se cale) ne peut pas etre pilotee
+      -- par une file de touches consommee d'un bloc, sans qu'une seule seconde
+      -- simulee ne s'ecoule.
+      for index = #etat.clavierDiffere, 1, -1 do
+        local prevu = etat.clavierDiffere[index]
+        if etat.horloge >= prevu.t then
+          etat.file[#etat.file + 1] = { "key", prevu.touche, n = 2 }
+          table.remove(etat.clavierDiffere, index)
+        end
+      end
     end
     if options.tracer then
       etat.trace[#etat.trace + 1] = {
@@ -564,6 +576,15 @@ function M.injecterRednet(expediteur, message, protocole)
 end
 
 --- Empile un relachement de touche (pilotage manuel).
+--- Empile une touche a delivrer apres 'delai' secondes SIMULEES. Le banc ne
+-- fait avancer son horloge que lorsque la file d'evenements est vide : une
+-- touche empilee d'avance arrive donc instantanement, ce qui ne convient pas
+-- aux interfaces qui ont besoin de temps pour repondre.
+function M.taperApres(delai, touche)
+  M.etat.clavierDiffere[#M.etat.clavierDiffere + 1] = {
+    t = M.etat.horloge + delai, touche = M.env.keys[touche] or touche }
+end
+
 function M.relacher(touche)
   M.env.os.queueEvent("key_up", M.env.keys[touche] or touche)
 end

@@ -180,7 +180,20 @@ local function dessiner()
         end
       end
     end
+
+    -- Un axe a crans ne repond pas a une commande, il change de RAPPORT : sans
+    -- l'afficher, l'operateur croit que rien ne se passe pendant que la boite
+    -- se cale, puis que sa touche n'a pas ete prise en compte.
+    local boites = sorties.rapports and sorties.rapports() or {}
+    local boite = boites[axe.cle]
+    if boite then
+      encre(boite.cale and colors.lime or colors.orange)
+      details = details .. (boite.cale
+        and string.format("[rapport %s]", tostring(boite.rapport))
+        or "[CALAGE EN COURS...]")
+    end
     ecrireA(13, y, details, largeur - 13)
+    encre(colors.lightGray)
     y = y + 1
   end
 

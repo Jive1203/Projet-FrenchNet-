@@ -139,16 +139,40 @@ local function analyser(echantillons, partRegime)
   return K, tau, nil
 end
 
+--- Retard PUR introduit par un actionneur a crans, en secondes. Un selecteur
+-- ne change que d'un cran toutes les cyclesEntreRapports + cyclesImpulsion
+-- periodes : ce n'est pas de l'inertie, c'est du temps mort, et une boucle
+-- plus vive que ce temps mort ne fait qu'osciller.
+local function retardActionneur(config, cleAxe)
+  local reglageAxe = ((config.sorties or {}).axes or {})[cleAxe]
+  if not reglageAxe or reglageAxe.mode ~= "boite_vitesses" then return 0 end
+  local cycles = math.max(1, math.floor(reglageAxe.cyclesEntreRapports or 2))
+    + math.max(1, math.floor(reglageAxe.cyclesImpulsion or 1))
+  return cycles * ((config.gps or {}).intervalle or 0.4)
+end
+
 --- Gains deduits du gain vehicule K et de son inertie tau.
-local function gainsDeduits(K, tau)
+-- @param retard temps mort de l'actionneur, en secondes (0 pour du continu).
+local function gainsDeduits(K, tau, retard)
   local amplitude = math.abs(K)
   if amplitude < 1e-6 then return nil end
+  -- Le temps mort s'ajoute a l'inertie du point de vue de la boucle : c'est
+  -- sur cette constante-la qu'il faut regler, pas sur la seule inertie.
+  local tauEffectif = tau + (retard or 0)
   local kp = 2 / amplitude
+  if retard and retard > 0 then
+    -- Un actionneur a crans ne delivre pas une commande continue : il saute
+    -- d'un palier a l'autre. On rend la boucle interne plus douce dans le
+    -- meme rapport que le temps mort allonge la reponse.
+    kp = kp * (tau / tauEffectif)
+  end
   return {
-    position  = 1 / (3 * tau),
+    position  = 1 / (3 * tauEffectif),
     kp = kp,
-    ki = kp / (3 * tau),
-    kd = kp * tau / 6,
+    ki = kp / (3 * tauEffectif),
+    kd = kp * tauEffectif / 6,
+    tauEffectif = tauEffectif,
+    retard = retard or 0,
   }
 end
 
@@ -311,8 +335,15 @@ function calibration.proposer(resultats, configActuelle, options)
       local vitesse = amplitude * marge
       propositions.vitesses[essai.reglage] = vitesse
 
-      local gains = gainsDeduits(resultat.K, resultat.tau)
+      local retard = retardActionneur(configActuelle or {}, essai.cle)
+      local gains = gainsDeduits(resultat.K, resultat.tau, retard)
       if gains then
+        if retard > 0 then
+          lignes[#lignes + 1] = string.format(
+            "%-12s axe A CRANS : %.1fs de temps mort ajoutes a l'inertie "
+            .. "mesuree (%.2fs) avant le calcul des gains",
+            essai.libelle, retard, resultat.tau)
+        end
         propositions.gains[essai.axeGains] = {
           position  = { kp = gains.position },
           croisiere = { kp = gains.kp, ki = gains.ki, kd = gains.kd },
